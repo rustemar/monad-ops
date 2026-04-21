@@ -1,0 +1,110 @@
+# nginx site for the monad-ops public dashboard.
+#
+# Terminates TLS, reverse-proxies to the Uvicorn app on
+# 127.0.0.1:8873. Intended for unauthenticated public access — the
+# internal :8879 entry point (with a subnet ACL) is a separate
+# server-block and deliberately NOT this file.
+#
+# What this server-block does differently from the internal one:
+#   - blocks /api/probes (leaks key-backup paths and nvme device
+#     names — acceptable internally, not publicly).
+#   - emits all security headers at the nginx layer because upstream
+#     Uvicorn does not set them.
+#
+# Cache-busting: CSS/JS assets carry a `?v=<git-short-sha>-<mtime>`
+# query string; nginx can cache them aggressively because the query
+# string changes on every deploy.
+#
+# --- Placeholders to fill in before installing ---
+#   <dashboard-domain>   e.g.  ops.example.com
+#   /etc/nginx/ssl/<cert>.pem       and <key>.key — whatever cert
+#     you issued for <dashboard-domain>.
+#
+# Install:
+#   sudo cp systemd/nginx-ops-dashboard.conf.example \
+#     /etc/nginx/sites-available/<dashboard-domain>
+#   # then fill in <dashboard-domain> inside the file
+#   sudo ln -s /etc/nginx/sites-available/<dashboard-domain> \
+#     /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Pre-req: DNS A (or CNAME) record `<dashboard-domain>` pointing at
+# this host's public IP.
+
+# HTTP → HTTPS redirect.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name <dashboard-domain>;
+    return 301 https://$host$request_uri;
+}
+
+# Main HTTPS server.
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name <dashboard-domain>;
+
+    ssl_certificate     /etc/nginx/ssl/<cert>.pem;
+    ssl_certificate_key /etc/nginx/ssl/<cert>.key;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+
+    # Security headers. Upstream Uvicorn does not emit any, so host nginx
+    # is the sole source — no duplication risk.
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options    "nosniff" always;
+    add_header X-Frame-Options           "DENY" always;
+    add_header Referrer-Policy           "no-referrer" always;
+    add_header Content-Security-Policy   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'" always;
+    add_header Permissions-Policy        "geolocation=(), microphone=(), camera=(), payment=()" always;
+
+    # Read-only dashboard; reject bodies larger than 64 KB.
+    client_max_body_size 64k;
+
+    # Small timeouts; dashboard is polling, not streaming.
+    proxy_read_timeout 30s;
+    proxy_send_timeout 30s;
+    proxy_connect_timeout 5s;
+
+    # --- Public blocks ---
+
+    # /api/probes leaks host paths (key backups, triedb device, mount
+    # points). Available on the internal :8879 endpoint; 404 here.
+    location = /api/probes {
+        return 404;
+    }
+
+    # --- Public endpoints ---
+
+    # Static assets — cache aggressively because the query param ?v=<sha>
+    # invalidates on every deploy.
+    location /static/ {
+        proxy_pass http://127.0.0.1:8873;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_valid 200 1h;
+        expires 1h;
+        add_header Cache-Control "public, max-age=3600, immutable";
+        # Security headers repeated — nginx drops inherited add_header in
+        # a location block if the location itself adds any.
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+        add_header X-Content-Type-Options    "nosniff" always;
+        add_header Referrer-Policy           "no-referrer" always;
+    }
+
+    # Everything else (dashboard HTML + JSON APIs).
+    location / {
+        proxy_pass http://127.0.0.1:8873;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

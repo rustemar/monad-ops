@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · API</title>
+    <meta name="description" content="Public REST API for Monad testnet operational telemetry — blocks, retries, alerts, contract rankings, epoch-window summaries.">
+    <meta name="theme-color" content="#0f1115">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <div class="brand">
+                <span class="logo">◆</span>
+                <span class="name">monad-ops</span>
+                <span class="sep">·</span>
+                <span class="node">API reference</span>
+            </div>
+            <div class="nav-links">
+                <a href="/">← dashboard</a>
+            </div>
+        </div>
+    </header>
+
+    <main class="api-docs">
+        <section class="card">
+            <h2>Public REST API</h2>
+            <p>
+                Read-only JSON endpoints over a single validator's execution-log telemetry.
+                All paths accept <code>GET</code>/<code>HEAD</code>/<code>OPTIONS</code> and set
+                <code>Access-Control-Allow-Origin: *</code> — external dashboards may fetch directly
+                from the browser.
+            </p>
+            <p class="hint-404">
+                Base URL for this instance: <code class="base-url">{{ base_url }}</code>
+            </p>
+            <ul class="api-notes">
+                <li>Responses are JSON except where noted. All timestamps are milliseconds since Unix epoch in UTC unless suffixed with <code>_sec</code>.</li>
+                <li><code>retry_pct</code> / <code>rtp</code> — fraction of a block's transactions that were re-executed during parallel consensus, as reported by <code>monad-execution</code>.</li>
+                <li>Rate-limit: 50 requests / 10 s per IP at the edge. Cache your client if you poll.</li>
+                <li>No auth. This is operational telemetry for one node — treat it as public data.</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Endpoints</h2>
+            <table class="api-table">
+                <thead>
+                    <tr><th>Path</th><th>Purpose</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>GET /api/state</code></td>
+                        <td>Live snapshot: uptime, blocks seen, rolling averages (1m/5m retry, TPS, gas), current epoch, reference-chain lag.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/blocks/sampled?from_ts_ms=&amp;to_ts_ms=&amp;points=300</code></td>
+                        <td>Server-aggregated time-series for charts. Returns ≤<code>points</code> bins regardless of span, so an arbitrary window is safe.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/blocks?limit=N</code></td>
+                        <td>Recent blocks from the in-memory buffer (last ~5 min). For historical blocks, use <code>window_summary</code> with <code>include_blocks=true</code>.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/contracts/top_retried?since_ts_ms=&amp;until_ts_ms=&amp;min_appearances=&amp;limit=</code></td>
+                        <td>Contracts ranked by appearance in blocks with <code>retry_pct&gt;0</code>. Reads the hourly rollup — sub-50 ms for any window up to the data-retention horizon.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/contracts/labels</code></td>
+                        <td>Human-name registry for known contracts (empty unless the operator has populated <code>labels.json</code>).</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/window_summary?from_ts_ms=&amp;to_ts_ms=&amp;top_contracts_limit=&amp;include_blocks=</code></td>
+                        <td>Single-call report. Default = aggregate metrics + top contracts, any span ≤ 30 days, ~3.6 kB. <code>include_blocks=true</code> adds per-block series; span capped at 2 h (one stress batch).</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/alerts?limit=N</code></td>
+                        <td>Recent in-memory alerts.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/alerts/history?from_ts_ms=&amp;to_ts_ms=&amp;severity=&amp;limit=</code></td>
+                        <td>Persisted alerts from SQLite. Filter by severity (<code>warn</code>/<code>critical</code>/<code>recovered</code>).</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/reorgs?limit=N</code></td>
+                        <td>All observed reorgs (same-block-number, different-block-id events), newest-first. Each row reconstructs both block_ids (<code>before</code> = original observation, <code>after</code> = winning fork) plus the reorged block's metrics.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/reorgs/{block_number}?window=N</code></td>
+                        <td>Forensic trace around a specific reorg — the reorged block plus <code>±window</code> neighbors (default 30, max 500). Returns chain-derived fields (block_number, block_id, timestamp_ms, tx_count, retried, retry_pct, gas_used). Add <code>&amp;level=full</code> to include local execution timing (tx_exec_us, commit_us, chunks) — useful for internal analysis. 404 if no reorg alert exists for this block.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/probes/public</code></td>
+                        <td>Sanitized host-probe status (service/key/disk/fd) — name, status, summary. Operator-sensitive details omitted.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /healthz</code></td>
+                        <td>Liveness — returns <code>{"ok": true}</code>.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </section>
+
+        <section class="card">
+            <h2>Examples</h2>
+            <p class="hint-404">Replace the base URL below with your own if running a fork.</p>
+
+            <div class="example">
+                <div class="example-label">Current retry rate (1 m / 5 m) + epoch progress</div>
+                <pre class="example-code"><code>curl -s <span class="u">{{ base_url }}</span>/api/state | jq '{rtp_1m, rtp_5m, epoch}'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Aggregate summary for the last 24 hours</div>
+                <pre class="example-code"><code>NOW=$(date +%s%3N)
+DAY=$((24 * 3600 * 1000))
+curl -s "<span class="u">{{ base_url }}</span>/api/window_summary?from_ts_ms=$((NOW - DAY))&amp;to_ts_ms=$NOW" \
+  | jq '.aggregate'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Post-event block trace for a 2-hour stress batch</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/window_summary\
+?from_ts_ms=1776531600000&amp;to_ts_ms=1776538800000\
+&amp;include_blocks=true&amp;top_contracts_limit=50" \
+  | jq '{agg: .aggregate, contracts: (.top_contracts|length), blocks: (.blocks|length)}'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Top retried contracts in the last hour</div>
+                <pre class="example-code"><code>SINCE=$(( $(date +%s%3N) - 3600000 ))
+curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_ts_ms=$SINCE&amp;limit=10" \
+  | jq '.rows[] | {addr: .to_addr, ret: .retried_blocks, rtp: .avg_rtp_of_blocks}'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Retry-rate chart data for a custom window (300 bins)</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/blocks/sampled\
+?from_ts_ms=1776531600000&amp;to_ts_ms=1776538800000&amp;points=300" \
+  | jq '.bins | length'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">All observed reorgs — compact index</div>
+                <pre class="example-code"><code>curl -s <span class="u">{{ base_url }}</span>/api/reorgs \
+  | jq '.reorgs[] | {n: .block_number, ts: .alert_ts_ms, tx: .block.tx_count, rtp: .block.retry_pct}'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Forensic trace around a specific reorg (±30 blocks)</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/reorgs/26543283?window=30" \
+  | jq '{before: .block_id_before, after: .block_id_after, neighbors: (.blocks|length)}'</code></pre>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Response shapes — selected fields</h2>
+
+            <h3 class="api-section"><code>/api/state</code></h3>
+            <ul class="api-fields">
+                <li><code>last_block</code> — most-recent block number seen on this node.</li>
+                <li><code>last_block_seen_ms</code> — wall-clock when the block landed in our tailer.</li>
+                <li><code>blocks_per_sec_1m</code>, <code>tx_per_sec_1m</code>, <code>gas_per_sec_1m</code> — 60 s moving averages.</li>
+                <li><code>rtp_avg_1m</code>, <code>rtp_avg_5m</code>, <code>rtp_max_1m</code> — retry-rate rolling stats (0–100).</li>
+                <li><code>tps_effective_peak_1m</code>, <code>gas_per_sec_effective_peak_1m</code> — peak per-block throughput, undiluted by idle gaps between blocks.</li>
+                <li><code>reorg_count</code>, <code>last_reorg_number</code>, <code>last_reorg_old_id</code>, <code>last_reorg_new_id</code> — chain-integrity counters.</li>
+                <li><code>epoch</code> — <code>{number, blocks_in, typical_length, eta_sec}</code>. <code>typical_length</code> is learned empirically from closed epochs.</li>
+            </ul>
+
+            <h3 class="api-section"><code>/api/window_summary</code> (aggregate tier)</h3>
+            <ul class="api-fields">
+                <li><code>window</code> — <code>{from_ts_ms, to_ts_ms, span_sec}</code>, echoed back.</li>
+                <li><code>aggregate.blocks</code> — total blocks in the window on this node.</li>
+                <li><code>aggregate.peak_rtp</code>, <code>avg_rtp</code> — retry percent, single-block peak and arithmetic mean.</li>
+                <li><code>aggregate.peak_tps</code>, <code>avg_tps</code> — effective TPS (peak is a single-block figure, avg is total_tx / span_sec).</li>
+                <li><code>aggregate.peak_gps</code>, <code>avg_gps</code> — effective gas-per-sec.</li>
+                <li><code>aggregate.total_gas</code>, <code>total_tx</code>, <code>total_retried</code>, <code>retried_fraction</code> — cumulative volumes.</li>
+                <li><code>top_contracts[]</code> — <code>{to_addr, label, blocks_appeared, retried_blocks, retried_ratio, avg_rtp_of_blocks, tx_count, total_gas}</code>. Ranked by <code>retried_blocks</code>.</li>
+                <li><code>blocks[]</code> — only when <code>include_blocks=true</code>. Compact keys: <code>n</code> (block_number), <code>t</code> (timestamp_ms), <code>tx</code>, <code>rt</code> (retried count), <code>rtp</code>, <code>gas</code>, <code>tpse</code> (effective TPS), <code>gpse</code> (effective gas/s).</li>
+            </ul>
+
+            <h3 class="api-section"><code>/api/blocks/sampled</code></h3>
+            <ul class="api-fields">
+                <li><code>bins[]</code> — time-ordered. Each bin carries <code>t</code> (first timestamp_ms in bin), <code>samples</code>, block-number range, and AVG / P95 / MAX for retry_pct plus AVG / MAX for TPS and gas — enough to chart without re-deriving.</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Caveats &amp; scope</h2>
+            <ul class="api-notes">
+                <li><strong>One-node view.</strong> All counters are what <em>this</em> node observed. Reorgs, stalls and retry rates at other validators may differ — use a reference RPC for chain-wide truth.</li>
+                <li><strong>Window contract-ranking precision.</strong> For <code>/api/contracts/top_retried</code> and <code>window_summary</code> spans &gt; 6 hours, the ranking is served from an hourly rollup with a <code>blocks_appeared ≥ 10</code> per-hour filter. Top-20 is identical to raw, top-100 preserves ~92 %. Shorter windows stay on the raw table for full sparse-contract precision.</li>
+                <li><strong>Data retention.</strong> Raw block storage is one-node-local. The operator may prune older data at any time — don't build on "this endpoint returns all history forever".</li>
+                <li><strong>Schema stability.</strong> Field names in this document are the intended contract. If you integrate, pin a git tag of the backing repo and re-test on minor-version bumps.</li>
+            </ul>
+            <p class="hint-404">
+                Source: <a href="https://github.com/rustemar/monad-ops" target="_blank" rel="noopener noreferrer">github.com/rustemar/monad-ops</a>.
+                Issues / PRs welcome.
+            </p>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <a href="/" class="footlink">← dashboard</a>
+        <span class="sep">·</span>
+        <a href="/alerts" class="footlink">alerts</a>
+        <span class="sep">·</span>
+        <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
+    </footer>
+</body>
+</html>

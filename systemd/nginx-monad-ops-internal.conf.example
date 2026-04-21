@@ -1,0 +1,66 @@
+# nginx template for internal (non-TLS) access to the monad-ops dashboard.
+# Listens on a dedicated port (8879) and reverse-proxies to the Uvicorn
+# server bound on 127.0.0.1:8873. Access is restricted by an IP allow-list
+# — there is no application-layer auth because the dashboard is read-only
+# and the ACL is sufficient for an internal admin endpoint.
+#
+# Use this file if you only need dashboard access from a fixed set of
+# operator IPs and don't want TLS / a public hostname. For a public,
+# TLS-terminated deployment see nginx-ops-dashboard.conf.example instead.
+#
+# --- Fill in before installing ---
+#   <operator-cidr>   — CIDR block or single IP you trust,
+#                       e.g. 203.0.113.0/24  or  203.0.113.42/32.
+#                       Add more `allow` lines if you need several.
+#
+# Install:
+#   sudo cp systemd/nginx-monad-ops-internal.conf.example \
+#     /etc/nginx/sites-available/monad-ops-internal
+#   # then replace <operator-cidr> with your own
+#   sudo ln -s /etc/nginx/sites-available/monad-ops-internal \
+#     /etc/nginx/sites-enabled/
+#   sudo nginx -t && sudo systemctl reload nginx
+#
+# Reach: http://<server-ip>:8879/
+
+server {
+    listen 8879;
+    listen [::]:8879;
+    server_name _;
+
+    # IP allow-list. Replace with your own CIDR(s).
+    allow <operator-cidr>;
+    allow 127.0.0.1;
+    deny all;
+
+    # Small timeouts; dashboard is polling endpoints, not streaming.
+    proxy_read_timeout 30s;
+    proxy_send_timeout 30s;
+    proxy_connect_timeout 5s;
+
+    # No request body from a read-only dashboard; cap anyway.
+    client_max_body_size 64k;
+
+    # Lightweight hardening.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "no-referrer" always;
+
+    location / {
+        proxy_pass http://127.0.0.1:8873;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Cache static assets briefly (safe — they rarely change and the
+    # page has no versioning on CSS/JS yet).
+    location /static/ {
+        proxy_pass http://127.0.0.1:8873;
+        proxy_cache_valid 200 60s;
+        expires 1m;
+        add_header Cache-Control "public, max-age=60";
+    }
+}
