@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · {{ node_name }}</title>
+    <meta name="description" content="Live operational view of a Monad testnet validator node — retry rates, chain integrity, alerts.">
+    <meta name="theme-color" content="#0f1115">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="monad-ops · {{ node_name }}">
+    <meta property="og:description" content="Live validator-node dashboard for Monad testnet.">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <h1 class="visually-hidden">monad-ops dashboard — {{ node_name }}</h1>
+            <div class="brand">
+                <span class="logo">◆</span>
+                <span class="name">monad-ops</span>
+                <span class="sep">·</span>
+                <span class="node" id="node-name">{{ node_name }}</span>
+            </div>
+            <div class="nav-links">
+                <a href="/alerts">alerts →</a>
+                <a class="status health-pill-link"
+                   id="health-pill"
+                   href="/alerts?severity=critical"
+                   aria-label="jump to critical incidents">
+                    <span class="dot"></span>
+                    <span class="label">connecting…</span>
+                </a>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section class="grid grid-4">
+            <div class="card kpi">
+                <div class="kpi-label">last block</div>
+                <div class="kpi-value" id="k-last-block">—</div>
+                <div class="kpi-sub" id="k-last-block-sub">last seen —</div>
+            </div>
+            <div class="card kpi">
+                <div class="kpi-label">blocks / sec (1m)</div>
+                <div class="kpi-value" id="k-bps">—</div>
+                <div class="kpi-sub" id="k-tx">— tx/s</div>
+            </div>
+            <div class="card kpi">
+                <div class="kpi-label">retry_pct avg (1m)</div>
+                <div class="kpi-value" id="k-rtp-1m">—</div>
+                <div class="kpi-sub" id="k-rtp-5m">5m avg —</div>
+            </div>
+            <div class="card kpi">
+                <div class="kpi-label">retry_pct peak (1m)</div>
+                <div class="kpi-value" id="k-rtp-peak">—</div>
+                <div class="kpi-sub">fraction of tx serialized</div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card epoch-card" id="epoch-card">
+                <div class="epoch-head">
+                    <div class="epoch-number-block">
+                        <div class="kpi-label">current epoch</div>
+                        <div class="epoch-number" id="k-epoch">—</div>
+                    </div>
+                    <div class="epoch-sub" id="k-epoch-sub">
+                        epoch probe warming up…
+                    </div>
+                </div>
+                <div class="epoch-progress" role="progressbar"
+                     aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                     id="k-epoch-progress">
+                    <div class="epoch-progress-fill" id="k-epoch-bar"></div>
+                </div>
+            </div>
+        </section>
+
+        <div class="legend" aria-label="threshold legend">
+            <div class="group">
+                <span class="name">retry_pct</span>
+                <span class="chip ok">&lt;25</span>
+                <span class="chip mid">&lt;65</span>
+                <span class="chip warn">&lt;75</span>
+                <span class="chip crit">≥75</span>
+            </div>
+            <div class="group">
+                <span class="name">blocks/s</span>
+                <span class="chip ok">≥2.0</span>
+                <span class="chip mid">≥1.5</span>
+                <span class="chip warn">≥0.5</span>
+                <span class="chip crit">&lt;0.5</span>
+            </div>
+            <div class="group">
+                <span class="name">last block age</span>
+                <span class="chip ok">&lt;3s</span>
+                <span class="chip warn">&lt;10s</span>
+                <span class="chip crit">≥10s</span>
+            </div>
+            <span class="note">thresholds calibrated from observed p50/p75/p95/p99 (history max retry_pct 92%)</span>
+        </div>
+
+        <section class="grid grid-2">
+            <div class="card kpi">
+                <div class="kpi-label">effective tps peak (1m)</div>
+                <div class="kpi-value" id="k-tps-eff-peak">—</div>
+                <div class="kpi-sub" id="k-tps-eff-avg">avg — tx/s intrablock</div>
+            </div>
+            <div class="card kpi">
+                <div class="kpi-label">gas/sec effective peak (1m)</div>
+                <div class="kpi-value" id="k-gas-eff-peak">—</div>
+                <div class="kpi-sub" id="k-gas-eff-peak-sub">intrablock gas throughput ceiling, absolute gas/sec</div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card kpi" id="lag-card">
+                <div class="kpi-label">tip lag vs reference RPC</div>
+                <div class="lag-row">
+                    <div class="lag-block">
+                        <span class="lag-label">local</span>
+                        <span class="lag-val" id="lag-local">—</span>
+                    </div>
+                    <span class="lag-sep">vs</span>
+                    <div class="lag-block">
+                        <span class="lag-label">reference</span>
+                        <span class="lag-val" id="lag-reference">—</span>
+                    </div>
+                    <div class="lag-block">
+                        <span class="lag-label">delta</span>
+                        <span class="lag-val" id="lag-delta">—</span>
+                    </div>
+                </div>
+                <div class="kpi-sub" id="lag-sub">
+                    compared against <a href="https://testnet-rpc.monad.xyz" class="footlink">testnet-rpc.monad.xyz</a> · answers "is my node lagging, or is the whole network halted?"
+                </div>
+            </div>
+        </section>
+
+        <div class="parallelism-note">
+            peak = Monad's execution speed during the busiest microsecond of that block —
+            not a sustained rate, but the real parallel-execution ceiling hit in practice.
+            Testnet cadence is thin (avg ~2.5 blk/s), so sustained tx/s (above) stays low
+            while intrablock peaks show the parallelism headroom.
+        </div>
+
+        <div class="charts-toolbar">
+            <span class="charts-toolbar-label">period</span>
+            <div class="charts-range" role="tablist" aria-label="chart time range">
+                <button type="button" class="range-btn" data-range="300">5m</button>
+                <button type="button" class="range-btn" data-range="900">15m</button>
+                <button type="button" class="range-btn" data-range="3600">1h</button>
+                <button type="button" class="range-btn" data-range="14400">4h</button>
+                <button type="button" class="range-btn" data-range="43200">12h</button>
+                <button type="button" class="range-btn" data-range="86400">24h</button>
+                <button type="button" class="range-btn" id="custom-toggle" aria-expanded="false">custom</button>
+            </div>
+            <span class="charts-toolbar-hint" id="charts-range-hint">—</span>
+            <!-- Custom-range panel: collapsed by default, toggled by the
+                 "custom" pill above. Two datetime-local inputs + an apply
+                 button; max span 7 days to keep server load bounded. Shown
+                 state is restored from URL on page load (?range=custom). -->
+            <div class="charts-custom hidden" id="charts-custom">
+                <label>from <span class="custom-tz" id="tz-label-from"></span>
+                    <input type="datetime-local" id="custom-from" step="1">
+                </label>
+                <label class="custom-to-wrap">to <span class="custom-tz" id="tz-label-to"></span>
+                    <input type="datetime-local" id="custom-to" step="1">
+                    <label class="custom-to-live">
+                        <input type="checkbox" id="custom-to-now">
+                        <span>now (live)</span>
+                    </label>
+                </label>
+                <button type="button" class="range-btn" id="custom-apply">apply</button>
+                <span class="charts-custom-msg" id="charts-custom-msg"></span>
+            </div>
+        </div>
+
+        <section class="grid grid-2 tall">
+            <div class="card chart" id="chart-rtp-card">
+                <div class="card-header">
+                    <span class="card-title">retry_pct</span>
+                    <span class="card-hint" id="chart-rtp-hint">per-block re-execution ratio</span>
+                </div>
+                <div class="chart-box"><canvas id="chart-rtp"></canvas></div>
+            </div>
+            <div class="card chart" id="chart-tx-card">
+                <div class="card-header">
+                    <span class="card-title">tx/block</span>
+                    <span class="card-hint" id="chart-tx-hint">load per block</span>
+                </div>
+                <div class="chart-box"><canvas id="chart-tx"></canvas></div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card chart" id="chart-exec-card">
+                <div class="card-header">
+                    <span class="card-title">block execution time breakdown</span>
+                    <span class="card-hint" id="chart-exec-hint">microseconds per phase · stacked</span>
+                </div>
+                <div class="chart-box tall"><canvas id="chart-exec"></canvas></div>
+                <div class="chart-legend-inline">
+                    <span class="swatch" data-phase="sr"></span><span>state_reset</span>
+                    <span class="swatch" data-phase="te"></span><span>tx_exec</span>
+                    <span class="swatch" data-phase="cm"></span><span>commit</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card" id="probes-card">
+                <div class="card-header">
+                    <span class="card-title">host probes</span>
+                    <span class="card-hint" id="probes-hint">periodic local health checks · services · disk · fd limits</span>
+                </div>
+                <ul class="probes" id="probes-list">
+                    <li class="empty">probes running…</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card" id="integrity-card">
+                <div class="card-header">
+                    <span class="card-title">chain integrity</span>
+                    <span class="card-hint" id="integrity-hint">reorg detector · invariant check</span>
+                </div>
+                <div class="integrity-body" id="integrity-body">
+                    <div class="integrity-counter">
+                        <span class="integrity-num" id="integrity-count">—</span>
+                        <span class="integrity-label" id="integrity-label">reorgs observed since process start</span>
+                    </div>
+                    <div class="integrity-detail" id="integrity-detail">—</div>
+                </div>
+                <div class="integrity-note">
+                    A reorg means the same block number was seen with two different
+                    block_ids — a chain rewrite. On Monad's HotStuff-2 consensus this
+                    should never happen in healthy conditions (finality is deterministic).
+                    A non-zero value indicates either a network-wide safety violation or
+                    local state corruption on this node. "0" is the expected invariant;
+                    this panel exists to prove it's holding.
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card" id="contracts-card">
+                <div class="card-header">
+                    <span class="card-title">top high-conflict contracts</span>
+                    <span class="card-hint" id="contracts-hint">ranked by re-execution ratio · —</span>
+                </div>
+                <div class="contracts-controls">
+                    <label>window
+                        <select id="contracts-window">
+                            <option value="0">all time</option>
+                            <option value="3600" selected>last hour</option>
+                            <option value="86400">last 24h</option>
+                        </select>
+                    </label>
+                    <label>min appearances
+                        <select id="contracts-min">
+                            <option>3</option>
+                            <option selected>5</option>
+                            <option>10</option>
+                            <option>25</option>
+                        </select>
+                    </label>
+                </div>
+                <table class="contracts" id="contracts-table">
+                    <thead>
+                        <tr>
+                            <th scope="col">contract</th>
+                            <th scope="col" class="num">blocks</th>
+                            <th scope="col" class="num">retried</th>
+                            <th scope="col" class="bar-col">retried ratio</th>
+                            <th scope="col" class="num">avg rtp</th>
+                            <th scope="col" class="num">tx</th>
+                        </tr>
+                    </thead>
+                    <tbody id="contracts-body">
+                        <tr class="empty"><td colspan="6">collecting enrichment data…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card" id="incidents-card">
+                <div class="card-header">
+                    <span class="card-title">critical incidents</span>
+                    <span class="card-hint" id="incidents-hint">assertions · panics · chunk exhaustion · critical probes</span>
+                </div>
+                <ul class="incidents" id="incidents-list">
+                    <li class="empty-ok">● clear — no critical events in buffer</li>
+                </ul>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">recent alerts</span>
+                    <span class="card-hint">
+                        <span id="alerts-count">0</span> active ·
+                        <a href="/alerts" class="footlink">full history →</a>
+                    </span>
+                </div>
+                <ul class="alerts" id="alerts-list">
+                    <li class="empty">no alerts in buffer</li>
+                </ul>
+            </div>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <span id="uptime">uptime —</span>
+        <span class="sep">·</span>
+        <span id="seen">0 blocks seen</span>
+        <span class="sep">·</span>
+        <span id="ts">—</span>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API docs →</a>
+        <span class="sep">·</span>
+        <span class="attribution">personal validator-node view · rustemar / hukutu4</span>
+    </footer>
+
+    <script src="/static/vendor/chart.umd.min.js?v={{ asset_version }}"></script>
+    <script src="/static/app.js?v={{ asset_version }}"></script>
+</body>
+</html>

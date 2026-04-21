@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "note": "Known contract labels for the monad-ops dashboard. Addresses are 0x-prefixed, lowercase, exactly 42 chars. Category is a short tag used for grouping in the UI. Community contributions welcome via PR.",
+  "labels": {}
+}

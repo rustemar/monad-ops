@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>alerts · monad-ops · {{ node_name }}</title>
+    <meta name="description" content="Persisted alert history for a Monad testnet validator node — filterable by window, severity, and rule.">
+    <meta name="theme-color" content="#0f1115">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="alerts · monad-ops · {{ node_name }}">
+    <meta property="og:description" content="Alert history for a Monad testnet validator node.">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <h1 class="visually-hidden">monad-ops alerts history — {{ node_name }}</h1>
+            <div class="brand">
+                <a href="/" class="brand-link">
+                    <span class="logo">◆</span>
+                    <span class="name">monad-ops</span>
+                </a>
+                <span class="sep">·</span>
+                <span class="node">alerts</span>
+            </div>
+            <div class="status" id="alerts-count-pill">
+                <span class="label">—</span>
+            </div>
+        </div>
+    </header>
+
+    <main>
+        <section class="grid grid-1">
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">alert history</span>
+                    <span class="card-hint" id="alerts-hint">persisted in sqlite; survives service restarts</span>
+                </div>
+                <div class="contracts-controls">
+                    <label>window
+                        <select id="alerts-window">
+                            <option value="3600">last hour</option>
+                            <option value="21600">last 6h</option>
+                            <option value="86400" selected>last 24h</option>
+                            <option value="604800">last 7d</option>
+                            <option value="0">all time</option>
+                        </select>
+                    </label>
+                    <label>severity
+                        <select id="alerts-severity">
+                            <option value="">all</option>
+                            <option value="critical">critical</option>
+                            <option value="warn">warn</option>
+                            <option value="info">info</option>
+                            <option value="recovered">recovered</option>
+                        </select>
+                    </label>
+                    <label>limit
+                        <select id="alerts-limit">
+                            <option>100</option>
+                            <option selected>500</option>
+                            <option>2000</option>
+                        </select>
+                    </label>
+                </div>
+                <table class="contracts history" id="history-table">
+                    <thead>
+                        <tr>
+                            <th scope="col" class="col-time">time</th>
+                            <th scope="col" class="col-sev">severity</th>
+                            <th scope="col" class="col-rule">rule</th>
+                            <th scope="col">detail</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body">
+                        <tr class="empty"><td colspan="4">loading…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <span><a href="/" class="footlink">← dashboard</a></span>
+        <span class="sep">·</span>
+        <span id="ts">—</span>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API docs →</a>
+        <span class="sep">·</span>
+        <span class="attribution">personal validator-node view · rustemar / hukutu4</span>
+    </footer>
+
+    <script src="/static/alerts.js?v={{ asset_version }}"></script>
+</body>
+</html>

@@ -1,0 +1,788 @@
+"""FastAPI app — serves the dashboard and JSON endpoints.
+
+Design notes:
+  * Read-only. Mutation of state happens only in the collector loop.
+  * No auth at the app layer — intended to sit behind nginx with
+    either a subnet-allow ACL (for an internal endpoint) or TLS on a
+    public hostname. Templates for both setups live under ``systemd/``.
+  * Templates live under ``monad_ops/dashboard/templates/``, static
+    files under ``monad_ops/dashboard/static/``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+import time
+from collections import OrderedDict
+from pathlib import Path
+
+from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from starlette.exceptions import HTTPException as StarletteHTTPException
+
+from monad_ops.config import Config
+from monad_ops.enricher import EnrichmentWorker
+from monad_ops.labels import ContractLabels
+from monad_ops.state import State
+
+_THIS_DIR = Path(__file__).parent
+_PKG_DIR = _THIS_DIR.parent
+_REPO_DIR = _PKG_DIR.parent
+_TEMPLATE_DIR = _PKG_DIR / "dashboard" / "templates"
+_STATIC_DIR = _PKG_DIR / "dashboard" / "static"
+
+
+def _asset_version() -> str:
+    """Version string for cache-busting CSS/JS via ?v=... query param.
+
+    Combines the short git HEAD hash (human-readable) with the newest
+    template/static mtime (catches uncommitted edits after a restart).
+    Either part can be missing; the result still changes whenever either
+    changes.
+    """
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(_REPO_DIR), "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+        git_part = out.decode().strip() or "dev"
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        git_part = "dev"
+    mtime = 0
+    for d in (_STATIC_DIR, _TEMPLATE_DIR):
+        for f in d.rglob("*"):
+            if f.is_file():
+                try:
+                    mtime = max(mtime, int(f.stat().st_mtime))
+                except OSError:
+                    continue
+    return f"{git_part}-{mtime}" if mtime else git_part
+
+
+_ASSET_VERSION = _asset_version()
+
+
+def build_app(
+    state: State,
+    config: Config,
+    enricher: EnrichmentWorker | None = None,
+    labels: ContractLabels | None = None,
+) -> FastAPI:
+    labels = labels or ContractLabels({})
+    app = FastAPI(title="monad-ops", docs_url=None, redoc_url=None, openapi_url=None)
+    # CORS — permissive for GET only. The API is read-only, there is no
+    # auth surface to protect, and the whole point of a public operations
+    # dashboard is to let other builders pull from it (Foundation
+    # retrospectives, community dashboards embedding our metrics). The
+    # CSP on the HTML response stays strict (default-src 'self') — only
+    # the JSON endpoints opt into cross-origin.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["GET", "HEAD", "OPTIONS"],
+        allow_headers=["*"],
+        max_age=600,
+    )
+    templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # Generic TTL cache + in-flight dedup. Used for the two heavy
+    # aggregates — top_retried (15s TTL, 4-sec query) and blocks/sampled
+    # (dynamic 2–15s TTL, ~100-300ms query on 24h windows). Both share
+    # the same shape: quantize-key → single-SQL-per-window → N viewers
+    # collapse to 1 SQL per TTL interval.
+    #
+    # Bounded size to prevent unchecked growth: quantize-keys rotate
+    # every few seconds, so over hours an unbounded dict would accumulate
+    # thousands of stale entries even though each is individually small.
+    # A 128-entry cap + FIFO eviction keeps memory predictable; hot keys
+    # are refreshed in-place so they never age out.
+    _cache_store: dict[str, OrderedDict[tuple, tuple[float, object]]] = {}
+    _cache_inflight: dict[str, dict[tuple, asyncio.Future]] = {}
+    _CACHE_MAX_ENTRIES = 128
+
+    async def _cached(bucket: str, ttl_sec: float, cache_key: tuple, loader):
+        store = _cache_store.setdefault(bucket, OrderedDict())
+        inflight = _cache_inflight.setdefault(bucket, {})
+        now = time.monotonic()
+        entry = store.get(cache_key)
+        if entry and (now - entry[0]) < ttl_sec:
+            # Move-to-end marks this key recently used (LRU-ish).
+            store.move_to_end(cache_key)
+            return entry[1]
+        pending = inflight.get(cache_key)
+        if pending is not None:
+            return await pending
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        inflight[cache_key] = fut
+        try:
+            value = await loader()
+            store[cache_key] = (time.monotonic(), value)
+            store.move_to_end(cache_key)
+            # Evict oldest entries once over the cap. Bounded to a handful
+            # of pops even in pathological traffic, so the eviction loop
+            # doesn't stall the event loop.
+            while len(store) > _CACHE_MAX_ENTRIES:
+                store.popitem(last=False)
+            fut.set_result(value)
+            return value
+        except Exception as e:
+            fut.set_exception(e)
+            raise
+        finally:
+            inflight.pop(cache_key, None)
+
+    # Prewarm helper removed — since the top_retried read path moved to
+    # the contract_hour rollup (sub-50 ms for 24 h), keeping an extra
+    # TTL-cache warmer would just duplicate hot data already served by
+    # the rollup + 15 s cache. The cli.py warm_top_retried_shapes task
+    # is likewise no longer registered.
+
+    @app.get("/api/state")
+    async def api_state() -> JSONResponse:
+        snap = state.snapshot()
+        return JSONResponse({
+            "node_name": config.node.name,
+            "started_at": snap.started_at,
+            "uptime_sec": snap.uptime_sec,
+            "blocks_seen": snap.blocks_seen,
+            "last_block": snap.last_block,
+            "last_block_seen_ms": snap.last_block_seen_ms,
+            "blocks_per_sec_1m": snap.blocks_per_sec_1m,
+            "rtp_avg_1m": snap.rtp_avg_1m,
+            "rtp_avg_5m": snap.rtp_avg_5m,
+            "rtp_max_1m": snap.rtp_max_1m,
+            "tx_per_sec_1m": snap.tx_per_sec_1m,
+            "gas_per_sec_1m": snap.gas_per_sec_1m,
+            "tps_effective_peak_1m": snap.tps_effective_peak_1m,
+            "tps_effective_avg_1m": snap.tps_effective_avg_1m,
+            "gas_per_sec_effective_peak_1m": snap.gas_per_sec_effective_peak_1m,
+            "reorg_count": snap.reorg_count,
+            "last_reorg_number": snap.last_reorg_number,
+            "last_reorg_old_id": snap.last_reorg_old_id,
+            "last_reorg_new_id": snap.last_reorg_new_id,
+            "last_reorg_ts_ms": snap.last_reorg_ts_ms,
+            "reference_block": snap.reference_block,
+            "reference_checked_ms": snap.reference_checked_ms,
+            "reference_error": snap.reference_error,
+            "reference_local_at_sample": snap.reference_local_at_sample,
+            "current_alerts": snap.current_alerts,
+            "epoch": {
+                "number": snap.epoch_number,
+                "blocks_in": snap.epoch_blocks_in,
+                "typical_length": snap.epoch_typical_length,
+                "eta_sec": snap.epoch_eta_sec,
+            },
+        })
+
+    @app.get("/api/blocks")
+    async def api_blocks(
+        limit: int = Query(300, ge=1, le=2000),
+    ) -> JSONResponse:
+        blocks = state.recent_blocks(limit=limit)
+        return JSONResponse([
+            {
+                "n": b.block_number,
+                "t": b.timestamp_ms,
+                "tx": b.tx_count,
+                "rt": b.retried,
+                "rtp": b.retry_pct,
+                "gas": b.gas_used,
+                "tot_us": b.total_us,
+                # Execution-time components for the breakdown chart.
+                # Keys kept short to hold the payload compact — the
+                # dashboard polls /api/blocks every 10s with limit=300.
+                "sr_us": b.state_reset_us,
+                "te_us": b.tx_exec_us,
+                "cm_us": b.commit_us,
+                "tps_eff": b.tps_effective,
+            }
+            for b in blocks
+        ])
+
+    @app.get("/api/blocks/sampled")
+    async def api_blocks_sampled(
+        from_ts_ms: int = Query(..., ge=0),
+        to_ts_ms: int = Query(..., ge=0),
+        points: int = Query(300, ge=10, le=2000),
+    ) -> JSONResponse:
+        """Downsampled block series for dashboard charts.
+
+        Returns at most ``points`` bins across the [from, to] window,
+        aggregated server-side. Designed to back the period selector
+        (5m / 15m / 1h / 4h / 24h / custom) so a chart never renders
+        more than ~300 datapoints regardless of how large the window
+        is — Chart.js stays responsive, network payloads stay small.
+
+        Wrapped in to_thread: large windows hit the blocks index but
+        the aggregation still walks many rows.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if to_ts_ms <= from_ts_ms:
+            return JSONResponse(
+                {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
+            )
+        # Hard cap on span to stop someone from asking for a 30-day scan
+        # (would pull millions of blocks into a single GROUP BY even with
+        # the index). 7 days matches the client's max span.
+        MAX_SPAN_MS = 7 * 86400 * 1000
+        if (to_ts_ms - from_ts_ms) > MAX_SPAN_MS:
+            return JSONResponse(
+                {"error": "span too large (max 7 days)"}, status_code=400
+            )
+        # Dynamic TTL + quantization: staleness tolerance scales with
+        # bin size. A 5m chart has 1-second bins — user expects near-
+        # real-time, so TTL 2s. A 24h chart has 5-minute bins — another
+        # 15 seconds of latency is imperceptible. Without quantization
+        # each viewer's `Date.now()` is a unique ts, defeating cache
+        # between users. Match quantization step to TTL.
+        span_ms = to_ts_ms - from_ts_ms
+        bin_ms = max(1, span_ms // max(1, min(points, 2000)))
+        ttl_sec = max(2.0, min(bin_ms / 1000 / 3, 15.0))
+        step = int(ttl_sec * 1000)
+        cache_key = (
+            (from_ts_ms // step) * step,
+            (to_ts_ms // step) * step,
+            int(points),
+        )
+        async def _load():
+            bins = await asyncio.to_thread(
+                state.storage.sampled_blocks,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                target_points=points,
+            )
+            return {
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+                "bin_ms": span_ms // max(1, min(points, len(bins) if bins else points)),
+                "bins": bins,
+            }
+        payload = await _cached("sampled", ttl_sec, cache_key, _load)
+        return JSONResponse(payload)
+
+    @app.get("/api/blocks/range")
+    async def api_blocks_range(
+        from_block: int | None = Query(None, ge=0),
+        to_block: int | None = Query(None, ge=0),
+        from_ts_ms: int | None = Query(None, ge=0),
+        to_ts_ms: int | None = Query(None, ge=0),
+        limit: int = Query(5000, ge=1, le=50_000),
+    ) -> JSONResponse:
+        """Historical block query backed by persistent storage.
+
+        Use for post-event analysis (e.g. querying just the stress-test
+        window by block_number or ms timestamp). Returns an empty list
+        if persistence is disabled.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        blocks = state.storage.load_blocks_range(
+            from_block=from_block,
+            to_block=to_block,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+            limit=limit,
+        )
+        return JSONResponse({
+            "count": len(blocks),
+            "blocks": [
+                {
+                    "n": b.block_number,
+                    "t": b.timestamp_ms,
+                    "tx": b.tx_count,
+                    "rt": b.retried,
+                    "rtp": b.retry_pct,
+                    "gas": b.gas_used,
+                    "tot_us": b.total_us,
+                    "tpse": b.tps_effective,
+                    "gpse": b.gas_per_sec_effective,
+                }
+                for b in blocks
+            ],
+        })
+
+    @app.get("/api/alerts")
+    async def api_alerts(
+        limit: int = Query(50, ge=1, le=200),
+    ) -> JSONResponse:
+        alerts = state.recent_alerts_with_ts(limit=limit)
+        return JSONResponse([
+            {
+                "rule": a.rule,
+                "severity": a.severity.value,
+                "title": a.title,
+                "detail": a.detail,
+                "ts_ms": int(ts * 1000),
+            }
+            for a, ts in alerts
+        ])
+
+    @app.get("/api/alerts/history")
+    async def api_alerts_history(
+        from_ts_ms: int | None = Query(None, ge=0),
+        to_ts_ms: int | None = Query(None, ge=0),
+        severity: str | None = Query(None),
+        limit: int = Query(500, ge=1, le=5000),
+    ) -> JSONResponse:
+        """Historical alerts from persistent storage, filterable.
+
+        Unlike /api/alerts (in-memory tail, cleared on restart), this
+        reads the sqlite `alerts` table with optional ts/severity
+        filters. Returns newest-first.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        rows = state.storage.load_alerts_range(
+            from_ts=(from_ts_ms / 1000.0) if from_ts_ms is not None else None,
+            to_ts=(to_ts_ms / 1000.0) if to_ts_ms is not None else None,
+            severity=severity,
+            limit=limit,
+        )
+        return JSONResponse({
+            "count": len(rows),
+            "alerts": [
+                {
+                    "id": r.id,
+                    "ts_ms": int(r.ts * 1000),
+                    "rule": r.rule,
+                    "severity": r.severity.value,
+                    "key": r.key,
+                    "title": r.title,
+                    "detail": r.detail,
+                }
+                for r in rows
+            ],
+        })
+
+    # Fields kept in the ``public`` variant of reorg traces. Anything
+    # omitted is local-node performance telemetry (tx_exec_us,
+    # total_us, active_chunks, …) that leaks hardware characteristics
+    # and is not part of the chain itself. The public set covers
+    # everything derivable from the chain record alone — enough to
+    # support operator-to-operator discussion of a reorg without
+    # revealing how this specific node is provisioned.
+    _REORG_TRACE_PUBLIC_FIELDS = (
+        "block_number", "block_id", "timestamp_ms",
+        "tx_count", "retried", "retry_pct", "gas_used",
+    )
+
+    def _sanitize_block_for_public(row: dict) -> dict:
+        return {k: row[k] for k in _REORG_TRACE_PUBLIC_FIELDS if k in row}
+
+    @app.get("/api/reorgs")
+    async def api_reorgs(
+        limit: int = Query(200, ge=1, le=5000),
+    ) -> JSONResponse:
+        """List of observed reorg events, newest-first.
+
+        Each row reconstructs both block_ids (``before`` from the
+        persisted blocks row, ``after`` from the alert key) and a
+        compact block-metrics summary. For the full per-block
+        neighbor trace, call ``/api/reorgs/{block_number}``.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        rows = state.storage.list_reorgs(limit=limit)
+        return JSONResponse({"count": len(rows), "reorgs": rows})
+
+    @app.get("/api/reorgs/{block_number}")
+    async def api_reorg_trace(
+        block_number: int,
+        window: int = Query(30, ge=0, le=500),
+        level: str = Query("public", pattern="^(public|full)$"),
+    ) -> JSONResponse:
+        """Reorg event + neighboring blocks for forensic review.
+
+        ``window`` controls how many blocks before/after the reorged
+        block to include (0–500, default 30). ``level=public`` (the
+        default) strips local timing fields so the trace is safe to
+        share operator-to-operator; ``level=full`` returns every
+        ExecBlock field for deeper internal analysis.
+
+        404 if no reorg alert exists for this block_number.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        trace = state.storage.get_reorg_trace(block_number, window=window)
+        if trace is None:
+            return JSONResponse(
+                {"error": f"no reorg alert for block {block_number}"},
+                status_code=404,
+            )
+        # Sanitization happens silently — no "level" marker in the
+        # response body. A marker would just invite the reader to
+        # wonder what the "other" level withholds, and it doesn't
+        # actually protect the stripped fields (JSON is trivially
+        # editable). The URL parameter remains available as an
+        # opt-in for internal callers who need the local timing.
+        if level == "public":
+            trace = {
+                **trace,
+                "blocks": [_sanitize_block_for_public(b) for b in trace["blocks"]],
+            }
+        return JSONResponse(trace)
+
+    @app.get("/api/probes")
+    async def api_probes() -> JSONResponse:
+        probes, ran_at = state.probes()
+        return JSONResponse({
+            "ran_at": ran_at,
+            "probes": [
+                {
+                    "name": p.name,
+                    "status": p.status,
+                    "summary": p.summary,
+                    "details": p.details,
+                }
+                for p in probes
+            ],
+        })
+
+    @app.get("/api/probes/public")
+    async def api_probes_public() -> JSONResponse:
+        """Public-safe subset of /api/probes.
+
+        `/api/probes` carries `details` with operator-sensitive paths —
+        key-backup directories, `/dev/nvme<N>p<N>`, mount points, device
+        metadata. An iteration-2 audit flagged that as host-path leakage,
+        so deployments behind nginx should 404 `/api/probes` on the
+        public virtual host (the shipped nginx template does this).
+
+        This endpoint exposes only `name`/`status`/`summary` — enough
+        for the dashboard's host-probes panel to show green/amber/red
+        rows, with no path or hardware identifier in the payload.
+        """
+        probes, ran_at = state.probes()
+        return JSONResponse({
+            "ran_at": ran_at,
+            "probes": [
+                {"name": p.name, "status": p.status, "summary": p.summary}
+                for p in probes
+            ],
+        })
+
+    @app.get("/api/contracts/top_retried")
+    async def api_top_retried(
+        since_block: int | None = Query(None, ge=0),
+        since_ts_ms: int | None = Query(None, ge=0),
+        until_block: int | None = Query(None, ge=0),
+        until_ts_ms: int | None = Query(None, ge=0),
+        min_appearances: int = Query(3, ge=1, le=10_000),
+        limit: int = Query(50, ge=1, le=500),
+    ) -> JSONResponse:
+        """Top contracts ranked by appearance in retried blocks.
+
+        Correlation (not causation): a contract that keeps showing up in
+        blocks with rtp>0 is a candidate 'high-conflict' contract
+        (its txs tend to trigger re-execution of other txs in the block).
+        Filter by ``since_block/since_ts_ms`` and/or ``until_block/until_ts_ms``
+        to scope a window (e.g. the stress-test interval).
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        # Reads go through the `contract_hour` rollup (see storage.py).
+        # At 20 M+ raw tx_contract_block rows a bounded scan of the
+        # precomputed hourly aggregate is ~1 000× cheaper — 12 K rows
+        # for a 24 h window instead of 4.3 M. Hour granularity is the
+        # right compromise for a ranking query; exact per-block fidelity
+        # is still available through the legacy path if a future caller
+        # needs it.
+        #
+        # `since_block` / `until_block` filters are not supported by the
+        # rollup (hour_ms is the only time axis). Callers that depend on
+        # block-number precision should switch to timestamp filters; the
+        # dashboard already does.
+        if since_block is not None or until_block is not None:
+            return JSONResponse(
+                {
+                    "error": (
+                        "block-number filters are not supported; "
+                        "pass since_ts_ms / until_ts_ms instead"
+                    )
+                },
+                status_code=400,
+            )
+        # Quantize ts bounds to 15s so multiple viewers hitting "last
+        # hour" within the same quarter-minute hit the same cache key.
+        TOP_TTL = 15.0
+        step = int(TOP_TTL * 1000)
+        def _q(ts: int | None) -> int | None:
+            return None if ts is None else (ts // step) * step
+        cache_key = (
+            _q(since_ts_ms), _q(until_ts_ms),
+            min_appearances, limit,
+        )
+        async def _load():
+            return await asyncio.to_thread(
+                state.storage.top_retried_contracts_rollup,
+                since_ts_ms=since_ts_ms,
+                until_ts_ms=until_ts_ms,
+                min_appearances=min_appearances,
+                limit=limit,
+            )
+        stats = await _cached("top_retried", TOP_TTL, cache_key, _load)
+        def _row(s):
+            lbl = labels.get(s.to_addr)
+            return {
+                "to_addr": s.to_addr,
+                "label": lbl.name if lbl else None,
+                "category": lbl.category if lbl else None,
+                "blocks_appeared": s.blocks_appeared,
+                "retried_blocks": s.retried_blocks,
+                "retried_ratio": round(
+                    s.retried_blocks / s.blocks_appeared, 4
+                ) if s.blocks_appeared else 0.0,
+                "avg_rtp_of_blocks": round(s.avg_rtp_of_blocks, 2),
+                "tx_count": s.tx_count,
+                "total_gas": s.total_gas,
+            }
+        return JSONResponse({
+            "count": len(stats),
+            "rows": [_row(s) for s in stats],
+        })
+
+    @app.get("/api/contracts/labels")
+    async def api_contracts_labels() -> JSONResponse:
+        """Full dump of the loaded label registry."""
+        return JSONResponse({
+            "count": len(labels),
+            "labels": labels.as_dict(),
+        })
+
+    @app.get("/api/enrichment/status")
+    async def api_enrichment_status() -> JSONResponse:
+        if enricher is None:
+            return JSONResponse({"enabled": False})
+        return JSONResponse({"enabled": True, **enricher.stats})
+
+    @app.get("/api/window_summary")
+    async def api_window_summary(
+        from_ts_ms: int = Query(..., ge=0),
+        to_ts_ms: int = Query(..., ge=0),
+        top_contracts_limit: int = Query(15, ge=1, le=500),
+        min_appearances: int = Query(3, ge=1, le=10_000),
+        include_blocks: bool = Query(False),
+    ) -> JSONResponse:
+        """Single-call summary of a time window — for post-event analysis
+        and for external tooling pulling chain metrics.
+
+        Default response is cheap and bounded: aggregate (peak/avg rtp,
+        tps, gas, totals) + the contract ranking. That tier accepts
+        any window up to 30 days — enough to compare whole Epochs or
+        a week of activity without moving 10s of MB.
+
+        ``include_blocks=true`` additionally returns the per-block
+        time-series — the data needed to rebuild a chart of a specific
+        event. That tier is capped at 2 hours of span (≈18 K blocks,
+        ~3.5 MB response). A stress batch is exactly this shape;
+        longer retrospectives should request the aggregate tier across
+        multiple windows instead of a single monster dump.
+
+        Why the split: the raw-block dump at a 24 h window is ~40 MB,
+        at 7 d is ~300 MB. A publicly exposed endpoint cannot return
+        those sizes safely, and no dashboard or report actually needs
+        18 K+ block rows at once.
+        """
+        _MAX_SPAN_MS = 30 * 24 * 3600 * 1000               # 30 days
+        _MAX_SPAN_WITH_BLOCKS_MS = 2 * 3600 * 1000         # 2 hours
+
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if to_ts_ms <= from_ts_ms:
+            return JSONResponse(
+                {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
+            )
+        span_ms = to_ts_ms - from_ts_ms
+        if span_ms > _MAX_SPAN_MS:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"window span too large: {span_ms/3600_000:.1f} h > "
+                        f"{_MAX_SPAN_MS/3600_000:.0f} h cap"
+                    )
+                },
+                status_code=400,
+            )
+        if include_blocks and span_ms > _MAX_SPAN_WITH_BLOCKS_MS:
+            return JSONResponse(
+                {
+                    "error": (
+                        f"include_blocks=true requires span ≤ "
+                        f"{_MAX_SPAN_WITH_BLOCKS_MS/3600_000:.0f} h "
+                        f"(requested {span_ms/3600_000:.1f} h). "
+                        "Drop include_blocks for the aggregate-only tier, "
+                        "or split the window into 2 h segments."
+                    )
+                },
+                status_code=400,
+            )
+
+        blocks = []
+        if include_blocks:
+            # Bounded by the 2 h span cap above, so load_blocks_range's
+            # 50 K row limit never bites for well-formed requests.
+            blocks = await asyncio.to_thread(
+                state.storage.load_blocks_range,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                limit=50_000,
+            )
+        # Aggregate metrics: the collector loop already stores every
+        # block's contribution in `blocks` (the raw SQLite table), but
+        # we only need the per-row fields to compute peaks/means. Pull
+        # them via a lightweight aggregate-only path — loading rows to
+        # rebuild Python objects just to sum them would throw the
+        # response-size budget out the window.
+        aggregate = await asyncio.to_thread(
+            state.storage.block_metrics_aggregate,
+            from_ts_ms=from_ts_ms,
+            to_ts_ms=to_ts_ms,
+        )
+        # Contract ranking path is span-dependent. Short windows (≤6 h —
+        # a Foundation stress batch is 2 h) stay on the raw
+        # tx_contract_block aggregate where sparse contracts remain
+        # visible — the scan is bounded and fast enough (~500 ms at
+        # 2 h). Longer windows switch to the hourly rollup: at 24 h the
+        # raw scan is 20 s, which would turn a 30-day-capped endpoint
+        # into a de facto DoS vector. The rollup is identical to raw
+        # for the top-20 (the default limit is 15) and preserves ~92 %
+        # of top-100 across every tested window — the lost tail is
+        # sparse one-shot addresses, not signal.
+        _ROLLUP_SPAN_THRESHOLD_MS = 6 * 3600 * 1000
+        if span_ms <= _ROLLUP_SPAN_THRESHOLD_MS:
+            contracts = await asyncio.to_thread(
+                state.storage.top_retried_contracts,
+                since_ts_ms=from_ts_ms,
+                until_ts_ms=to_ts_ms,
+                min_appearances=min_appearances,
+                limit=top_contracts_limit,
+            )
+        else:
+            contracts = await asyncio.to_thread(
+                state.storage.top_retried_contracts_rollup,
+                since_ts_ms=from_ts_ms,
+                until_ts_ms=to_ts_ms,
+                min_appearances=min_appearances,
+                limit=top_contracts_limit,
+            )
+
+        def _row(s):
+            lbl = labels.get(s.to_addr)
+            return {
+                "to_addr": s.to_addr,
+                "label": lbl.name if lbl else None,
+                "category": lbl.category if lbl else None,
+                "blocks_appeared": s.blocks_appeared,
+                "retried_blocks": s.retried_blocks,
+                "retried_ratio": round(
+                    s.retried_blocks / s.blocks_appeared, 4
+                ) if s.blocks_appeared else 0.0,
+                "avg_rtp_of_blocks": round(s.avg_rtp_of_blocks, 2),
+                "tx_count": s.tx_count,
+                "total_gas": s.total_gas,
+            }
+
+        payload = {
+            "window": {
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+                "span_sec": round(span_ms / 1000.0, 1),
+            },
+            "aggregate": aggregate,
+            "top_contracts": [_row(s) for s in contracts],
+        }
+        if include_blocks:
+            payload["blocks"] = [
+                {
+                    "n": b.block_number,
+                    "t": b.timestamp_ms,
+                    "tx": b.tx_count,
+                    "rt": b.retried,
+                    "rtp": b.retry_pct,
+                    "gas": b.gas_used,
+                    "tpse": b.tps_effective,
+                    "gpse": b.gas_per_sec_effective,
+                }
+                for b in blocks
+            ]
+        return JSONResponse(payload)
+
+    @app.api_route("/healthz", methods=["GET", "HEAD"])
+    async def healthz() -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    @app.get("/favicon.ico")
+    async def favicon() -> FileResponse:
+        # Serve the SVG for the legacy /favicon.ico path so browsers that
+        # preflight it before parsing the HTML <link> don't log a 404.
+        return FileResponse(
+            _STATIC_DIR / "favicon.svg", media_type="image/svg+xml"
+        )
+
+    @app.api_route("/", methods=["GET", "HEAD"])
+    async def root(request: Request):
+        # Starlette >= 0.29 expects (request, name, context) signature.
+        return templates.TemplateResponse(
+            request,
+            "index.html",
+            {"node_name": config.node.name, "asset_version": _ASSET_VERSION},
+        )
+
+    @app.api_route("/alerts", methods=["GET", "HEAD"])
+    async def alerts_page(request: Request):
+        return templates.TemplateResponse(
+            request,
+            "alerts.html",
+            {"node_name": config.node.name, "asset_version": _ASSET_VERSION},
+        )
+
+    @app.api_route("/api", methods=["GET", "HEAD"])
+    async def api_docs(request: Request):
+        # base_url comes from the Host header — kept out of the template
+        # source so a forked monad-ops shows its own URL in the examples
+        # without needing to patch HTML. Defaults to relative if Host is
+        # unavailable (curl without --header, tests).
+        host = request.headers.get("host", "")
+        scheme = request.url.scheme or "https"
+        base_url = f"{scheme}://{host}".rstrip("/") if host else ""
+        return templates.TemplateResponse(
+            request,
+            "api.html",
+            {
+                "asset_version": _ASSET_VERSION,
+                "base_url": base_url,
+            },
+        )
+
+    # Branded HTML 404 for non-API routes. FastAPI's default for a missing
+    # path is `{"detail": "Not Found"}` — fine for API, bad UX for a
+    # human who types the wrong URL or follows a stale link. We keep the
+    # JSON response for anything under /api/ and /healthz so tools still
+    # get structured errors, and swap to the HTML template for the
+    # visible site paths. Other 4xx/5xx codes bubble through unchanged.
+    @app.exception_handler(StarletteHTTPException)
+    async def not_found_handler(request: Request, exc: StarletteHTTPException):
+        if exc.status_code == 404:
+            path = request.url.path
+            if not (path.startswith("/api/") or path.startswith("/healthz")):
+                return templates.TemplateResponse(
+                    request,
+                    "404.html",
+                    {"asset_version": _ASSET_VERSION, "path": path},
+                    status_code=404,
+                )
+        # Preserve default behavior for all other cases (incl. API 404s).
+        return JSONResponse(
+            {"detail": exc.detail},
+            status_code=exc.status_code,
+            headers=getattr(exc, "headers", None),
+        )
+
+    return app
