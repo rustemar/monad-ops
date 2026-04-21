@@ -34,6 +34,11 @@ dependency for the core view.
   itself dies. Because the whole point is to alert *when the thing
   that normally alerts you is what died*.
 
+## Observations
+
+Field notes from running this against Monad testnet, with data and
+explicit hypotheses — see [OBSERVATIONS.md](OBSERVATIONS.md). First
+entry is the 23-reorg window observed 2026-04-19 / 2026-04-20.
 
 ## How it works (short version)
 
