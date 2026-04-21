@@ -1,0 +1,20 @@
+[Unit]
+Description=Run monad-ops watchdog every 5s
+
+[Timer]
+# Fast detection: first fire 15s after boot (monad-ops startup grace),
+# then every 5s. Accuracy=1s so wakeups cluster tightly.
+# The watchdog script itself handles de-spam via an edge-triggered
+# state file + 5-minute reminder cadence — short timer interval here
+# only controls HOW QUICKLY we NOTICE a change, not how noisy Telegram
+# gets.
+OnBootSec=15s
+OnUnitActiveSec=5s
+AccuracySec=1s
+# Persistent=false: missed fires while the host is down do NOT replay
+# when it boots back up. A down watchdog in the past doesn't say
+# anything useful about "right now".
+Persistent=false
+
+[Install]
+WantedBy=timers.target

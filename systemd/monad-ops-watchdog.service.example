@@ -1,0 +1,27 @@
+[Unit]
+Description=monad-ops watchdog — HTTP + memory check, Telegram edge alerts
+# Explicitly NOT a dependency of monad-ops.service — the whole point of
+# this unit is to keep running when monad-ops is down.
+
+[Service]
+Type=oneshot
+# Adjust path + user to match your deployment. Copy to
+#   /etc/systemd/system/monad-ops-watchdog.service
+# after filling in the concrete values.
+ExecStart=/opt/monad-ops/scripts/watchdog.sh
+User=<node-user>
+Group=<node-user>
+# Telegram credentials for edge alerts. Real file is operator-local
+# (gitignored at scripts/watchdog.env), template at
+# scripts/watchdog.env.example. Adjust path if you store it elsewhere
+# (e.g. /etc/monad-ops/watchdog.env).
+EnvironmentFile=/opt/monad-ops/scripts/watchdog.env
+# Creates /run/monad-ops-watchdog/ owned by User= so hysteresis state
+# can be persisted across invocations. systemd cleans it on stop.
+RuntimeDirectory=monad-ops-watchdog
+# Type=oneshot cleans up RuntimeDirectory on exit by default. We NEED
+# it to survive across ticks so hysteresis state persists.
+RuntimeDirectoryPreserve=yes
+# Keep minimal hardening. Needs to read /run state and query systemctl.
+NoNewPrivileges=true
+ProtectSystem=full
