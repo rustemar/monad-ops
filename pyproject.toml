@@ -1,0 +1,56 @@
+[project]
+name = "monad-ops"
+version = "0.0.1"
+description = "A small dashboard + alerting tool that runs next to your Monad validator or full node"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+authors = [{ name = "rustemar" }]
+requires-python = ">=3.12"
+keywords = ["monad", "validator", "telemetry", "observability", "fastapi", "sqlite"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "structlog>=24.4",
+    "jinja2>=3.1",
+    "tomli>=2.0",
+]
+
+[project.optional-dependencies]
+userbot = ["telethon>=1.37"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[project.scripts]
+monad-ops = "monad_ops.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["monad_ops*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,42 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# secrets + local config
+config.toml
+.env
+secrets/
+*.session
+*.session-journal
+
+# runtime state
+state/
+logs/
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+
+# operator-local systemd units and nginx configs (real User=, real
+# paths, real IPs). Templates live next to them as *.service.example
+# / *.conf.example; deployed copies stay out of git so concrete host
+# identifiers never enter history.
+systemd/monad-ops.service
+systemd/monad-ops-watchdog.service
+systemd/nginx-monad-ops.conf
+systemd/nginx-monad-ops-internal.conf
+systemd/nginx-ops-dashboard.conf
+
+# Live Telegram credentials for the watchdog (real bot token + chat id).
+# scripts/watchdog.env.example is the committed template; the real file
+# is operator-local.
+scripts/watchdog.env

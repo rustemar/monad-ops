@@ -1,0 +1,48 @@
+# Example configuration for monad-ops.
+# Copy to config.toml (which is gitignored) and fill in your credentials.
+
+[node]
+# Display name shown on the dashboard and in Telegram alerts.
+# Pick something meaningful for your operator — it does NOT have to
+# match the node_name in monad-bft's node.toml.
+name = "monad-testnet"
+rpc_url = "http://127.0.0.1:8080"
+services = ["monad-bft", "monad-execution", "monad-rpc"]
+
+[alerts.telegram]
+bot_token = "123456:AAAA...REPLACE_ME"
+chat_id = -1001234567890
+topic_id = 0  # 0 or omit if the group has no topics
+source_tag = "monad-ops"
+
+[rules.stall]
+warn_after_sec = 10
+critical_after_sec = 30
+
+[rules.retry_spike]
+window = 60
+warn_pct = 50.0
+critical_pct = 75.0
+
+[rules.dedup]
+cooldown_sec = 300
+
+[persistence]
+# Persist blocks and alerts to SQLite so they survive restarts and can
+# be queried post-event (e.g. for stress-test retrospectives).
+enabled = true
+path = "data/state.db"
+# How many most-recent blocks to load back into the in-memory state on
+# startup. 12_000 ≈ 1 hour of testnet at 2.5 blk/s.
+bootstrap_blocks = 12000
+
+[enrichment]
+# Pull per-tx receipts and attribute retry activity to contracts. Needs
+# persistence enabled. Receipts are fetched via eth_getBlockReceipts.
+enabled = true
+queue_size = 5000
+rpc_timeout_sec = 5.0
+
+[labels]
+# Path to the contract label registry JSON. Missing file = empty map.
+path = "labels.json"

@@ -1,0 +1,25 @@
+[Unit]
+Description=monad-ops — validator node operational observability
+After=network-online.target monad-execution.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=<node-user>
+Group=<node-user>
+WorkingDirectory=/opt/monad-ops
+Environment=PYTHONUNBUFFERED=1
+Environment=MONAD_OPS_CONFIG=/opt/monad-ops/config.toml
+ExecStart=/opt/monad-ops/.venv/bin/python -m monad_ops.cli run
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Hardening (keep minimal — we need to read the journal and the node config)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
