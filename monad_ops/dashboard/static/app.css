@@ -1045,12 +1045,12 @@ details.severity-info dd { margin: 0; }
     height: 20px; margin-top: 4px;
 }
 .sparkline svg { width: 100%; height: 100%; display: block; }
-.sparkline path {
-    fill: none; stroke: var(--accent); stroke-width: 1.2;
+.sparkline polyline {
+    fill: none; stroke: var(--accent); stroke-width: 1.5;
     vector-effect: non-scaling-stroke;
 }
 .sparkline .spark-fill {
-    fill: var(--accent); fill-opacity: 0.08; stroke: none;
+    fill: var(--accent); fill-opacity: 0.18; stroke: none;
 }
 
 /* Deep-link copy button in chart toolbar (G7). */
@@ -1066,6 +1066,29 @@ details.severity-info dd { margin: 0; }
 .alerts-export {
     display: flex; justify-content: flex-end;
     margin: 0 0 8px;
+}
+
+/* Touch-device tooltip popover (G8). On `(hover: none)` devices native
+   `title` attributes never appear, so a delegated tap-handler renders
+   this popover next to the tapped element. Desktop keeps the native
+   tooltip — we only intercept when hover is unavailable. */
+.tap-tip {
+    position: absolute; z-index: 1000;
+    max-width: min(260px, calc(100vw - 24px));
+    padding: 6px 10px;
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+    font-family: var(--mono); font-size: 12px; line-height: 1.4;
+    pointer-events: none;
+    opacity: 0; transform: translateY(-2px);
+    transition: opacity 120ms ease, transform 120ms ease;
+}
+.tap-tip.visible { opacity: 1; transform: translateY(0); }
+@media (hover: none) {
+    /* Subtle hint that the element is tappable for info. Only on
+       labels/notes/chips — not on buttons (they already look tappable). */
+    [title]:not(button):not(a) { cursor: help; }
 }
 
 /* Theme toggle button (G2). */

@@ -51,6 +51,7 @@ class Snapshot:
     tps_effective_peak_1m: int
     tps_effective_avg_1m: int
     gas_per_sec_effective_peak_1m: int
+    gas_eff_peak_block: int | None
     # Chain-integrity signal (ReorgRule). Reorg_count is always present
     # so the dashboard can show "0 reorgs over N blocks" as a clear
     # green signal, not just the absence of data.
@@ -339,7 +340,8 @@ class State:
         # unit consistent with `tps_effective` (absolute tx/sec) and
         # lets the UI format compactly (3211 Mgas/s → "3.2B gas/sec").
         # Caught by iter-5 audit §A1.
-        gas_eff_peak = max((b.gas_per_sec_effective for b in w1m), default=0) * 1_000_000
+        gas_eff_peak_block = max(w1m, key=lambda b: b.gas_per_sec_effective, default=None) if w1m else None
+        gas_eff_peak = (gas_eff_peak_block.gas_per_sec_effective if gas_eff_peak_block else 0) * 1_000_000
 
         with self._lock:
             alerts_tail = list(zip(self._alerts, self._alert_ts, strict=True))[-10:]
@@ -393,6 +395,7 @@ class State:
             tps_effective_peak_1m=int(tps_eff_peak),
             tps_effective_avg_1m=int(tps_eff_avg),
             gas_per_sec_effective_peak_1m=int(gas_eff_peak),
+            gas_eff_peak_block=gas_eff_peak_block.block_number if gas_eff_peak_block else None,
             reorg_count=reorg_count,
             last_reorg_number=last_reorg_number,
             last_reorg_old_id=last_reorg_old_id,

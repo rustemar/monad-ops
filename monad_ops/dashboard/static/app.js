@@ -594,8 +594,9 @@ async function fetchState() {
         document.getElementById("k-gas-eff-peak").textContent = fmtCompact(gasPeak);
         const gasSubEl = document.getElementById("k-gas-eff-peak-sub");
         if (gasSubEl) {
+            const gasBlock = d.gas_eff_peak_block;
             gasSubEl.textContent = gasPeak != null
-                ? `${fmtInt(gasPeak)} gas/sec · peak inside a single block`
+                ? `${fmtInt(gasPeak)} gas/sec · block #${fmtInt(gasBlock)}`
                 : "peak gas/sec inside a single block";
         }
 
@@ -1738,3 +1739,90 @@ if (_copyLinkBtn) {
         });
     });
 }
+
+// Touch-device tooltip fallback (G8).
+// iOS/Android never render native `title` tooltips. We detect touch-first
+// devices via `(hover: none)`, then delegate a single tap listener that
+// renders a positioned popover with the element's title text. Desktop is
+// untouched — native hover tooltips still work.
+(function initTapTooltips() {
+    if (!window.matchMedia || !window.matchMedia("(hover: none)").matches) return;
+
+    let tipEl = null;
+    let activeTarget = null;
+    let hideTimer = null;
+
+    function ensureTip() {
+        if (tipEl) return tipEl;
+        tipEl = document.createElement("div");
+        tipEl.className = "tap-tip";
+        tipEl.setAttribute("role", "tooltip");
+        document.body.appendChild(tipEl);
+        return tipEl;
+    }
+
+    function hide() {
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+        if (!tipEl) return;
+        tipEl.classList.remove("visible");
+        // Restore the title we stashed on the target so desktop/viewer
+        // accessibility tools still see it after we dismiss.
+        if (activeTarget && activeTarget.dataset.tipCached != null) {
+            activeTarget.setAttribute("title", activeTarget.dataset.tipCached);
+            delete activeTarget.dataset.tipCached;
+        }
+        activeTarget = null;
+    }
+
+    function show(target) {
+        const text = target.getAttribute("title") || target.dataset.tipCached;
+        if (!text) return;
+        // Stash and strip `title` to suppress any native ghost tooltip
+        // during the popover lifetime.
+        if (target.hasAttribute("title")) {
+            target.dataset.tipCached = target.getAttribute("title");
+            target.removeAttribute("title");
+        }
+        activeTarget = target;
+        const el = ensureTip();
+        el.textContent = text;
+        // Layout first (opacity 0) to measure, then position.
+        el.style.left = "0px"; el.style.top = "0px";
+        el.classList.add("visible");
+        const rect = target.getBoundingClientRect();
+        const tipRect = el.getBoundingClientRect();
+        const scrollY = window.scrollY || window.pageYOffset;
+        const scrollX = window.scrollX || window.pageXOffset;
+        const margin = 8;
+        // Prefer below; flip above if it would overflow viewport.
+        let top = rect.bottom + scrollY + 6;
+        if (rect.bottom + tipRect.height + 12 > window.innerHeight) {
+            top = rect.top + scrollY - tipRect.height - 6;
+        }
+        let left = rect.left + scrollX + rect.width / 2 - tipRect.width / 2;
+        left = Math.max(margin + scrollX, Math.min(left, scrollX + window.innerWidth - tipRect.width - margin));
+        el.style.left = left + "px";
+        el.style.top = top + "px";
+        // Auto-dismiss so an orphaned tooltip doesn't linger.
+        if (hideTimer) clearTimeout(hideTimer);
+        hideTimer = setTimeout(hide, 4000);
+    }
+
+    // pointerup covers both touch and mouse-emulating pens on hover:none
+    // devices; click would fire too but pointerup is earlier and gives us
+    // accurate event.target for the exact tapped node.
+    document.addEventListener("pointerup", (e) => {
+        const t = e.target.closest("[title], [data-tip-cached]");
+        // Don't intercept taps on interactive controls — they have their
+        // own affordance and the tooltip would fight with activation.
+        if (t && t.matches("button, a, input, select, textarea, [role='button']")) return;
+        if (!t) { hide(); return; }
+        if (t === activeTarget) { hide(); return; }
+        hide();
+        show(t);
+    }, { passive: true });
+
+    // Dismiss on scroll so the popover doesn't float away from its anchor.
+    window.addEventListener("scroll", hide, { passive: true });
+    window.addEventListener("resize", hide);
+})();
