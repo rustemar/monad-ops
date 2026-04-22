@@ -50,6 +50,7 @@ class Snapshot:
     # blocks are thinly populated; exposes Monad's execution headroom.
     tps_effective_peak_1m: int
     tps_effective_avg_1m: int
+    tps_eff_peak_block: int | None
     gas_per_sec_effective_peak_1m: int
     gas_eff_peak_block: int | None
     # Chain-integrity signal (ReorgRule). Reorg_count is always present
@@ -324,7 +325,8 @@ class State:
         # Parallelism ceiling: peak intrablock effective TPS over the
         # last minute. Avg is tx-weighted — a 50 000-tps block with 20
         # tx and a 1 000-tps block with 2 tx should not be averaged 1:1.
-        tps_eff_peak = max((b.tps_effective for b in w1m), default=0)
+        tps_eff_peak_block = max(w1m, key=lambda b: b.tps_effective, default=None) if w1m else None
+        tps_eff_peak = tps_eff_peak_block.tps_effective if tps_eff_peak_block else 0
         if w1m:
             total_tx = sum(b.tx_count for b in w1m)
             if total_tx > 0:
@@ -394,6 +396,7 @@ class State:
             gas_per_sec_1m=round(gas_1m, 0),
             tps_effective_peak_1m=int(tps_eff_peak),
             tps_effective_avg_1m=int(tps_eff_avg),
+            tps_eff_peak_block=tps_eff_peak_block.block_number if tps_eff_peak_block else None,
             gas_per_sec_effective_peak_1m=int(gas_eff_peak),
             gas_eff_peak_block=gas_eff_peak_block.block_number if gas_eff_peak_block else None,
             reorg_count=reorg_count,

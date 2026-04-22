@@ -103,6 +103,20 @@ def build_app(
             _error_counts[response.status_code] += 1
         return response
 
+    # Per-endpoint TTLs. Each one balances "user expectation of freshness"
+    # against "how much load we shed by caching". For an open dashboard
+    # tab polling at 30s, even 1-2s of staleness is invisible while
+    # collapsing 1000 concurrent viewers into a single SQL/snapshot per
+    # interval. Values cross-referenced with the dashboard's poll cadence
+    # in dashboard/static/dashboard.js.
+    _STATE_TTL = 1.0          # in-memory snapshot, recomputed every block
+    _BLOCKS_TTL = 2.0         # in-memory recent-blocks tail
+    _ALERTS_TTL = 5.0         # in-memory recent-alerts tail
+    _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
+    _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
+    _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable
+    _WINDOW_SUMMARY_TTL = 15.0  # heavy SQL aggregate over arbitrary window
+
     # Generic TTL cache + in-flight dedup. Used for the two heavy
     # aggregates — top_retried (15s TTL, 4-sec query) and blocks/sampled
     # (dynamic 2–15s TTL, ~100-300ms query on 24h windows). Both share
@@ -174,66 +188,74 @@ def build_app(
 
     @app.api_route("/api/state", methods=["GET", "HEAD"])
     async def api_state() -> JSONResponse:
-        snap = state.snapshot()
-        return JSONResponse({
-            "node_name": config.node.name,
-            "data_start_ms": _get_data_start_ms(),
-            "started_at": snap.started_at,
-            "uptime_sec": snap.uptime_sec,
-            "blocks_seen": snap.blocks_seen,
-            "last_block": snap.last_block,
-            "last_block_seen_ms": snap.last_block_seen_ms,
-            "blocks_per_sec_1m": snap.blocks_per_sec_1m,
-            "rtp_avg_1m": snap.rtp_avg_1m,
-            "rtp_avg_5m": snap.rtp_avg_5m,
-            "rtp_max_1m": snap.rtp_max_1m,
-            "tx_per_sec_1m": snap.tx_per_sec_1m,
-            "gas_per_sec_1m": snap.gas_per_sec_1m,
-            "tps_effective_peak_1m": snap.tps_effective_peak_1m,
-            "tps_effective_avg_1m": snap.tps_effective_avg_1m,
-            "gas_per_sec_effective_peak_1m": snap.gas_per_sec_effective_peak_1m,
-            "reorg_count": snap.reorg_count,
-            "last_reorg_number": snap.last_reorg_number,
-            "last_reorg_old_id": snap.last_reorg_old_id,
-            "last_reorg_new_id": snap.last_reorg_new_id,
-            "last_reorg_ts_ms": snap.last_reorg_ts_ms,
-            "reference_block": snap.reference_block,
-            "reference_checked_ms": snap.reference_checked_ms,
-            "reference_error": snap.reference_error,
-            "reference_local_at_sample": snap.reference_local_at_sample,
-            "current_alerts": snap.current_alerts,
-            "epoch": {
-                "number": snap.epoch_number,
-                "blocks_in": snap.epoch_blocks_in,
-                "typical_length": snap.epoch_typical_length,
-                "eta_sec": snap.epoch_eta_sec,
-            },
-        })
+        async def _load():
+            snap = state.snapshot()
+            return {
+                "node_name": config.node.name,
+                "data_start_ms": _get_data_start_ms(),
+                "started_at": snap.started_at,
+                "uptime_sec": snap.uptime_sec,
+                "blocks_seen": snap.blocks_seen,
+                "last_block": snap.last_block,
+                "last_block_seen_ms": snap.last_block_seen_ms,
+                "blocks_per_sec_1m": snap.blocks_per_sec_1m,
+                "rtp_avg_1m": snap.rtp_avg_1m,
+                "rtp_avg_5m": snap.rtp_avg_5m,
+                "rtp_max_1m": snap.rtp_max_1m,
+                "tx_per_sec_1m": snap.tx_per_sec_1m,
+                "gas_per_sec_1m": snap.gas_per_sec_1m,
+                "tps_effective_peak_1m": snap.tps_effective_peak_1m,
+                "tps_effective_avg_1m": snap.tps_effective_avg_1m,
+                "tps_eff_peak_block": snap.tps_eff_peak_block,
+                "gas_per_sec_effective_peak_1m": snap.gas_per_sec_effective_peak_1m,
+                "gas_eff_peak_block": snap.gas_eff_peak_block,
+                "reorg_count": snap.reorg_count,
+                "last_reorg_number": snap.last_reorg_number,
+                "last_reorg_old_id": snap.last_reorg_old_id,
+                "last_reorg_new_id": snap.last_reorg_new_id,
+                "last_reorg_ts_ms": snap.last_reorg_ts_ms,
+                "reference_block": snap.reference_block,
+                "reference_checked_ms": snap.reference_checked_ms,
+                "reference_error": snap.reference_error,
+                "reference_local_at_sample": snap.reference_local_at_sample,
+                "current_alerts": snap.current_alerts,
+                "epoch": {
+                    "number": snap.epoch_number,
+                    "blocks_in": snap.epoch_blocks_in,
+                    "typical_length": snap.epoch_typical_length,
+                    "eta_sec": snap.epoch_eta_sec,
+                },
+            }
+        payload = await _cached("state", _STATE_TTL, (), _load)
+        return JSONResponse(payload)
 
     @app.api_route("/api/blocks", methods=["GET", "HEAD"])
     async def api_blocks(
         limit: int = Query(300, ge=1, le=2000),
     ) -> JSONResponse:
-        blocks = state.recent_blocks(limit=limit)
-        return JSONResponse([
-            {
-                "n": b.block_number,
-                "t": b.timestamp_ms,
-                "tx": b.tx_count,
-                "rt": b.retried,
-                "rtp": b.retry_pct,
-                "gas": b.gas_used,
-                "tot_us": b.total_us,
-                # Execution-time components for the breakdown chart.
-                # Keys kept short to hold the payload compact — the
-                # dashboard polls /api/blocks every 10s with limit=300.
-                "sr_us": b.state_reset_us,
-                "te_us": b.tx_exec_us,
-                "cm_us": b.commit_us,
-                "tps_eff": b.tps_effective,
-            }
-            for b in blocks
-        ])
+        async def _load():
+            blocks = state.recent_blocks(limit=limit)
+            return [
+                {
+                    "n": b.block_number,
+                    "t": b.timestamp_ms,
+                    "tx": b.tx_count,
+                    "rt": b.retried,
+                    "rtp": b.retry_pct,
+                    "gas": b.gas_used,
+                    "tot_us": b.total_us,
+                    # Execution-time components for the breakdown chart.
+                    # Keys kept short to hold the payload compact — the
+                    # dashboard polls /api/blocks every 10s with limit=300.
+                    "sr_us": b.state_reset_us,
+                    "te_us": b.tx_exec_us,
+                    "cm_us": b.commit_us,
+                    "tps_eff": b.tps_effective,
+                }
+                for b in blocks
+            ]
+        payload = await _cached("blocks", _BLOCKS_TTL, (limit,), _load)
+        return JSONResponse(payload)
 
     @app.api_route("/api/blocks/sampled", methods=["GET", "HEAD"])
     async def api_blocks_sampled(
@@ -342,17 +364,20 @@ def build_app(
     async def api_alerts(
         limit: int = Query(50, ge=1, le=200),
     ) -> JSONResponse:
-        alerts = state.recent_alerts_with_ts(limit=limit)
-        return JSONResponse([
-            {
-                "rule": a.rule,
-                "severity": a.severity.value,
-                "title": a.title,
-                "detail": a.detail,
-                "ts_ms": int(ts * 1000),
-            }
-            for a, ts in alerts
-        ])
+        async def _load():
+            alerts = state.recent_alerts_with_ts(limit=limit)
+            return [
+                {
+                    "rule": a.rule,
+                    "severity": a.severity.value,
+                    "title": a.title,
+                    "detail": a.detail,
+                    "ts_ms": int(ts * 1000),
+                }
+                for a, ts in alerts
+            ]
+        payload = await _cached("alerts", _ALERTS_TTL, (limit,), _load)
+        return JSONResponse(payload)
 
     @app.api_route("/api/alerts/history", methods=["GET", "HEAD"])
     async def api_alerts_history(
@@ -419,8 +444,11 @@ def build_app(
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
-        rows = state.storage.list_reorgs(limit=limit)
-        return JSONResponse({"count": len(rows), "reorgs": rows})
+        async def _load():
+            rows = await asyncio.to_thread(state.storage.list_reorgs, limit=limit)
+            return {"count": len(rows), "reorgs": rows}
+        payload = await _cached("reorgs", _REORGS_LIST_TTL, (limit,), _load)
+        return JSONResponse(payload)
 
     @app.api_route("/api/reorgs/{block_number}", methods=["GET", "HEAD"])
     async def api_reorg_trace(
@@ -440,40 +468,52 @@ def build_app(
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
-        trace = state.storage.get_reorg_trace(block_number, window=window)
+        async def _load():
+            trace = await asyncio.to_thread(
+                state.storage.get_reorg_trace, block_number, window=window
+            )
+            if trace is None:
+                return None
+            # Sanitization happens silently — no "level" marker in the
+            # response body. A marker would just invite the reader to
+            # wonder what the "other" level withholds, and it doesn't
+            # actually protect the stripped fields (JSON is trivially
+            # editable). The URL parameter remains available as an
+            # opt-in for internal callers who need the local timing.
+            if level == "public":
+                trace = {
+                    **trace,
+                    "blocks": [_sanitize_block_for_public(b) for b in trace["blocks"]],
+                }
+            return trace
+        trace = await _cached(
+            "reorg_trace", _REORG_TRACE_TTL, (block_number, window, level), _load
+        )
         if trace is None:
             return JSONResponse(
                 {"error": "reorg alert not found"},
                 status_code=404,
             )
-        # Sanitization happens silently — no "level" marker in the
-        # response body. A marker would just invite the reader to
-        # wonder what the "other" level withholds, and it doesn't
-        # actually protect the stripped fields (JSON is trivially
-        # editable). The URL parameter remains available as an
-        # opt-in for internal callers who need the local timing.
-        if level == "public":
-            trace = {
-                **trace,
-                "blocks": [_sanitize_block_for_public(b) for b in trace["blocks"]],
-            }
         return JSONResponse(trace)
 
     @app.api_route("/api/probes", methods=["GET", "HEAD"])
     async def api_probes() -> JSONResponse:
-        probes, ran_at = state.probes()
-        return JSONResponse({
-            "ran_at": ran_at,
-            "probes": [
-                {
-                    "name": p.name,
-                    "status": p.status,
-                    "summary": p.summary,
-                    "details": p.details,
-                }
-                for p in probes
-            ],
-        })
+        async def _load():
+            probes, ran_at = state.probes()
+            return {
+                "ran_at": ran_at,
+                "probes": [
+                    {
+                        "name": p.name,
+                        "status": p.status,
+                        "summary": p.summary,
+                        "details": p.details,
+                    }
+                    for p in probes
+                ],
+            }
+        payload = await _cached("probes", _PROBES_TTL, (), _load)
+        return JSONResponse(payload)
 
     def _sanitize_probe_summary(name: str, summary: str) -> str:
         """Strip exact port numbers, ulimit values and percentages from
@@ -506,18 +546,21 @@ def build_app(
         for the dashboard's host-probes panel to show green/amber/red
         rows, with no path or hardware identifier in the payload.
         """
-        probes, ran_at = state.probes()
-        return JSONResponse({
-            "ran_at": ran_at,
-            "probes": [
-                {
-                    "name": p.name,
-                    "status": p.status,
-                    "summary": _sanitize_probe_summary(p.name, p.summary),
-                }
-                for p in probes
-            ],
-        })
+        async def _load():
+            probes, ran_at = state.probes()
+            return {
+                "ran_at": ran_at,
+                "probes": [
+                    {
+                        "name": p.name,
+                        "status": p.status,
+                        "summary": _sanitize_probe_summary(p.name, p.summary),
+                    }
+                    for p in probes
+                ],
+            }
+        payload = await _cached("probes_public", _PROBES_TTL, (), _load)
+        return JSONResponse(payload)
 
     @app.api_route("/api/contracts/top_retried", methods=["GET", "HEAD"])
     async def api_top_retried(
@@ -685,27 +728,19 @@ def build_app(
                 status_code=400,
             )
 
-        blocks = []
-        if include_blocks:
-            # Bounded by the 2 h span cap above, so load_blocks_range's
-            # 50 K row limit never bites for well-formed requests.
-            blocks = await asyncio.to_thread(
-                state.storage.load_blocks_range,
-                from_ts_ms=from_ts_ms,
-                to_ts_ms=to_ts_ms,
-                limit=50_000,
-            )
-        # Aggregate metrics: the collector loop already stores every
-        # block's contribution in `blocks` (the raw SQLite table), but
-        # we only need the per-row fields to compute peaks/means. Pull
-        # them via a lightweight aggregate-only path — loading rows to
-        # rebuild Python objects just to sum them would throw the
-        # response-size budget out the window.
-        aggregate = await asyncio.to_thread(
-            state.storage.block_metrics_aggregate,
-            from_ts_ms=from_ts_ms,
-            to_ts_ms=to_ts_ms,
+        # Quantize ts bounds so multiple viewers asking for "last hour"
+        # within the same TTL window collapse to one cache entry. Match
+        # quantization step to TTL — finer step would mean each viewer's
+        # Date.now() is a unique key, defeating cache between sessions.
+        step = int(_WINDOW_SUMMARY_TTL * 1000)
+        cache_key = (
+            (from_ts_ms // step) * step,
+            (to_ts_ms // step) * step,
+            top_contracts_limit,
+            min_appearances,
+            include_blocks,
         )
+
         # Contract ranking path is span-dependent. Short windows (≤6 h —
         # a Foundation stress batch is 2 h) stay on the raw
         # tx_contract_block aggregate where sparse contracts remain
@@ -717,62 +752,90 @@ def build_app(
         # of top-100 across every tested window — the lost tail is
         # sparse one-shot addresses, not signal.
         _ROLLUP_SPAN_THRESHOLD_MS = 6 * 3600 * 1000
-        if span_ms <= _ROLLUP_SPAN_THRESHOLD_MS:
-            contracts = await asyncio.to_thread(
-                state.storage.top_retried_contracts,
-                since_ts_ms=from_ts_ms,
-                until_ts_ms=to_ts_ms,
-                min_appearances=min_appearances,
-                limit=top_contracts_limit,
-            )
-        else:
-            contracts = await asyncio.to_thread(
-                state.storage.top_retried_contracts_rollup,
-                since_ts_ms=from_ts_ms,
-                until_ts_ms=to_ts_ms,
-                min_appearances=min_appearances,
-                limit=top_contracts_limit,
-            )
 
-        def _row(s):
-            lbl = labels.get(s.to_addr)
-            return {
-                "to_addr": s.to_addr,
-                "label": lbl.name if lbl else None,
-                "category": lbl.category if lbl else None,
-                "blocks_appeared": s.blocks_appeared,
-                "retried_blocks": s.retried_blocks,
-                "retried_ratio": round(
-                    s.retried_blocks / s.blocks_appeared, 4
-                ) if s.blocks_appeared else 0.0,
-                "avg_rtp_of_blocks": round(s.avg_rtp_of_blocks, 2),
-                "tx_count": s.tx_count,
-                "total_gas": s.total_gas,
-            }
+        async def _load():
+            blocks = []
+            if include_blocks:
+                # Bounded by the 2 h span cap above, so load_blocks_range's
+                # 50 K row limit never bites for well-formed requests.
+                blocks = await asyncio.to_thread(
+                    state.storage.load_blocks_range,
+                    from_ts_ms=from_ts_ms,
+                    to_ts_ms=to_ts_ms,
+                    limit=50_000,
+                )
+            # Aggregate metrics: the collector loop already stores every
+            # block's contribution in `blocks` (the raw SQLite table), but
+            # we only need the per-row fields to compute peaks/means. Pull
+            # them via a lightweight aggregate-only path — loading rows to
+            # rebuild Python objects just to sum them would throw the
+            # response-size budget out the window.
+            aggregate = await asyncio.to_thread(
+                state.storage.block_metrics_aggregate,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+            )
+            if span_ms <= _ROLLUP_SPAN_THRESHOLD_MS:
+                contracts = await asyncio.to_thread(
+                    state.storage.top_retried_contracts,
+                    since_ts_ms=from_ts_ms,
+                    until_ts_ms=to_ts_ms,
+                    min_appearances=min_appearances,
+                    limit=top_contracts_limit,
+                )
+            else:
+                contracts = await asyncio.to_thread(
+                    state.storage.top_retried_contracts_rollup,
+                    since_ts_ms=from_ts_ms,
+                    until_ts_ms=to_ts_ms,
+                    min_appearances=min_appearances,
+                    limit=top_contracts_limit,
+                )
 
-        payload = {
-            "window": {
-                "from_ts_ms": from_ts_ms,
-                "to_ts_ms": to_ts_ms,
-                "span_sec": round(span_ms / 1000.0, 1),
-            },
-            "aggregate": aggregate,
-            "top_contracts": [_row(s) for s in contracts],
-        }
-        if include_blocks:
-            payload["blocks"] = [
-                {
-                    "n": b.block_number,
-                    "t": b.timestamp_ms,
-                    "tx": b.tx_count,
-                    "rt": b.retried,
-                    "rtp": b.retry_pct,
-                    "gas": b.gas_used,
-                    "tpse": b.tps_effective,
-                    "gpse": b.gas_per_sec_effective,
+            def _row(s):
+                lbl = labels.get(s.to_addr)
+                return {
+                    "to_addr": s.to_addr,
+                    "label": lbl.name if lbl else None,
+                    "category": lbl.category if lbl else None,
+                    "blocks_appeared": s.blocks_appeared,
+                    "retried_blocks": s.retried_blocks,
+                    "retried_ratio": round(
+                        s.retried_blocks / s.blocks_appeared, 4
+                    ) if s.blocks_appeared else 0.0,
+                    "avg_rtp_of_blocks": round(s.avg_rtp_of_blocks, 2),
+                    "tx_count": s.tx_count,
+                    "total_gas": s.total_gas,
                 }
-                for b in blocks
-            ]
+
+            payload = {
+                "window": {
+                    "from_ts_ms": from_ts_ms,
+                    "to_ts_ms": to_ts_ms,
+                    "span_sec": round(span_ms / 1000.0, 1),
+                },
+                "aggregate": aggregate,
+                "top_contracts": [_row(s) for s in contracts],
+            }
+            if include_blocks:
+                payload["blocks"] = [
+                    {
+                        "n": b.block_number,
+                        "t": b.timestamp_ms,
+                        "tx": b.tx_count,
+                        "rt": b.retried,
+                        "rtp": b.retry_pct,
+                        "gas": b.gas_used,
+                        "tpse": b.tps_effective,
+                        "gpse": b.gas_per_sec_effective,
+                    }
+                    for b in blocks
+                ]
+            return payload
+
+        payload = await _cached(
+            "window_summary", _WINDOW_SUMMARY_TTL, cache_key, _load
+        )
         return JSONResponse(payload)
 
     @app.api_route("/healthz", methods=["GET", "HEAD"])

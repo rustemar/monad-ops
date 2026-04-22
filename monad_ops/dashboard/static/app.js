@@ -585,18 +585,22 @@ async function fetchState() {
         // people actually read as numbers.
         const tpsPeak = d.tps_effective_peak_1m;
         const tpsAvg  = d.tps_effective_avg_1m;
+        const tpsBlock = d.tps_eff_peak_block;
         const gasPeak = d.gas_per_sec_effective_peak_1m;
+        const gasBlock = d.gas_eff_peak_block;
         document.getElementById("k-tps-eff-peak").textContent = fmtCompact(tpsPeak);
+        const tpsSubBase = tpsPeak != null
+            ? `${fmtInt(tpsPeak)} tx/s · avg ${fmtInt(tpsAvg)} tx/s per block`
+            : `avg ${fmtCompact(tpsAvg)} tx/s per block`;
         document.getElementById("k-tps-eff-avg").textContent =
-            tpsPeak != null
-                ? `${fmtInt(tpsPeak)} tx/s · avg ${fmtInt(tpsAvg)} tx/s per block`
-                : `avg ${fmtCompact(tpsAvg)} tx/s per block`;
+            tpsBlock != null ? `${tpsSubBase} · block #${fmtInt(tpsBlock)}` : tpsSubBase;
         document.getElementById("k-gas-eff-peak").textContent = fmtCompact(gasPeak);
         const gasSubEl = document.getElementById("k-gas-eff-peak-sub");
         if (gasSubEl) {
-            const gasBlock = d.gas_eff_peak_block;
             gasSubEl.textContent = gasPeak != null
-                ? `${fmtInt(gasPeak)} gas/sec · block #${fmtInt(gasBlock)}`
+                ? (gasBlock != null
+                    ? `${fmtInt(gasPeak)} gas/sec · block #${fmtInt(gasBlock)}`
+                    : `${fmtInt(gasPeak)} gas/sec`)
                 : "peak gas/sec inside a single block";
         }
 
@@ -1485,7 +1489,7 @@ function renderIncidents(alerts) {
     if (incidents.length === 0) {
         card.classList.remove("has-incidents");
         hint.textContent = "assertions · panics · chunk exhaustion · critical probes";
-        list.innerHTML = '<li class="empty-ok">● clear — no critical incidents in last 24h · <a href="/alerts">full history →</a></li>';
+        list.innerHTML = '<li class="empty-ok">● clear — no critical incidents in last 24h ·&nbsp;<a href="/alerts">full history →</a></li>';
         return;
     }
 

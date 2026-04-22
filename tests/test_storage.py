@@ -58,6 +58,29 @@ def test_insert_or_ignore_is_idempotent(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_pragmas_applied(tmp_path: Path) -> None:
+    """Performance/concurrency PRAGMAs are set on fresh connection.
+
+    Regression guard: removing busy_timeout in particular reverts to
+    the SQLite default of 0, which fails immediately under any
+    writer/reader contention instead of waiting.
+    """
+    storage = Storage(tmp_path / "state.db")
+    cur = storage._conn.execute("PRAGMA journal_mode").fetchone()
+    assert cur[0].lower() == "wal"
+    cur = storage._conn.execute("PRAGMA synchronous").fetchone()
+    # 1 = NORMAL
+    assert cur[0] == 1
+    cur = storage._conn.execute("PRAGMA busy_timeout").fetchone()
+    assert cur[0] == 5000
+    cur = storage._conn.execute("PRAGMA temp_store").fetchone()
+    # 2 = MEMORY
+    assert cur[0] == 2
+    cur = storage._conn.execute("PRAGMA mmap_size").fetchone()
+    assert cur[0] == 268435456
+    storage.close()
+
+
 def test_range_query_by_block_and_ts(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     for i in range(20):

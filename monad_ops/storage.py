@@ -293,6 +293,14 @@ class Storage:
             self._conn.executescript("PRAGMA cache_size = -65536;")
             self._conn.executescript("PRAGMA mmap_size = 268435456;")
             self._conn.executescript("PRAGMA temp_store = MEMORY;")
+            # busy_timeout — wait up to 5s on lock contention before raising
+            # OperationalError("database is locked"). Without this, a brief
+            # writer-vs-reader collision (collector commit overlapping with
+            # an /api/window_summary scan) returns an immediate error to
+            # the user. 5s is enough to ride out any single collector batch
+            # without making slow queries hang noticeably longer than they
+            # would have anyway.
+            self._conn.executescript("PRAGMA busy_timeout = 5000;")
             self._conn.executescript(_SCHEMA)
 
     # -- writes ------------------------------------------------------------

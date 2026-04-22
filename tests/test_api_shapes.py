@@ -67,8 +67,8 @@ async def test_api_state_shape(client: httpx.AsyncClient) -> None:
         "last_block", "last_block_seen_ms",
         "blocks_per_sec_1m", "rtp_avg_1m", "rtp_avg_5m", "rtp_max_1m",
         "tx_per_sec_1m", "gas_per_sec_1m",
-        "tps_effective_peak_1m", "tps_effective_avg_1m",
-        "gas_per_sec_effective_peak_1m",
+        "tps_effective_peak_1m", "tps_effective_avg_1m", "tps_eff_peak_block",
+        "gas_per_sec_effective_peak_1m", "gas_eff_peak_block",
         "reorg_count", "last_reorg_number", "last_reorg_old_id",
         "last_reorg_new_id", "last_reorg_ts_ms",
         "reference_block", "reference_checked_ms", "reference_error",
@@ -249,6 +249,89 @@ async def test_api_404_returns_json(client: httpx.AsyncClient) -> None:
     assert r.status_code == 404
     body = r.json()
     assert "detail" in body
+
+
+# ---------------------------------------------------------------------------
+# Cache behavior — TTL hit/miss + key isolation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_api_state_cache_collapses_concurrent_calls(
+    state_with_storage: State,
+) -> None:
+    """Repeated /api/state hits within TTL share a single snapshot.
+
+    Counts how many times state.snapshot() runs across two near-
+    simultaneous requests. With a 1s TTL and no real time elapsing,
+    the second request must hit the cache.
+    """
+    counter = {"snapshot": 0}
+    original = state_with_storage.snapshot
+    def _wrapped():
+        counter["snapshot"] += 1
+        return original()
+    state_with_storage.snapshot = _wrapped
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r1 = await c.get("/api/state")
+        r2 = await c.get("/api/state")
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+    assert r1.json() == r2.json()
+    assert counter["snapshot"] == 1
+
+
+@pytest.mark.asyncio
+async def test_api_alerts_cache_isolates_by_limit(
+    state_with_storage: State,
+) -> None:
+    """Different ?limit= values get different cache slots."""
+    counter = {"calls": 0}
+    original = state_with_storage.recent_alerts_with_ts
+    def _wrapped(limit: int = 50):
+        counter["calls"] += 1
+        return original(limit=limit)
+    state_with_storage.recent_alerts_with_ts = _wrapped
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        await c.get("/api/alerts?limit=5")
+        await c.get("/api/alerts?limit=5")    # cache hit
+        await c.get("/api/alerts?limit=10")   # cache miss — different key
+        await c.get("/api/alerts?limit=10")   # cache hit
+    # Two distinct cache keys → two underlying calls.
+    assert counter["calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_api_probes_public_cached(
+    state_with_storage: State,
+) -> None:
+    """/api/probes and /api/probes/public have independent cache slots
+    so the sanitized public payload never bleeds into the internal one
+    (or vice versa) just because both wrap state.probes().
+    """
+    counter = {"calls": 0}
+    original = state_with_storage.probes
+    def _wrapped():
+        counter["calls"] += 1
+        return original()
+    state_with_storage.probes = _wrapped
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r1 = await c.get("/api/probes")
+        r2 = await c.get("/api/probes")          # public cache hit
+        r3 = await c.get("/api/probes/public")   # separate bucket
+        r4 = await c.get("/api/probes/public")   # public cache hit
+    assert r1.json() == r2.json()
+    assert r3.json() == r4.json()
+    # /api/probes carries `details` (operator-sensitive); public must not.
+    assert "details" in r1.json()["probes"][0] if r1.json()["probes"] else True
+    assert all("details" not in p for p in r3.json()["probes"])
+    # Two buckets, each computed once.
+    assert counter["calls"] == 2
 
 
 if __name__ == "__main__":
