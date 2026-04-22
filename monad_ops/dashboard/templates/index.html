@@ -1,16 +1,42 @@
 <!doctype html>
 <html lang="en">
 <head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>monad-ops · {{ node_name }}</title>
     <meta name="description" content="Live operational view of a Monad testnet validator node — retry rates, chain integrity, alerts.">
-    <meta name="theme-color" content="#0f1115">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/">
     <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ops.rustemar.dev/">
     <meta property="og:title" content="monad-ops · {{ node_name }}">
     <meta property="og:description" content="Live validator-node dashboard for Monad testnet.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="monad-ops · {{ node_name }}">
+    <meta name="twitter:description" content="Live validator-node dashboard for Monad testnet.">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+    <script type="application/ld+json">
+    {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "monad-ops",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "Linux",
+        "description": "Live operational dashboard for a Monad testnet validator node.",
+        "url": "https://ops.rustemar.dev/",
+        "author": {"@type": "Person", "name": "rustemar", "alternateName": "hukutu4"},
+        "codeRepository": "https://github.com/rustemar/monad-ops",
+        "license": "https://opensource.org/licenses/MIT"
+    }
+    </script>
 </head>
 <body>
     <header class="top">
@@ -24,19 +50,31 @@
             </div>
             <div class="nav-links">
                 <a href="/alerts">alerts →</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
                 <a class="status health-pill-link"
                    id="health-pill"
                    href="/alerts?severity=critical"
                    aria-label="jump to critical incidents">
                     <span class="dot"></span>
-                    <span class="label">connecting…</span>
+                    <span class="label">loading live metrics…</span>
                 </a>
             </div>
         </div>
     </header>
 
     <main>
-        <section class="grid grid-4">
+        <section class="intro">
+            <p>
+                <strong>What this is.</strong> Public operational dashboard for
+                a Monad testnet validator node operated by
+                <a href="https://github.com/rustemar" target="_blank" rel="noopener noreferrer">rustemar</a>
+                (validator alias <code>hukutu4</code>). Live-updating — shows retry rates,
+                throughput, chain integrity, and alert history. Open-source
+                (<a href="https://github.com/rustemar/monad-ops" target="_blank" rel="noopener noreferrer">repo</a>).
+            </p>
+        </section>
+
+        <section class="grid grid-4" aria-live="polite" aria-atomic="false">
             <div class="card kpi">
                 <div class="kpi-label">last block</div>
                 <div class="kpi-value" id="k-last-block">—</div>
@@ -46,16 +84,18 @@
                 <div class="kpi-label">blocks / sec (1m)</div>
                 <div class="kpi-value" id="k-bps">—</div>
                 <div class="kpi-sub" id="k-tx">— tx/s</div>
+                <div class="sparkline" id="spark-tx"></div>
             </div>
             <div class="card kpi">
                 <div class="kpi-label">retry_pct avg (1m)</div>
                 <div class="kpi-value" id="k-rtp-1m">—</div>
                 <div class="kpi-sub" id="k-rtp-5m">5m avg —</div>
+                <div class="sparkline" id="spark-rtp"></div>
             </div>
             <div class="card kpi">
                 <div class="kpi-label">retry_pct peak (1m)</div>
                 <div class="kpi-value" id="k-rtp-peak">—</div>
-                <div class="kpi-sub">fraction of tx serialized</div>
+                <div class="kpi-sub">share of tx re-executed after parallel conflict</div>
             </div>
         </section>
 
@@ -67,7 +107,7 @@
                         <div class="epoch-number" id="k-epoch">—</div>
                     </div>
                     <div class="epoch-sub" id="k-epoch-sub">
-                        epoch probe warming up…
+                        epoch info loading…
                     </div>
                 </div>
                 <div class="epoch-progress" role="progressbar"
@@ -81,37 +121,37 @@
         <div class="legend" aria-label="threshold legend">
             <div class="group">
                 <span class="name">retry_pct</span>
-                <span class="chip ok">&lt;25</span>
-                <span class="chip mid">&lt;65</span>
-                <span class="chip warn">&lt;75</span>
-                <span class="chip crit">≥75</span>
+                <span class="chip ok" title="healthy">✓ &lt;25</span>
+                <span class="chip mid" title="elevated">○ &lt;65</span>
+                <span class="chip warn" title="warning">△ &lt;75</span>
+                <span class="chip crit" title="critical">⚠ ≥75</span>
             </div>
             <div class="group">
                 <span class="name">blocks/s</span>
-                <span class="chip ok">≥2.0</span>
-                <span class="chip mid">≥1.5</span>
-                <span class="chip warn">≥0.5</span>
-                <span class="chip crit">&lt;0.5</span>
+                <span class="chip ok" title="healthy">✓ ≥2.0</span>
+                <span class="chip mid" title="elevated">○ ≥1.5</span>
+                <span class="chip warn" title="warning">△ ≥0.5</span>
+                <span class="chip crit" title="critical">⚠ &lt;0.5</span>
             </div>
             <div class="group">
                 <span class="name">last block age</span>
-                <span class="chip ok">&lt;3s</span>
-                <span class="chip warn">&lt;10s</span>
-                <span class="chip crit">≥10s</span>
+                <span class="chip ok" title="healthy">✓ &lt;3s</span>
+                <span class="chip warn" title="warning">△ &lt;10s</span>
+                <span class="chip crit" title="critical">⚠ ≥10s</span>
             </div>
-            <span class="note">thresholds calibrated from observed p50/p75/p95/p99 (history max retry_pct 92%)</span>
+            <span class="note">thresholds set from historic retry_pct distribution (worst case 92%, 2026-04-20 stress batch)</span>
         </div>
 
         <section class="grid grid-2">
             <div class="card kpi">
                 <div class="kpi-label">effective tps peak (1m)</div>
                 <div class="kpi-value" id="k-tps-eff-peak">—</div>
-                <div class="kpi-sub" id="k-tps-eff-avg">avg — tx/s intrablock</div>
+                <div class="kpi-sub" id="k-tps-eff-avg">avg — tx/s per block</div>
             </div>
             <div class="card kpi">
                 <div class="kpi-label">gas/sec effective peak (1m)</div>
                 <div class="kpi-value" id="k-gas-eff-peak">—</div>
-                <div class="kpi-sub" id="k-gas-eff-peak-sub">intrablock gas throughput ceiling, absolute gas/sec</div>
+                <div class="kpi-sub" id="k-gas-eff-peak-sub">peak gas/sec inside a single block</div>
             </div>
         </section>
 
@@ -134,21 +174,20 @@
                     </div>
                 </div>
                 <div class="kpi-sub" id="lag-sub">
-                    compared against <a href="https://testnet-rpc.monad.xyz" class="footlink">testnet-rpc.monad.xyz</a> · answers "is my node lagging, or is the whole network halted?"
+                    compared against <a href="https://testnet-rpc.monad.xyz" class="footlink" target="_blank" rel="noopener noreferrer">testnet-rpc.monad.xyz</a> · answers "is my node lagging, or is the whole network halted?"
                 </div>
             </div>
         </section>
 
         <div class="parallelism-note">
-            peak = Monad's execution speed during the busiest microsecond of that block —
-            not a sustained rate, but the real parallel-execution ceiling hit in practice.
-            Testnet cadence is thin (avg ~2.5 blk/s), so sustained tx/s (above) stays low
-            while intrablock peaks show the parallelism headroom.
+            Peak = the fastest moment inside a single block (not a sustained rate).
+            Testnet blocks arrive slowly (~2.5 blk/s), so the average stays low
+            while per-block peaks reveal Monad's parallel-execution headroom.
         </div>
 
         <div class="charts-toolbar">
             <span class="charts-toolbar-label">period</span>
-            <div class="charts-range" role="tablist" aria-label="chart time range">
+            <div class="charts-range" role="group" aria-label="chart time range">
                 <button type="button" class="range-btn" data-range="300">5m</button>
                 <button type="button" class="range-btn" data-range="900">15m</button>
                 <button type="button" class="range-btn" data-range="3600">1h</button>
@@ -158,6 +197,7 @@
                 <button type="button" class="range-btn" id="custom-toggle" aria-expanded="false">custom</button>
             </div>
             <span class="charts-toolbar-hint" id="charts-range-hint">—</span>
+            <button type="button" class="copy-btn" id="copy-chart-link" title="copy link to this view">copy link</button>
             <!-- Custom-range panel: collapsed by default, toggled by the
                  "custom" pill above. Two datetime-local inputs + an apply
                  button; max span 7 days to keep server load bounded. Shown
@@ -166,12 +206,12 @@
                 <label>from <span class="custom-tz" id="tz-label-from"></span>
                     <input type="datetime-local" id="custom-from" step="1">
                 </label>
-                <label class="custom-to-wrap">to <span class="custom-tz" id="tz-label-to"></span>
+                <label>to <span class="custom-tz" id="tz-label-to"></span>
                     <input type="datetime-local" id="custom-to" step="1">
-                    <label class="custom-to-live">
-                        <input type="checkbox" id="custom-to-now">
-                        <span>now (live)</span>
-                    </label>
+                </label>
+                <label class="custom-to-live">
+                    <input type="checkbox" id="custom-to-now">
+                    <span>now (live)</span>
                 </label>
                 <button type="button" class="range-btn" id="custom-apply">apply</button>
                 <span class="charts-custom-msg" id="charts-custom-msg"></span>
@@ -182,14 +222,14 @@
             <div class="card chart" id="chart-rtp-card">
                 <div class="card-header">
                     <span class="card-title">retry_pct</span>
-                    <span class="card-hint" id="chart-rtp-hint">per-block re-execution ratio</span>
+                    <span class="card-hint" id="chart-rtp-hint">retry_pct — share of tx re-run per block</span>
                 </div>
                 <div class="chart-box"><canvas id="chart-rtp"></canvas></div>
             </div>
             <div class="card chart" id="chart-tx-card">
                 <div class="card-header">
                     <span class="card-title">tx/block</span>
-                    <span class="card-hint" id="chart-tx-hint">load per block</span>
+                    <span class="card-hint" id="chart-tx-hint">tx count per block</span>
                 </div>
                 <div class="chart-box"><canvas id="chart-tx"></canvas></div>
             </div>
@@ -199,7 +239,7 @@
             <div class="card chart" id="chart-exec-card">
                 <div class="card-header">
                     <span class="card-title">block execution time breakdown</span>
-                    <span class="card-hint" id="chart-exec-hint">microseconds per phase · stacked</span>
+                    <span class="card-hint" id="chart-exec-hint">time per execution step, in microseconds · stacked</span>
                 </div>
                 <div class="chart-box tall"><canvas id="chart-exec"></canvas></div>
                 <div class="chart-legend-inline">
@@ -214,7 +254,7 @@
             <div class="card" id="probes-card">
                 <div class="card-header">
                     <span class="card-title">host probes</span>
-                    <span class="card-hint" id="probes-hint">periodic local health checks · services · disk · fd limits</span>
+                    <span class="card-hint" id="probes-hint">periodic local health checks · services · disk · open-file limits</span>
                 </div>
                 <ul class="probes" id="probes-list">
                     <li class="empty">probes running…</li>
@@ -236,12 +276,11 @@
                     <div class="integrity-detail" id="integrity-detail">—</div>
                 </div>
                 <div class="integrity-note">
-                    A reorg means the same block number was seen with two different
-                    block_ids — a chain rewrite. On Monad's HotStuff-2 consensus this
-                    should never happen in healthy conditions (finality is deterministic).
-                    A non-zero value indicates either a network-wide safety violation or
-                    local state corruption on this node. "0" is the expected invariant;
-                    this panel exists to prove it's holding.
+                    A reorg means the same block number appeared with two different
+                    block_ids — a chain rewrite. Monad's HotStuff-2 consensus gives
+                    deterministic finality, so in healthy conditions this counter stays
+                    at 0. Non-zero = either a network-wide safety event or local state
+                    corruption on this node.
                 </div>
             </div>
         </section>
@@ -249,7 +288,7 @@
         <section class="grid grid-1">
             <div class="card" id="contracts-card">
                 <div class="card-header">
-                    <span class="card-title">top high-conflict contracts</span>
+                    <span class="card-title">top contracts by re-execution rate</span>
                     <span class="card-hint" id="contracts-hint">ranked by re-execution ratio · —</span>
                 </div>
                 <div class="contracts-controls">
@@ -269,7 +308,7 @@
                         </select>
                     </label>
                 </div>
-                <table class="contracts" id="contracts-table">
+                <div class="table-scroll"><table class="contracts" id="contracts-table">
                     <thead>
                         <tr>
                             <th scope="col">contract</th>
@@ -281,9 +320,9 @@
                         </tr>
                     </thead>
                     <tbody id="contracts-body">
-                        <tr class="empty"><td colspan="6">collecting enrichment data…</td></tr>
+                        <tr class="empty"><td colspan="6">collecting contract labels…</td></tr>
                     </tbody>
-                </table>
+                </table></div>
             </div>
         </section>
 
@@ -291,7 +330,7 @@
             <div class="card" id="incidents-card">
                 <div class="card-header">
                     <span class="card-title">critical incidents</span>
-                    <span class="card-hint" id="incidents-hint">assertions · panics · chunk exhaustion · critical probes</span>
+                    <span class="card-hint" id="incidents-hint">assertions · panics · chunk-exhaustion events · critical host-probe failures</span>
                 </div>
                 <ul class="incidents" id="incidents-list">
                     <li class="empty-ok">● clear — no critical events in buffer</li>
@@ -324,7 +363,7 @@
         <span class="sep">·</span>
         <a href="/api" class="footlink">API docs →</a>
         <span class="sep">·</span>
-        <span class="attribution">personal validator-node view · rustemar / hukutu4</span>
+        <span class="attribution">monad-ops · validator-node dashboard · rustemar / hukutu4</span>
     </footer>
 
     <script src="/static/vendor/chart.umd.min.js?v={{ asset_version }}"></script>

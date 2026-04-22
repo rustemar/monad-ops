@@ -1,0 +1,5 @@
+Contact: mailto:security@rustemar.dev
+Expires: 2027-04-22T00:00:00.000Z
+Preferred-Languages: en, ru
+Canonical: https://ops.rustemar.dev/.well-known/security.txt
+Policy: https://github.com/rustemar/monad-ops/blob/main/SECURITY.md

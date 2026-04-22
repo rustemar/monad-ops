@@ -1,0 +1,17 @@
+{
+    "name": "monad-ops",
+    "short_name": "monad-ops",
+    "description": "Live operational dashboard for a Monad testnet validator node.",
+    "start_url": "/",
+    "display": "standalone",
+    "background_color": "#0f1115",
+    "theme_color": "#0f1115",
+    "icons": [
+        {
+            "src": "/static/favicon.svg",
+            "sizes": "any",
+            "type": "image/svg+xml",
+            "purpose": "any"
+        }
+    ]
+}

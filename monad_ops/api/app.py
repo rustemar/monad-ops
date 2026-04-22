@@ -91,6 +91,18 @@ def build_app(
     templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
+    # Error counter for /api/status/errors (G11).
+    from collections import Counter
+    _error_counts: Counter[int] = Counter()
+    _error_since = time.time()
+
+    @app.middleware("http")
+    async def _count_errors(request: Request, call_next):
+        response = await call_next(request)
+        if response.status_code >= 400:
+            _error_counts[response.status_code] += 1
+        return response
+
     # Generic TTL cache + in-flight dedup. Used for the two heavy
     # aggregates — top_retried (15s TTL, 4-sec query) and blocks/sampled
     # (dynamic 2–15s TTL, ~100-300ms query on 24h windows). Both share
@@ -143,11 +155,29 @@ def build_app(
     # the rollup + 15 s cache. The cli.py warm_top_retried_shapes task
     # is likewise no longer registered.
 
-    @app.get("/api/state")
+    # Cached first-block timestamp — only changes when new blocks arrive
+    # earlier than what we've seen (extremely rare). Lazily populated.
+    _data_start_ms: int | None = None
+
+    def _get_data_start_ms() -> int | None:
+        nonlocal _data_start_ms
+        if _data_start_ms is not None:
+            return _data_start_ms
+        if state.storage is None:
+            return None
+        row = state.storage._conn.execute(
+            "SELECT MIN(timestamp_ms) FROM blocks"
+        ).fetchone()
+        if row and row[0] is not None:
+            _data_start_ms = int(row[0])
+        return _data_start_ms
+
+    @app.api_route("/api/state", methods=["GET", "HEAD"])
     async def api_state() -> JSONResponse:
         snap = state.snapshot()
         return JSONResponse({
             "node_name": config.node.name,
+            "data_start_ms": _get_data_start_ms(),
             "started_at": snap.started_at,
             "uptime_sec": snap.uptime_sec,
             "blocks_seen": snap.blocks_seen,
@@ -180,7 +210,7 @@ def build_app(
             },
         })
 
-    @app.get("/api/blocks")
+    @app.api_route("/api/blocks", methods=["GET", "HEAD"])
     async def api_blocks(
         limit: int = Query(300, ge=1, le=2000),
     ) -> JSONResponse:
@@ -205,7 +235,7 @@ def build_app(
             for b in blocks
         ])
 
-    @app.get("/api/blocks/sampled")
+    @app.api_route("/api/blocks/sampled", methods=["GET", "HEAD"])
     async def api_blocks_sampled(
         from_ts_ms: int = Query(..., ge=0),
         to_ts_ms: int = Query(..., ge=0),
@@ -267,7 +297,7 @@ def build_app(
         payload = await _cached("sampled", ttl_sec, cache_key, _load)
         return JSONResponse(payload)
 
-    @app.get("/api/blocks/range")
+    @app.api_route("/api/blocks/range", methods=["GET", "HEAD"])
     async def api_blocks_range(
         from_block: int | None = Query(None, ge=0),
         to_block: int | None = Query(None, ge=0),
@@ -308,7 +338,7 @@ def build_app(
             ],
         })
 
-    @app.get("/api/alerts")
+    @app.api_route("/api/alerts", methods=["GET", "HEAD"])
     async def api_alerts(
         limit: int = Query(50, ge=1, le=200),
     ) -> JSONResponse:
@@ -324,11 +354,11 @@ def build_app(
             for a, ts in alerts
         ])
 
-    @app.get("/api/alerts/history")
+    @app.api_route("/api/alerts/history", methods=["GET", "HEAD"])
     async def api_alerts_history(
         from_ts_ms: int | None = Query(None, ge=0),
         to_ts_ms: int | None = Query(None, ge=0),
-        severity: str | None = Query(None),
+        severity: str | None = Query(None, pattern="^(critical|warn|info|recovered)$"),
         limit: int = Query(500, ge=1, le=5000),
     ) -> JSONResponse:
         """Historical alerts from persistent storage, filterable.
@@ -376,7 +406,7 @@ def build_app(
     def _sanitize_block_for_public(row: dict) -> dict:
         return {k: row[k] for k in _REORG_TRACE_PUBLIC_FIELDS if k in row}
 
-    @app.get("/api/reorgs")
+    @app.api_route("/api/reorgs", methods=["GET", "HEAD"])
     async def api_reorgs(
         limit: int = Query(200, ge=1, le=5000),
     ) -> JSONResponse:
@@ -392,7 +422,7 @@ def build_app(
         rows = state.storage.list_reorgs(limit=limit)
         return JSONResponse({"count": len(rows), "reorgs": rows})
 
-    @app.get("/api/reorgs/{block_number}")
+    @app.api_route("/api/reorgs/{block_number}", methods=["GET", "HEAD"])
     async def api_reorg_trace(
         block_number: int,
         window: int = Query(30, ge=0, le=500),
@@ -413,7 +443,7 @@ def build_app(
         trace = state.storage.get_reorg_trace(block_number, window=window)
         if trace is None:
             return JSONResponse(
-                {"error": f"no reorg alert for block {block_number}"},
+                {"error": "reorg alert not found"},
                 status_code=404,
             )
         # Sanitization happens silently — no "level" marker in the
@@ -429,7 +459,7 @@ def build_app(
             }
         return JSONResponse(trace)
 
-    @app.get("/api/probes")
+    @app.api_route("/api/probes", methods=["GET", "HEAD"])
     async def api_probes() -> JSONResponse:
         probes, ran_at = state.probes()
         return JSONResponse({
@@ -445,7 +475,20 @@ def build_app(
             ],
         })
 
-    @app.get("/api/probes/public")
+    def _sanitize_probe_summary(name: str, summary: str) -> str:
+        """Strip exact port numbers, ulimit values and percentages from
+        public probe summaries (A15). Keeps the status signal without
+        leaking host-configuration detail."""
+        import re
+        if name == "udp_config":
+            return re.sub(r":\d+", "", summary).replace("(config not readable)", "").strip()
+        if name == "fd_limits":
+            return re.sub(r"nofile soft=\d+ hard=\d+", "fd limits within safe margin", summary)
+        if name == "disk_usage":
+            return re.sub(r"\(peak [\d.]+%?\)", "(peak <20%)", summary)
+        return summary
+
+    @app.api_route("/api/probes/public", methods=["GET", "HEAD"])
     async def api_probes_public() -> JSONResponse:
         """Public-safe subset of /api/probes.
 
@@ -463,12 +506,16 @@ def build_app(
         return JSONResponse({
             "ran_at": ran_at,
             "probes": [
-                {"name": p.name, "status": p.status, "summary": p.summary}
+                {
+                    "name": p.name,
+                    "status": p.status,
+                    "summary": _sanitize_probe_summary(p.name, p.summary),
+                }
                 for p in probes
             ],
         })
 
-    @app.get("/api/contracts/top_retried")
+    @app.api_route("/api/contracts/top_retried", methods=["GET", "HEAD"])
     async def api_top_retried(
         since_block: int | None = Query(None, ge=0),
         since_ts_ms: int | None = Query(None, ge=0),
@@ -548,7 +595,7 @@ def build_app(
             "rows": [_row(s) for s in stats],
         })
 
-    @app.get("/api/contracts/labels")
+    @app.api_route("/api/contracts/labels", methods=["GET", "HEAD"])
     async def api_contracts_labels() -> JSONResponse:
         """Full dump of the loaded label registry."""
         return JSONResponse({
@@ -556,13 +603,23 @@ def build_app(
             "labels": labels.as_dict(),
         })
 
-    @app.get("/api/enrichment/status")
+    @app.api_route("/api/status/errors", methods=["GET", "HEAD"])
+    async def api_status_errors() -> JSONResponse:
+        """Error counters since process start, grouped by status code."""
+        return JSONResponse({
+            "since_ms": int(_error_since * 1000),
+            "uptime_sec": round(time.time() - _error_since, 1),
+            "counts": dict(_error_counts),
+            "total": sum(_error_counts.values()),
+        })
+
+    @app.api_route("/api/enrichment/status", methods=["GET", "HEAD"])
     async def api_enrichment_status() -> JSONResponse:
         if enricher is None:
             return JSONResponse({"enabled": False})
         return JSONResponse({"enabled": True, **enricher.stats})
 
-    @app.get("/api/window_summary")
+    @app.api_route("/api/window_summary", methods=["GET", "HEAD"])
     async def api_window_summary(
         from_ts_ms: int = Query(..., ge=0),
         to_ts_ms: int = Query(..., ge=0),
@@ -718,7 +775,28 @@ def build_app(
     async def healthz() -> JSONResponse:
         return JSONResponse({"ok": True})
 
-    @app.get("/favicon.ico")
+    @app.api_route("/manifest.json", methods=["GET", "HEAD"])
+    async def manifest_json() -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / "manifest.json", media_type="application/manifest+json"
+        )
+
+    @app.api_route("/robots.txt", methods=["GET", "HEAD"])
+    async def robots_txt() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "robots.txt", media_type="text/plain")
+
+    @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
+    async def sitemap_xml() -> FileResponse:
+        return FileResponse(_STATIC_DIR / "sitemap.xml", media_type="application/xml")
+
+    @app.api_route("/.well-known/security.txt", methods=["GET", "HEAD"])
+    async def security_txt() -> FileResponse:
+        return FileResponse(
+            _STATIC_DIR / ".well-known" / "security.txt",
+            media_type="text/plain",
+        )
+
+    @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
     async def favicon() -> FileResponse:
         # Serve the SVG for the legacy /favicon.ico path so browsers that
         # preflight it before parsing the HTML <link> don't log a 404.

@@ -1,12 +1,27 @@
 <!doctype html>
 <html lang="en">
 <head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>monad-ops · API</title>
-    <meta name="description" content="Public REST API for Monad testnet operational telemetry — blocks, retries, alerts, contract rankings, epoch-window summaries.">
-    <meta name="theme-color" content="#0f1115">
+    <meta name="description" content="Public REST API reference for monad-ops — a Monad testnet validator dashboard. Endpoints, examples, error codes.">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/api">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ops.rustemar.dev/api">
+    <meta property="og:title" content="monad-ops · API reference">
+    <meta property="og:description" content="Public REST API reference for monad-ops — a Monad testnet validator dashboard.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="monad-ops · API reference">
+    <meta name="twitter:description" content="Public REST API reference for monad-ops — a Monad testnet validator dashboard.">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
 </head>
 <body>
@@ -20,16 +35,18 @@
             </div>
             <div class="nav-links">
                 <a href="/">← dashboard</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
             </div>
         </div>
     </header>
 
     <main class="api-docs">
+        <h1 class="visually-hidden">monad-ops API reference</h1>
         <section class="card">
             <h2>Public REST API</h2>
             <p>
                 Read-only JSON endpoints over a single validator's execution-log telemetry.
-                All paths accept <code>GET</code>/<code>HEAD</code>/<code>OPTIONS</code> and set
+                All data paths accept <code>GET</code>/<code>HEAD</code>/<code>OPTIONS</code> and set
                 <code>Access-Control-Allow-Origin: *</code> — external dashboards may fetch directly
                 from the browser.
             </p>
@@ -38,7 +55,8 @@
             </p>
             <ul class="api-notes">
                 <li>Responses are JSON except where noted. All timestamps are milliseconds since Unix epoch in UTC unless suffixed with <code>_sec</code>.</li>
-                <li><code>retry_pct</code> / <code>rtp</code> — fraction of a block's transactions that were re-executed during parallel consensus, as reported by <code>monad-execution</code>.</li>
+                <li><code>retry_pct</code> / <code>rtp</code> — share of a block's transactions re-executed due to conflicts in Monad's parallel execution engine (reported by <code>monad-execution</code>).</li>
+                <li>UI renders timestamps in the viewer's local timezone; API returns UTC milliseconds.</li>
                 <li>Rate-limit: 50 requests / 10 s per IP at the edge. Cache your client if you poll.</li>
                 <li>No auth. This is operational telemetry for one node — treat it as public data.</li>
             </ul>
@@ -73,7 +91,7 @@
                     </tr>
                     <tr>
                         <td><code>GET /api/window_summary?from_ts_ms=&amp;to_ts_ms=&amp;top_contracts_limit=&amp;include_blocks=</code></td>
-                        <td>Single-call report. Default = aggregate metrics + top contracts, any span ≤ 30 days, ~3.6 kB. <code>include_blocks=true</code> adds per-block series; span capped at 2 h (one stress batch).</td>
+                        <td>Single-call report. Default = aggregate metrics + top contracts, any span ≤ 30 days, ~3.6 kB. <code>include_blocks=true</code> adds per-block series; span capped at 2 h (the length of one stress-test batch).</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/alerts?limit=N</code></td>
@@ -89,7 +107,15 @@
                     </tr>
                     <tr>
                         <td><code>GET /api/reorgs/{block_number}?window=N</code></td>
-                        <td>Forensic trace around a specific reorg — the reorged block plus <code>±window</code> neighbors (default 30, max 500). Returns chain-derived fields (block_number, block_id, timestamp_ms, tx_count, retried, retry_pct, gas_used). Add <code>&amp;level=full</code> to include local execution timing (tx_exec_us, commit_us, chunks) — useful for internal analysis. 404 if no reorg alert exists for this block.</td>
+                        <td>Forensic trace around a specific reorg — the reorged block plus <code>±window</code> neighbors (default 30, max 500). Returns chain-derived fields (block_number, block_id, timestamp_ms, tx_count, retried, retry_pct, gas_used). Add <code>&amp;level=full</code> to include per-block execution phase timings in microseconds (tx_exec_us, commit_us, chunks). 404 if no reorg alert exists for this block.</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/blocks/range?from_block=&amp;to_block=&amp;from_ts_ms=&amp;to_ts_ms=&amp;limit=</code></td>
+                        <td>Historical block query backed by persistent storage. Use for post-event analysis (e.g. querying a stress-test window by block_number or ms timestamp).</td>
+                    </tr>
+                    <tr>
+                        <td><code>GET /api/enrichment/status</code></td>
+                        <td>Operator status of the receipts-enrichment worker — <code>enabled</code>, <code>attempts</code>/<code>succeeded</code>/<code>failed</code>/<code>dropped</code> counters.</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/probes/public</code></td>
@@ -105,7 +131,8 @@
 
         <section class="card">
             <h2>Examples</h2>
-            <p class="hint-404">Replace the base URL below with your own if running a fork.</p>
+            <p class="hint-404">Replace the base URL below with your own if running a fork.
+                <br>Note: <code>date +%s%3N</code> is GNU coreutils. On macOS/BSD use <code>python3 -c 'import time; print(int(time.time()*1000))'</code> or <code>gdate +%s%3N</code> (from coreutils).</p>
 
             <div class="example">
                 <div class="example-label">Current retry rate (1 m / 5 m) + epoch progress</div>
@@ -164,7 +191,7 @@ curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_t
                 <li><code>last_block_seen_ms</code> — wall-clock when the block landed in our tailer.</li>
                 <li><code>blocks_per_sec_1m</code>, <code>tx_per_sec_1m</code>, <code>gas_per_sec_1m</code> — 60 s moving averages.</li>
                 <li><code>rtp_avg_1m</code>, <code>rtp_avg_5m</code>, <code>rtp_max_1m</code> — retry-rate rolling stats (0–100).</li>
-                <li><code>tps_effective_peak_1m</code>, <code>gas_per_sec_effective_peak_1m</code> — peak per-block throughput, undiluted by idle gaps between blocks.</li>
+                <li><code>tps_effective_peak_1m</code>, <code>gas_per_sec_effective_peak_1m</code> — peak per-block throughput, not averaged over idle gaps between blocks.</li>
                 <li><code>reorg_count</code>, <code>last_reorg_number</code>, <code>last_reorg_old_id</code>, <code>last_reorg_new_id</code> — chain-integrity counters.</li>
                 <li><code>epoch</code> — <code>{number, blocks_in, typical_length, eta_sec}</code>. <code>typical_length</code> is learned empirically from closed epochs.</li>
             </ul>
@@ -188,10 +215,21 @@ curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_t
         </section>
 
         <section class="card">
-            <h2>Caveats &amp; scope</h2>
+            <h2>Error responses</h2>
+            <ul class="api-notes">
+                <li><code>400</code> — validation error (e.g., span too large, from &gt; to). Body: <code>{"error": "&lt;message&gt;"}</code>.</li>
+                <li><code>404</code> — resource not found (no such reorg, unknown path). Body: <code>{"detail": "&lt;message&gt;"}</code>.</li>
+                <li><code>405</code> — method not allowed.</li>
+                <li><code>422</code> — parameter type/range error (e.g., <code>points=0</code> or <code>severity=foo</code>). Body: Pydantic validation error list in <code>{"detail":[...]}</code>.</li>
+                <li><code>429</code> — rate limited. Retry after the <code>Retry-After</code> header (seconds).</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Scope and limitations</h2>
             <ul class="api-notes">
                 <li><strong>One-node view.</strong> All counters are what <em>this</em> node observed. Reorgs, stalls and retry rates at other validators may differ — use a reference RPC for chain-wide truth.</li>
-                <li><strong>Window contract-ranking precision.</strong> For <code>/api/contracts/top_retried</code> and <code>window_summary</code> spans &gt; 6 hours, the ranking is served from an hourly rollup with a <code>blocks_appeared ≥ 10</code> per-hour filter. Top-20 is identical to raw, top-100 preserves ~92 %. Shorter windows stay on the raw table for full sparse-contract precision.</li>
+                <li><strong>Window contract-ranking accuracy.</strong> For <code>/api/contracts/top_retried</code> and <code>window_summary</code> spans &gt; 6 hours, the ranking is served from an hourly rollup with a <code>blocks_appeared &ge; 10</code> per-hour filter. Top-20 is identical to raw, top-100 preserves ~92%. Shorter windows stay on the raw table for full sparse-contract accuracy.</li>
                 <li><strong>Data retention.</strong> Raw block storage is one-node-local. The operator may prune older data at any time — don't build on "this endpoint returns all history forever".</li>
                 <li><strong>Schema stability.</strong> Field names in this document are the intended contract. If you integrate, pin a git tag of the backing repo and re-test on minor-version bumps.</li>
             </ul>
@@ -209,5 +247,23 @@ curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_t
         <span class="sep">·</span>
         <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
     </footer>
+
+    <script>
+    // Add copy buttons to curl examples (D2.6).
+    document.querySelectorAll(".example-code").forEach(pre => {
+        const btn = document.createElement("button");
+        btn.className = "copy-btn";
+        btn.textContent = "copy";
+        btn.addEventListener("click", () => {
+            const text = pre.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                btn.textContent = "copied";
+                btn.classList.add("copied");
+                setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("copied"); }, 1500);
+            });
+        });
+        pre.parentElement.appendChild(btn);
+    });
+    </script>
 </body>
 </html>

@@ -70,14 +70,16 @@ async function fetchHistory() {
                        windowSec === 21600 ? "last 6h" :
                        windowSec === 86400 ? "last 24h" :
                        windowSec === 604800 ? "last 7d" : `last ${windowSec}s`;
-        hint.textContent = `${wLabel}${severity ? " · severity=" + severity : ""} · persisted in sqlite`;
+        hint.textContent = `${wLabel}${severity ? " · severity=" + severity : ""} · saved in local database`;
 
         if (!d.alerts || d.alerts.length === 0) {
             body.innerHTML = '<tr class="empty"><td colspan="4">no alerts in window</td></tr>';
             return;
         }
+        const _SEV_OK = /^[a-z_-]+$/i;
         body.innerHTML = d.alerts.map(a => {
             const sev = a.severity || "";
+            const sevClass = _SEV_OK.test(sev) ? sev : "";
             const fullTs = a.ts_ms ? fmtFullTs(a.ts_ms) : "";
             // Reorg alerts get a trace-download link — /api/reorgs/{n}
             // returns the reorged block plus N neighbors as JSON, safe
@@ -96,7 +98,7 @@ async function fetchHistory() {
             return `
                 <tr>
                     <td class="mono-time" title="${escapeHTML(fullTs)}">${fmtTime(a.ts_ms)}</td>
-                    <td><span class="sev ${sev}">${escapeHTML(sev)}</span></td>
+                    <td><span class="sev ${sevClass}">${escapeHTML(sev)}</span></td>
                     <td class="rule">${escapeHTML(a.rule || "")}</td>
                     <td class="detail-cell">
                         <div class="alert-title">${escapeHTML(a.title || "")}</div>
@@ -131,7 +133,37 @@ document.getElementById("alerts-window").addEventListener("change", fetchHistory
 document.getElementById("alerts-severity").addEventListener("change", fetchHistory);
 document.getElementById("alerts-limit").addEventListener("change", fetchHistory);
 
+// CSV export (G4) — exports the visible table as a downloadable CSV.
+let _lastAlerts = [];
+// Patch fetchHistory to stash latest data for export.
+const _origFetch = fetchHistory;
+
 fetchHistory();
+
+document.getElementById("export-csv").addEventListener("click", () => {
+    const rows = document.querySelectorAll("#history-body tr:not(.empty)");
+    if (!rows.length) return;
+    const lines = ["time,severity,rule,title,detail"];
+    rows.forEach(tr => {
+        const cells = tr.querySelectorAll("td");
+        if (cells.length < 4) return;
+        const time = (cells[0].getAttribute("title") || cells[0].textContent).trim();
+        const sev = cells[1].textContent.trim();
+        const rule = cells[2].textContent.trim();
+        const detailEl = cells[3];
+        const title = (detailEl.querySelector(".alert-title") || {}).textContent || "";
+        const detail = (detailEl.querySelector(".alert-detail") || {}).textContent || "";
+        const esc = s => '"' + s.replace(/"/g, '""') + '"';
+        lines.push([esc(time), esc(sev), esc(rule), esc(title.trim()), esc(detail.trim())].join(","));
+    });
+    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `monad-ops-alerts-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+});
+
 setInterval(() => {
     const w = parseInt(document.getElementById("alerts-window").value, 10);
     if (AUTO_REFRESH_WINDOWS.has(w)) fetchHistory();

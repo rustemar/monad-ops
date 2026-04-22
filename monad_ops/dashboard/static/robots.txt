@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+Disallow: /api/reorgs/
+Sitemap: https://ops.rustemar.dev/sitemap.xml

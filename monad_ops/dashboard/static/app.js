@@ -545,11 +545,13 @@ function updateHealth(data) {
     else { pill.classList.add("ok"); labelEl.textContent = "healthy"; }
 }
 
+let _dataStartMs = null;
 async function fetchState() {
     try {
         const r = await pollFetch("state", "/api/state");
         if (!r.ok) throw new Error(r.statusText);
         const d = await r.json();
+        if (d.data_start_ms) _dataStartMs = d.data_start_ms;
         document.getElementById("node-name").textContent = d.node_name;
         document.getElementById("k-last-block").textContent = fmtInt(d.last_block);
         const sub = document.getElementById("k-last-block-sub");
@@ -580,14 +582,14 @@ async function fetchState() {
         document.getElementById("k-tps-eff-peak").textContent = fmtCompact(tpsPeak);
         document.getElementById("k-tps-eff-avg").textContent =
             tpsPeak != null
-                ? `${fmtInt(tpsPeak)} tx/s · avg ${fmtInt(tpsAvg)} tx/s intrablock`
-                : `avg ${fmtCompact(tpsAvg)} tx/s intrablock`;
+                ? `${fmtInt(tpsPeak)} tx/s · avg ${fmtInt(tpsAvg)} tx/s per block`
+                : `avg ${fmtCompact(tpsAvg)} tx/s per block`;
         document.getElementById("k-gas-eff-peak").textContent = fmtCompact(gasPeak);
         const gasSubEl = document.getElementById("k-gas-eff-peak-sub");
         if (gasSubEl) {
             gasSubEl.textContent = gasPeak != null
-                ? `${fmtInt(gasPeak)} gas/sec · intrablock ceiling`
-                : "intrablock gas throughput ceiling, absolute gas/sec";
+                ? `${fmtInt(gasPeak)} gas/sec · peak inside a single block`
+                : "peak gas/sec inside a single block";
         }
 
         // Chain integrity panel — reorg counter + last-reorg details.
@@ -857,6 +859,28 @@ async function fetchBlocks() {
     } catch (e) { /* swallow; next tick retries (AbortError too — already replaced) */ }
 }
 
+// Tiny SVG sparkline renderer (G5). Takes an array of numbers and
+// renders a polyline + filled area into the target element.
+function _renderSparkline(elId, values) {
+    const el = document.getElementById(elId);
+    if (!el || !values.length) return;
+    const n = values.length;
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    const range = max - min || 1;
+    const w = 100, h = 20;
+    const pts = values.map((v, i) => {
+        const x = (i / Math.max(1, n - 1)) * w;
+        const y = h - ((v - min) / range) * (h - 2) - 1;
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    });
+    const line = pts.join(" ");
+    const fill = `0,${h} ${line} ${w},${h}`;
+    el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">`
+        + `<polygon class="spark-fill" points="${fill}"/>`
+        + `<polyline points="${line}"/></svg>`;
+}
+
 function _applyChartPayload(d) {
     const bins = d.bins || [];
     const binLabel = _fmtBinLabel(d.bin_ms || 0);
@@ -893,6 +917,10 @@ function _applyChartPayload(d) {
     drawRtp(bins);
     drawTx(bins);
     drawExec(bins);
+    // Sparklines (G5) — last N bins for inline KPI trends.
+    const tail = bins.slice(-60);
+    _renderSparkline("spark-rtp", tail.map(b => b.rtp_avg ?? 0));
+    _renderSparkline("spark-tx", tail.map(b => b.tx_avg ?? 0));
 }
 
 function setLagVal(id, text, sevClass) {
@@ -957,7 +985,7 @@ function updateEpoch(ep) {
     if (!num || !sub || !bar) return;
     if (!ep || ep.number == null) {
         num.textContent = "—";
-        sub.textContent = "epoch probe warming up…";
+        sub.textContent = "epoch info loading…";
         bar.style.width = "0%";
         if (progress) progress.setAttribute("aria-valuenow", "0");
         return;
@@ -1019,6 +1047,46 @@ function updateIntegrity(d) {
         `last reorg: block #${fmtInt(d.last_reorg_number)} ` +
         `${when} — id changed ${short(d.last_reorg_old_id)} → ${short(d.last_reorg_new_id)}`;
 }
+
+// Known stress-test windows (G15). Each entry draws a faint colored
+// band on the rtp and tx charts so operators see context for spikes.
+// Times are UTC epoch ms — add entries as new batches happen.
+const STRESS_BATCHES = [
+    { from: 1745168400000, to: 1745175600000, label: "stress batch 1" }, // 2026-04-20 15:00-17:00 UTC
+    { from: 1745175600000, to: 1745182800000, label: "stress batch 2" }, // 2026-04-20 17:00-19:00 UTC
+    { from: 1745182800000, to: 1745190000000, label: "stress batch 3" }, // 2026-04-20 19:00-21:00 UTC
+];
+const stressBandPlugin = {
+    id: "stressBand",
+    beforeDraw(chart) {
+        if (!chart._binTimes || !chart._binTimes.length) return;
+        const ctx = chart.ctx;
+        const xScale = chart.scales.x;
+        const yScale = chart.scales.y;
+        for (const batch of STRESS_BATCHES) {
+            // Find pixel range of this batch within the visible bins.
+            let iFirst = -1, iLast = -1;
+            for (let i = 0; i < chart._binTimes.length; i++) {
+                const t = chart._binTimes[i];
+                if (t >= batch.from && t <= batch.to) {
+                    if (iFirst < 0) iFirst = i;
+                    iLast = i;
+                }
+            }
+            if (iFirst < 0) continue;
+            const x1 = xScale.getPixelForValue(iFirst);
+            const x2 = xScale.getPixelForValue(iLast);
+            ctx.save();
+            ctx.fillStyle = "rgba(245,166,35,0.06)";
+            ctx.fillRect(x1, yScale.top, x2 - x1, yScale.bottom - yScale.top);
+            ctx.fillStyle = "rgba(245,166,35,0.45)";
+            ctx.font = "9px JetBrains Mono";
+            ctx.textBaseline = "top";
+            ctx.fillText(batch.label, x1 + 2, yScale.top + 2);
+            ctx.restore();
+        }
+    },
+};
 
 // Shared x-axis config: category scale whose labels are time strings.
 // Chart.js auto-thins ticks via maxTicksLimit so 300 points don't crush
@@ -1123,7 +1191,7 @@ function drawRtp(bins) {
                 pointRadius: 0,
             }],
         },
-        plugins: [rtpZonesPlugin, crosshairPlugin],
+        plugins: [rtpZonesPlugin, crosshairPlugin, stressBandPlugin],
         options: {
             ...chartCommon,
             layout: { padding: { top: 36 } },
@@ -1163,7 +1231,7 @@ function drawTx(bins) {
                 borderWidth: 0,
             }],
         },
-        plugins: [crosshairPlugin],
+        plugins: [crosshairPlugin, stressBandPlugin],
         options: { ...chartCommon, layout: { padding: { top: 36 } } },
     });
     _attachBinMeta(txChart, bins);
@@ -1600,7 +1668,13 @@ if (_customApply) {
         if (!liveMode && toMs > Date.now() + 60_000) {
             _customMsg.textContent = "'to' is in the future"; return;
         }
-        _customMsg.textContent = "";
+        if (_dataStartMs && fromMs < _dataStartMs) {
+            const ds = new Date(_dataStartMs);
+            _customMsg.textContent = `no data before ${ds.toISOString().slice(0,10)}`;
+            // Don't block — just warn, user can still apply.
+        } else {
+            _customMsg.textContent = "";
+        }
         if (liveMode) _setChartCustomLive(fromMs);
         else _setChartCustomRange(fromMs, toMs);
     });
@@ -1614,11 +1688,23 @@ fetchBlocks();
 fetchContracts();
 fetchIncidents();
 fetchProbes();
-setInterval(fetchState, STATE_INTERVAL);
-setInterval(fetchBlocks, BLOCKS_INTERVAL);
-setInterval(fetchContracts, CONTRACTS_INTERVAL);
-setInterval(fetchIncidents, INCIDENTS_INTERVAL);
-setInterval(fetchProbes, PROBES_INTERVAL);
+// Throttle polling when the tab is hidden to save battery and reduce
+// rate-limit pressure (B5). On refocus, immediately refresh and
+// restore the normal interval.
+function _schedule(fn, interval) {
+    let id = setInterval(fn, interval);
+    document.addEventListener("visibilitychange", () => {
+        clearInterval(id);
+        const next = document.hidden ? interval * 6 : interval;
+        id = setInterval(fn, next);
+        if (!document.hidden) fn();
+    });
+}
+_schedule(fetchState, STATE_INTERVAL);
+_schedule(fetchBlocks, BLOCKS_INTERVAL);
+_schedule(fetchContracts, CONTRACTS_INTERVAL);
+_schedule(fetchIncidents, INCIDENTS_INTERVAL);
+_schedule(fetchProbes, PROBES_INTERVAL);
 
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
 // on mobile orientation change (portrait↔landscape) the parent's
@@ -1648,3 +1734,16 @@ function _scheduleResize() {
 }
 window.addEventListener("resize", _scheduleResize);
 window.addEventListener("orientationchange", _scheduleResize);
+
+// Deep-link copy button (G7) — copies the current URL (including chart
+// range params) to clipboard so operators can share a specific view.
+const _copyLinkBtn = document.getElementById("copy-chart-link");
+if (_copyLinkBtn) {
+    _copyLinkBtn.addEventListener("click", () => {
+        navigator.clipboard.writeText(window.location.href).then(() => {
+            _copyLinkBtn.textContent = "copied!";
+            _copyLinkBtn.classList.add("copied");
+            setTimeout(() => { _copyLinkBtn.textContent = "copy link"; _copyLinkBtn.classList.remove("copied"); }, 1500);
+        });
+    });
+}

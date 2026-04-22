@@ -23,6 +23,44 @@
     --ok: #6bcf76;
     --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
     --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color-scheme: dark light;
+}
+/* Light palette — explicit toggle (data-theme="light") or OS
+   preference when no explicit choice is stored. The JS theme
+   toggle sets data-theme on <html> and persists in localStorage. */
+html[data-theme="light"] {
+    --bg: #f4f6fa;
+    --bg-raised: #ebeef3;
+    --bg-card: #ffffff;
+    --border: #d4d9e2;
+    --text: #1e2028;
+    --text-dim: #535862;
+    --text-faint: #6e7585;
+    --accent: #2e6ed4;
+    --accent-dim: #1b5ab8;
+    --amber: #c07a08;
+    --amber-dim: #9e6507;
+    --warn: #c48000;
+    --crit: #d43b3b;
+    --ok: #2a8c35;
+}
+@media (prefers-color-scheme: light) {
+    html:not([data-theme="dark"]) {
+        --bg: #f4f6fa;
+        --bg-raised: #ebeef3;
+        --bg-card: #ffffff;
+        --border: #d4d9e2;
+        --text: #1e2028;
+        --text-dim: #535862;
+        --text-faint: #6e7585;
+        --accent: #2e6ed4;
+        --accent-dim: #1b5ab8;
+        --amber: #c07a08;
+        --amber-dim: #9e6507;
+        --warn: #c48000;
+        --crit: #d43b3b;
+        --ok: #2a8c35;
+    }
 }
 
 * { box-sizing: border-box; }
@@ -351,7 +389,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
     border-radius: 3px;
     color-scheme: dark;
 }
-.charts-custom input[type="datetime-local"]:focus {
+html[data-theme="light"] .charts-custom input[type="datetime-local"] { color-scheme: light; }
+.charts-custom input[type="datetime-local"]:focus-visible {
     outline: 1px solid var(--accent-dim); outline-offset: 1px;
     border-color: var(--accent);
 }
@@ -442,11 +481,6 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
     padding: 3px 6px; font-family: var(--mono); font-size: 11.5px;
     text-transform: none; letter-spacing: 0;
 }
-.contracts-controls select:focus { outline: 1px solid var(--accent-dim); }
-/* Stronger ring when focus was reached via keyboard — fills iter-4 §2.2
-   (iteration-4 audit: chrome's programmatic-focus path reports no outline
-   on the :focus rule above; :focus-visible + outline-offset is the
-   modern idiom). */
 .contracts-controls select:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
@@ -931,3 +965,111 @@ main.page-404 {
     .api-table th, .api-table td { padding: 6px 8px; }
     .example-code { font-size: 11.5px; padding: 10px; }
 }
+
+/* Introduction block on the dashboard landing. */
+.intro {
+    max-width: 1280px;
+    margin: 0 0 4px;
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.55;
+}
+.intro a { color: var(--accent); text-decoration: none; }
+.intro a:hover { text-decoration: underline; }
+.intro code { font-family: var(--mono); font-size: 12px; color: var(--text); }
+
+/* Table scroll wrapper for narrow viewports (C12). */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+/* Small viewport: let grid-4 stack single-column (C11). */
+@media (max-width: 420px) {
+    .grid.grid-4 { grid-template-columns: 1fr; }
+}
+
+/* Respect reduced-motion preference (C2). */
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}
+
+/* Copy button for curl examples on /api page (D2.6). */
+.example { position: relative; }
+.example .copy-btn {
+    position: absolute; top: 28px; right: 8px;
+    background: var(--bg-raised); color: var(--text-dim);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--mono); font-size: 10.5px;
+    padding: 2px 8px; cursor: pointer;
+    opacity: 0; transition: opacity 120ms;
+}
+.example:hover .copy-btn,
+.example .copy-btn:focus-visible { opacity: 1; }
+.example .copy-btn.copied { color: var(--ok); }
+
+/* Severity detail panel on /alerts page (D2.2). */
+details.severity-info {
+    margin: 0 0 14px;
+    font-size: 12.5px;
+    color: var(--text-dim);
+}
+details.severity-info summary {
+    cursor: pointer;
+    color: var(--text-faint);
+    font-size: 11.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+details.severity-info dl {
+    margin: 8px 0 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 4px 14px;
+}
+details.severity-info dt {
+    font-family: var(--mono);
+    color: var(--text);
+    font-weight: 500;
+}
+details.severity-info dd { margin: 0; }
+
+/* Theme toggle button (G2). */
+/* Sparkline mini-charts inside KPI cards (G5). */
+.sparkline {
+    height: 20px; margin-top: 4px;
+}
+.sparkline svg { width: 100%; height: 100%; display: block; }
+.sparkline path {
+    fill: none; stroke: var(--accent); stroke-width: 1.2;
+    vector-effect: non-scaling-stroke;
+}
+.sparkline .spark-fill {
+    fill: var(--accent); fill-opacity: 0.08; stroke: none;
+}
+
+/* Deep-link copy button in chart toolbar (G7). */
+.charts-toolbar .copy-btn {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text-dim); font-family: var(--mono); font-size: 10.5px;
+    padding: 2px 8px; cursor: pointer; margin-left: auto;
+}
+.charts-toolbar .copy-btn:hover { color: var(--text); border-color: var(--text-dim); }
+.charts-toolbar .copy-btn.copied { color: var(--ok); border-color: var(--ok); }
+
+/* Alerts export bar (G4). */
+.alerts-export {
+    display: flex; justify-content: flex-end;
+    margin: 0 0 8px;
+}
+
+/* Theme toggle button (G2). */
+.theme-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text-dim); font-size: 14px; line-height: 1;
+    padding: 3px 7px; cursor: pointer;
+    transition: color 120ms, border-color 120ms;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--text-dim); }
+.theme-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }

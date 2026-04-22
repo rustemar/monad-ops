@@ -1,15 +1,27 @@
 <!doctype html>
 <html lang="en">
 <head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>alerts · monad-ops · {{ node_name }}</title>
     <meta name="description" content="Persisted alert history for a Monad testnet validator node — filterable by window, severity, and rule.">
-    <meta name="theme-color" content="#0f1115">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/alerts">
     <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ops.rustemar.dev/alerts">
     <meta property="og:title" content="alerts · monad-ops · {{ node_name }}">
     <meta property="og:description" content="Alert history for a Monad testnet validator node.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="alerts · monad-ops · {{ node_name }}">
+    <meta name="twitter:description" content="Alert history for a Monad testnet validator node.">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
     <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
     <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
 </head>
 <body>
@@ -24,6 +36,7 @@
                 <span class="sep">·</span>
                 <span class="node">alerts</span>
             </div>
+            <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
             <div class="status" id="alerts-count-pill">
                 <span class="label">—</span>
             </div>
@@ -35,8 +48,17 @@
             <div class="card">
                 <div class="card-header">
                     <span class="card-title">alert history</span>
-                    <span class="card-hint" id="alerts-hint">persisted in sqlite; survives service restarts</span>
+                    <span class="card-hint" id="alerts-hint">saved in a local database; survives restarts</span>
                 </div>
+                <details class="severity-info">
+                    <summary>About severity levels</summary>
+                    <dl>
+                        <dt>critical</dt><dd>fires on assertions, panics, chunk exhaustion, reorgs, and retry_pct &ge; 75% (60-block avg). Requires operator attention.</dd>
+                        <dt>warn</dt><dd>fires on retry_pct &ge; 65%, tip lag &gt; 2 blocks, or disk usage &ge; 85%. Watch-only.</dd>
+                        <dt>info</dt><dd>informational events (probe recoveries, epoch transitions).</dd>
+                        <dt>recovered</dt><dd>a previously-fired warn/critical alert has returned to baseline. Paired with the original trigger row.</dd>
+                    </dl>
+                </details>
                 <div class="contracts-controls">
                     <label>window
                         <select id="alerts-window">
@@ -64,7 +86,10 @@
                         </select>
                     </label>
                 </div>
-                <table class="contracts history" id="history-table">
+                <div class="alerts-export">
+                    <button type="button" class="range-btn" id="export-csv" title="download current view as CSV">export CSV</button>
+                </div>
+                <div class="table-scroll"><table class="contracts history" id="history-table">
                     <thead>
                         <tr>
                             <th scope="col" class="col-time">time</th>
@@ -76,7 +101,7 @@
                     <tbody id="history-body">
                         <tr class="empty"><td colspan="4">loading…</td></tr>
                     </tbody>
-                </table>
+                </table></div>
             </div>
         </section>
     </main>
@@ -88,7 +113,7 @@
         <span class="sep">·</span>
         <a href="/api" class="footlink">API docs →</a>
         <span class="sep">·</span>
-        <span class="attribution">personal validator-node view · rustemar / hukutu4</span>
+        <span class="attribution">monad-ops · validator-node dashboard · rustemar / hukutu4</span>
     </footer>
 
     <script src="/static/alerts.js?v={{ asset_version }}"></script>
