@@ -134,10 +134,6 @@ document.getElementById("alerts-severity").addEventListener("change", fetchHisto
 document.getElementById("alerts-limit").addEventListener("change", fetchHistory);
 
 // CSV export (G4) — exports the visible table as a downloadable CSV.
-let _lastAlerts = [];
-// Patch fetchHistory to stash latest data for export.
-const _origFetch = fetchHistory;
-
 fetchHistory();
 
 document.getElementById("export-csv").addEventListener("click", () => {
@@ -156,7 +152,8 @@ document.getElementById("export-csv").addEventListener("click", () => {
         const esc = s => '"' + s.replace(/"/g, '""') + '"';
         lines.push([esc(time), esc(sev), esc(rule), esc(title.trim()), esc(detail.trim())].join(","));
     });
-    const blob = new Blob([lines.join("\n")], { type: "text/csv" });
+    // BOM + CRLF so Excel on Windows opens UTF-8 correctly.
+    const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = `monad-ops-alerts-${new Date().toISOString().slice(0,10)}.csv`;

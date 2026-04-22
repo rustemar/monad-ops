@@ -904,7 +904,7 @@ function _applyChartPayload(d) {
     const toolbarHint = document.getElementById("charts-range-hint");
     if (rtpHint) rtpHint.textContent = `avg rtp · p95 envelope · ${hintText}`;
     if (txHint) txHint.textContent = `avg tx/block · ${hintText}`;
-    if (execHint) execHint.textContent = `μs per phase · ${hintText}`;
+    if (execHint) execHint.textContent = `time per execution step, in µs · ${hintText}`;
     if (toolbarHint) toolbarHint.textContent = hintText;
 
     // Auto-refresh presets and custom_live (from is frozen, to tracks
@@ -1050,11 +1050,12 @@ function updateIntegrity(d) {
 
 // Known stress-test windows (G15). Each entry draws a faint colored
 // band on the rtp and tx charts so operators see context for spikes.
-// Times are UTC epoch ms — add entries as new batches happen.
+// Constructed via Date.UTC so the year can't silently drift.
+const _utcMs = (y, m, d, h) => Date.UTC(y, m - 1, d, h, 0, 0);
 const STRESS_BATCHES = [
-    { from: 1745168400000, to: 1745175600000, label: "stress batch 1" }, // 2026-04-20 15:00-17:00 UTC
-    { from: 1745175600000, to: 1745182800000, label: "stress batch 2" }, // 2026-04-20 17:00-19:00 UTC
-    { from: 1745182800000, to: 1745190000000, label: "stress batch 3" }, // 2026-04-20 19:00-21:00 UTC
+    { from: _utcMs(2026, 4, 20, 15), to: _utcMs(2026, 4, 20, 17), label: "stress batch 1" },
+    { from: _utcMs(2026, 4, 20, 17), to: _utcMs(2026, 4, 20, 19), label: "stress batch 2" },
+    { from: _utcMs(2026, 4, 20, 19), to: _utcMs(2026, 4, 20, 21), label: "stress batch 3" },
 ];
 const stressBandPlugin = {
     id: "stressBand",
@@ -1379,7 +1380,7 @@ function renderContracts(rows, windowSec) {
     const wLabel = windowSec === 0 ? "all time" :
                    windowSec === 3600 ? "last hour" :
                    windowSec === 86400 ? "last 24h" : `last ${windowSec}s`;
-    hint.textContent = `ranked by re-execution ratio · ${wLabel} · ${rows.length} rows`;
+    hint.textContent = `ranked by re-execution rate · ${wLabel} · ${rows.length} rows`;
 
     if (!rows.length) {
         body.innerHTML = '<tr class="empty"><td colspan="6">no contracts meeting threshold in window</td></tr>';
@@ -1744,6 +1745,9 @@ if (_copyLinkBtn) {
             _copyLinkBtn.textContent = "copied!";
             _copyLinkBtn.classList.add("copied");
             setTimeout(() => { _copyLinkBtn.textContent = "copy link"; _copyLinkBtn.classList.remove("copied"); }, 1500);
+        }).catch(() => {
+            _copyLinkBtn.textContent = "copy failed";
+            setTimeout(() => { _copyLinkBtn.textContent = "copy link"; }, 1500);
         });
     });
 }

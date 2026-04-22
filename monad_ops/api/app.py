@@ -481,7 +481,11 @@ def build_app(
         leaking host-configuration detail."""
         import re
         if name == "udp_config":
-            return re.sub(r":\d+", "", summary).replace("(config not readable)", "").strip()
+            # Public view: we never want the port number or the
+            # "config not readable" caveat — just health.
+            if "authenticated UDP" in summary:
+                return "authenticated UDP listener healthy"
+            return summary
         if name == "fd_limits":
             return re.sub(r"nofile soft=\d+ hard=\d+", "fd limits within safe margin", summary)
         if name == "disk_usage":

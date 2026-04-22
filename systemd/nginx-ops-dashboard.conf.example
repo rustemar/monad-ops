@@ -100,7 +100,10 @@ server {
     }
 
     # API endpoints — allow cross-origin resource loading (CORS is open).
-    location /api/ {
+    # Note: no trailing slash in the location so /api itself matches,
+    # otherwise nginx 301-redirects /api → /api/ and FastAPI 307-redirects
+    # back, causing a loop.
+    location /api {
         proxy_pass http://127.0.0.1:8873;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

@@ -53,7 +53,7 @@
                 <details class="severity-info">
                     <summary>About severity levels</summary>
                     <dl>
-                        <dt>critical</dt><dd>fires on assertions, panics, chunk exhaustion, reorgs, and retry_pct &ge; 75% (60-block avg). Requires operator attention.</dd>
+                        <dt>critical</dt><dd>fires on assertions, panics, chunk-exhaustion events, reorgs, and retry_pct &ge; 75% (60-block avg). Requires operator attention.</dd>
                         <dt>warn</dt><dd>fires on retry_pct &ge; 65%, tip lag &gt; 2 blocks, or disk usage &ge; 85%. Watch-only.</dd>
                         <dt>info</dt><dd>informational events (probe recoveries, epoch transitions).</dd>
                         <dt>recovered</dt><dd>a previously-fired warn/critical alert has returned to baseline. Paired with the original trigger row.</dd>

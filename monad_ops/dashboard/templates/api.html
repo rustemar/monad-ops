@@ -248,22 +248,6 @@ curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_t
         <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
     </footer>
 
-    <script>
-    // Add copy buttons to curl examples (D2.6).
-    document.querySelectorAll(".example-code").forEach(pre => {
-        const btn = document.createElement("button");
-        btn.className = "copy-btn";
-        btn.textContent = "copy";
-        btn.addEventListener("click", () => {
-            const text = pre.textContent;
-            navigator.clipboard.writeText(text).then(() => {
-                btn.textContent = "copied";
-                btn.classList.add("copied");
-                setTimeout(() => { btn.textContent = "copy"; btn.classList.remove("copied"); }, 1500);
-            });
-        });
-        pre.parentElement.appendChild(btn);
-    });
-    </script>
+    <script src="/static/api.js?v={{ asset_version }}" defer></script>
 </body>
 </html>
