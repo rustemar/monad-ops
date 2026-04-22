@@ -1048,47 +1048,6 @@ function updateIntegrity(d) {
         `${when} — id changed ${short(d.last_reorg_old_id)} → ${short(d.last_reorg_new_id)}`;
 }
 
-// Known stress-test windows (G15). Each entry draws a faint colored
-// band on the rtp and tx charts so operators see context for spikes.
-// Constructed via Date.UTC so the year can't silently drift.
-const _utcMs = (y, m, d, h) => Date.UTC(y, m - 1, d, h, 0, 0);
-const STRESS_BATCHES = [
-    { from: _utcMs(2026, 4, 20, 15), to: _utcMs(2026, 4, 20, 17), label: "stress batch 1" },
-    { from: _utcMs(2026, 4, 20, 17), to: _utcMs(2026, 4, 20, 19), label: "stress batch 2" },
-    { from: _utcMs(2026, 4, 20, 19), to: _utcMs(2026, 4, 20, 21), label: "stress batch 3" },
-];
-const stressBandPlugin = {
-    id: "stressBand",
-    beforeDraw(chart) {
-        if (!chart._binTimes || !chart._binTimes.length) return;
-        const ctx = chart.ctx;
-        const xScale = chart.scales.x;
-        const yScale = chart.scales.y;
-        for (const batch of STRESS_BATCHES) {
-            // Find pixel range of this batch within the visible bins.
-            let iFirst = -1, iLast = -1;
-            for (let i = 0; i < chart._binTimes.length; i++) {
-                const t = chart._binTimes[i];
-                if (t >= batch.from && t <= batch.to) {
-                    if (iFirst < 0) iFirst = i;
-                    iLast = i;
-                }
-            }
-            if (iFirst < 0) continue;
-            const x1 = xScale.getPixelForValue(iFirst);
-            const x2 = xScale.getPixelForValue(iLast);
-            ctx.save();
-            ctx.fillStyle = "rgba(245,166,35,0.06)";
-            ctx.fillRect(x1, yScale.top, x2 - x1, yScale.bottom - yScale.top);
-            ctx.fillStyle = "rgba(245,166,35,0.45)";
-            ctx.font = "9px JetBrains Mono";
-            ctx.textBaseline = "top";
-            ctx.fillText(batch.label, x1 + 2, yScale.top + 2);
-            ctx.restore();
-        }
-    },
-};
-
 // Shared x-axis config: category scale whose labels are time strings.
 // Chart.js auto-thins ticks via maxTicksLimit so 300 points don't crush
 // the axis. We keep category (not time) because category avoids the
@@ -1192,7 +1151,7 @@ function drawRtp(bins) {
                 pointRadius: 0,
             }],
         },
-        plugins: [rtpZonesPlugin, crosshairPlugin, stressBandPlugin],
+        plugins: [rtpZonesPlugin, crosshairPlugin],
         options: {
             ...chartCommon,
             layout: { padding: { top: 36 } },
@@ -1232,7 +1191,7 @@ function drawTx(bins) {
                 borderWidth: 0,
             }],
         },
-        plugins: [crosshairPlugin, stressBandPlugin],
+        plugins: [crosshairPlugin],
         options: { ...chartCommon, layout: { padding: { top: 36 } } },
     });
     _attachBinMeta(txChart, bins);

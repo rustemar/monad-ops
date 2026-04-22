@@ -99,10 +99,14 @@ server {
         add_header Referrer-Policy           "no-referrer" always;
     }
 
-    # API endpoints — allow cross-origin resource loading (CORS is open).
+    # API endpoints — /api is an HTML reference page, /api/state etc.
+    # are JSON. Both served from one block with the full HTML security-
+    # header set (safe for JSON: nosniff + content-type stop HTML
+    # interpretation) plus CORP for cross-origin JSON fetches.
     # Note: no trailing slash in the location so /api itself matches,
     # otherwise nginx 301-redirects /api → /api/ and FastAPI 307-redirects
-    # back, causing a loop.
+    # back, causing a loop. Also: `add_header` inside a location blocks
+    # server{}-level inheritance, so the full HTML set is repeated here.
     location /api {
         proxy_pass http://127.0.0.1:8873;
         proxy_http_version 1.1;
@@ -110,10 +114,14 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-        add_header Cross-Origin-Resource-Policy "cross-origin" always;
         add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
-        add_header X-Content-Type-Options "nosniff" always;
-        add_header Referrer-Policy "no-referrer" always;
+        add_header X-Content-Type-Options    "nosniff" always;
+        add_header X-Frame-Options           "DENY" always;
+        add_header Referrer-Policy           "no-referrer" always;
+        add_header Content-Security-Policy   "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; object-src 'none'; worker-src 'none'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'; upgrade-insecure-requests" always;
+        add_header Permissions-Policy        "geolocation=(), microphone=(), camera=(), payment=()" always;
+        add_header Cross-Origin-Opener-Policy "same-origin" always;
+        add_header Cross-Origin-Resource-Policy "cross-origin" always;
     }
 
     # Everything else (dashboard HTML pages).
