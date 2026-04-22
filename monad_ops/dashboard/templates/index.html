@@ -81,19 +81,19 @@
                 <div class="kpi-sub" id="k-last-block-sub">last seen —</div>
             </div>
             <div class="card kpi">
-                <div class="kpi-label">blocks / sec (1m)</div>
+                <div class="kpi-label">blocks / sec (1min)</div>
                 <div class="kpi-value" id="k-bps">—</div>
                 <div class="kpi-sub" id="k-tx">— tx/s</div>
                 <div class="sparkline" id="spark-tx"></div>
             </div>
             <div class="card kpi">
-                <div class="kpi-label">retry_pct avg (1m)</div>
+                <div class="kpi-label">retry_pct avg (1min)</div>
                 <div class="kpi-value" id="k-rtp-1m">—</div>
-                <div class="kpi-sub" id="k-rtp-5m">5m avg —</div>
+                <div class="kpi-sub" id="k-rtp-5m">5min avg —</div>
                 <div class="sparkline" id="spark-rtp"></div>
             </div>
             <div class="card kpi">
-                <div class="kpi-label">retry_pct peak (1m)</div>
+                <div class="kpi-label">retry_pct peak (1min)</div>
                 <div class="kpi-value" id="k-rtp-peak">—</div>
                 <div class="kpi-sub">share of tx re-executed after parallel conflict</div>
             </div>
@@ -144,12 +144,12 @@
 
         <section class="grid grid-2">
             <div class="card kpi">
-                <div class="kpi-label">effective tps peak (1m)</div>
+                <div class="kpi-label">effective tps peak (1min)</div>
                 <div class="kpi-value" id="k-tps-eff-peak">—</div>
                 <div class="kpi-sub" id="k-tps-eff-avg">avg — tx/s per block</div>
             </div>
             <div class="card kpi">
-                <div class="kpi-label">gas/sec effective peak (1m)</div>
+                <div class="kpi-label">gas/sec effective peak (1min)</div>
                 <div class="kpi-value" id="k-gas-eff-peak">—</div>
                 <div class="kpi-sub" id="k-gas-eff-peak-sub">peak gas/sec inside a single block</div>
             </div>
@@ -188,8 +188,8 @@
         <div class="charts-toolbar">
             <span class="charts-toolbar-label">period</span>
             <div class="charts-range" role="group" aria-label="chart time range">
-                <button type="button" class="range-btn" data-range="300">5m</button>
-                <button type="button" class="range-btn" data-range="900">15m</button>
+                <button type="button" class="range-btn" data-range="300">5min</button>
+                <button type="button" class="range-btn" data-range="900">15min</button>
                 <button type="button" class="range-btn" data-range="3600">1h</button>
                 <button type="button" class="range-btn" data-range="14400">4h</button>
                 <button type="button" class="range-btn" data-range="43200">12h</button>

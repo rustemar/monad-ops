@@ -575,7 +575,7 @@ async function fetchState() {
         document.getElementById("k-tx").textContent = `${(d.tx_per_sec_1m ?? 0).toFixed(1)} tx/s`;
         setKpi("k-rtp-1m",  fmtPct(d.rtp_avg_1m),  classifyRtp(d.rtp_avg_1m));
         setKpi("k-rtp-peak", fmtPct(d.rtp_max_1m), classifyRtp(d.rtp_max_1m));
-        document.getElementById("k-rtp-5m").textContent = `5m avg ${fmtPct(d.rtp_avg_5m)}`;
+        document.getElementById("k-rtp-5m").textContent = `5min avg ${fmtPct(d.rtp_avg_5m)}`;
 
         // Parallelism KPIs — intrablock effective peaks. We show the
         // compact form at glance size + the exact thousands-grouped
@@ -810,20 +810,20 @@ function _syncChartControlsUI() {
 }
 
 function _fmtRangeLabel(sec) {
-    if (sec < 3600) return `${Math.round(sec / 60)}m`;
+    if (sec < 3600) return `${Math.round(sec / 60)}min`;
     if (sec < 86400) return `${Math.round(sec / 3600)}h`;
     return `${Math.round(sec / 86400)}d`;
 }
 function _fmtBinLabel(binMs) {
     if (binMs < 1000) return `${binMs}ms`;
     if (binMs < 60_000) return `${Math.round(binMs / 1000)}s`;
-    if (binMs < 3_600_000) return `${Math.round(binMs / 60_000)}m`;
+    if (binMs < 3_600_000) return `${Math.round(binMs / 60_000)}min`;
     return `${(binMs / 3_600_000).toFixed(1)}h`;
 }
 
 // Client cache for the sampled-blocks payload. Keyed by mode+params.
 // 2-second TTL mirrors the server-side minimum; gives near-instant
-// toggling between range buttons (5m ↔ 1h ↔ 24h) without hitting the
+// toggling between range buttons (5min ↔ 1h ↔ 24h) without hitting the
 // network, while still refreshing at the regular BLOCKS_INTERVAL. The
 // server cache handles multi-viewer coalescing; this one handles the
 // single-user flip-through experience.
