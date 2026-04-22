@@ -529,9 +529,16 @@ function updateHealth(data) {
     // current_alerts is an append-only buffer; a rule can have e.g. warn
     // then recovered. Per-rule latest state wins — otherwise an old warn
     // keeps pinning worst at 2 forever after the rule has recovered.
+    //
+    // Age filter: point-event rules (reorg, assertion) don't emit a
+    // RECOVERED, so without a time bound their last state = CRITICAL
+    // forever and the pill stays red across restarts. Drop events
+    // older than the fresh-incident window before reducing to worst.
     const order = {recovered: 0, info: 1, warn: 2, critical: 3};
+    const nowMs = Date.now();
     const latestByRule = new Map();
     for (const a of (data.current_alerts || [])) {
+        if (!isFreshIncident(a, nowMs)) continue;
         const key = a.key || a.rule || "_";
         latestByRule.set(key, a);
     }
@@ -1405,6 +1412,23 @@ function isCriticalIncident(a) {
     return false;
 }
 
+// Rolling window for "current" incidents on the dashboard. The SQLite
+// alerts table is append-only and keeps full history; /alerts renders
+// that. The dashboard panel is a *status* view — "what broke recently
+// enough to still matter". Events older than this age stop pinning
+// the header health pill red and stop appearing in the incidents card.
+//
+// Why 24h: captures a full operator shift incl. an overnight incident
+// seen next morning; anything older belongs in the history view.
+// Why needed: point events (reorg, assertion) have no RECOVERED by
+// design, so without a time bound their last state = CRITICAL forever.
+const INCIDENT_FRESH_WINDOW_MS = 24 * 3600 * 1000;
+
+function isFreshIncident(a, nowMs) {
+    const ts = a.ts_ms || 0;
+    return ts > 0 && (nowMs - ts) <= INCIDENT_FRESH_WINDOW_MS;
+}
+
 async function fetchProbes() {
     try {
         // Public-safe endpoint. /api/probes carries operator paths in
@@ -1452,12 +1476,15 @@ function renderIncidents(alerts) {
     const list = document.getElementById("incidents-list");
     const hint = document.getElementById("incidents-hint");
 
-    const incidents = (alerts || []).filter(isCriticalIncident);
+    const nowMs = Date.now();
+    const incidents = (alerts || [])
+        .filter(isCriticalIncident)
+        .filter(a => isFreshIncident(a, nowMs));
 
     if (incidents.length === 0) {
         card.classList.remove("has-incidents");
         hint.textContent = "assertions · panics · chunk exhaustion · critical probes";
-        list.innerHTML = '<li class="empty-ok">● clear — no critical events in buffer</li>';
+        list.innerHTML = '<li class="empty-ok">● clear — no critical incidents in last 24h · <a href="/alerts">full history →</a></li>';
         return;
     }
 
@@ -1483,9 +1510,10 @@ function renderIncidents(alerts) {
     card.classList.add("has-incidents");
     const totalRaw = incidents.length;
     const distinct = deduped.length;
-    hint.textContent = distinct === totalRaw
+    const countText = distinct === totalRaw
         ? `${distinct} incident${distinct === 1 ? "" : "s"}`
         : `${distinct} distinct incident${distinct === 1 ? "" : "s"} · ${totalRaw} events total`;
+    hint.textContent = `${countText} · last 24h`;
 
     list.innerHTML = deduped.map(({ latest: a, count }) => {
         const sev = a.severity || "critical";

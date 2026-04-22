@@ -704,6 +704,10 @@ table.contracts.history .col-rule { width: 170px; }
     grid-template-columns: 1fr; padding: 14px 4px;
     font-size: 13px; letter-spacing: 0.02em;
 }
+.incidents li.empty-ok a {
+    color: var(--text-dim); text-decoration: none; border-bottom: 1px dotted currentColor;
+}
+.incidents li.empty-ok a:hover { color: var(--text); }
 .incidents .kind {
     text-transform: uppercase; font-weight: 600; letter-spacing: 0.06em;
     font-size: 11px; padding: 2px 8px; border-radius: 4px; width: fit-content;
