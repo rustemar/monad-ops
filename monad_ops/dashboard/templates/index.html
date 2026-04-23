@@ -354,6 +354,27 @@
         </section>
     </main>
 
+    <!-- Detail popup container. One shared shell for block / contract /
+         reorg detail views. Rendered into by app.js on demand. Hidden by
+         default; opened via click on block numbers / contract rows, or
+         by ?block= / ?contract= / ?reorg= query parameters on page load. -->
+    <div id="detail-popup" class="popup hidden" role="dialog" aria-modal="true"
+         aria-labelledby="popup-title" aria-hidden="true">
+        <div class="popup-backdrop" id="popup-backdrop"></div>
+        <div class="popup-panel" role="document">
+            <header class="popup-head">
+                <h2 id="popup-title" class="popup-title">—</h2>
+                <span class="popup-sub" id="popup-sub"></span>
+                <button type="button" class="popup-close" id="popup-close"
+                        aria-label="close popup">✕</button>
+            </header>
+            <div class="popup-body" id="popup-body" aria-live="polite">
+                loading…
+            </div>
+            <footer class="popup-foot" id="popup-foot"></footer>
+        </div>
+    </div>
+
     <footer class="bot">
         <span id="uptime">uptime —</span>
         <span class="sep">·</span>

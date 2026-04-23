@@ -1830,3 +1830,526 @@ if (_copyLinkBtn) {
     window.addEventListener("scroll", hide, { passive: true });
     window.addEventListener("resize", hide);
 })();
+
+// ---- detail popup (block / contract / reorg) -------------------------
+// Shared modal shell declared in index.html. Renders three payload kinds
+// with shared shell CSS, separate render functions. Deep-linkable via
+// ?block=N / ?contract=0x… / ?reorg=N so a Discord link can land on a
+// specific block in context.
+
+const MONADSCAN_BASE = "https://testnet.monadscan.com";
+const MONADVISION_BASE = "https://testnet.monadvision.com";
+
+const _popup = {
+    root: null,
+    title: null,
+    sub: null,
+    body: null,
+    foot: null,
+    closeBtn: null,
+    lastFocused: null,
+    currentKind: null,
+    currentKey: null,
+    abortCtl: null,
+};
+
+function _popupInit() {
+    _popup.root = document.getElementById("detail-popup");
+    if (!_popup.root) return;  // template older than this JS
+    _popup.title = document.getElementById("popup-title");
+    _popup.sub = document.getElementById("popup-sub");
+    _popup.body = document.getElementById("popup-body");
+    _popup.foot = document.getElementById("popup-foot");
+    _popup.closeBtn = document.getElementById("popup-close");
+    const backdrop = document.getElementById("popup-backdrop");
+
+    _popup.closeBtn.addEventListener("click", () => closePopup());
+    backdrop.addEventListener("click", () => closePopup());
+    document.addEventListener("keydown", (e) => {
+        if (_popup.root.classList.contains("hidden")) return;
+        if (e.key === "Escape") { e.stopPropagation(); closePopup(); }
+    });
+    // Popstate so browser back/forward closes or switches popups.
+    window.addEventListener("popstate", () => {
+        const p = _readPopupFromURL();
+        if (!p) { if (!_popup.root.classList.contains("hidden")) _closePopupDOM(); return; }
+        openPopup(p.kind, p.key, { skipPush: true });
+    });
+}
+
+function _readPopupFromURL() {
+    const q = new URLSearchParams(window.location.search);
+    const b = q.get("block");
+    if (b && /^\d+$/.test(b)) return { kind: "block", key: parseInt(b, 10) };
+    const c = q.get("contract");
+    if (c && /^0x[0-9a-fA-F]{40}$/.test(c)) return { kind: "contract", key: c.toLowerCase() };
+    const r = q.get("reorg");
+    if (r && /^\d+$/.test(r)) return { kind: "reorg", key: parseInt(r, 10) };
+    return null;
+}
+
+function _writePopupToURL(kind, key) {
+    const q = new URLSearchParams(window.location.search);
+    // Clear all three — only one popup at a time.
+    q.delete("block"); q.delete("contract"); q.delete("reorg");
+    if (kind && key != null) q.set(kind, String(key));
+    const url = `${window.location.pathname}${q.toString() ? "?" + q.toString() : ""}${window.location.hash || ""}`;
+    window.history.pushState({}, "", url);
+}
+
+function _clearPopupFromURL() {
+    const q = new URLSearchParams(window.location.search);
+    if (!q.has("block") && !q.has("contract") && !q.has("reorg")) return;
+    q.delete("block"); q.delete("contract"); q.delete("reorg");
+    const url = `${window.location.pathname}${q.toString() ? "?" + q.toString() : ""}${window.location.hash || ""}`;
+    window.history.pushState({}, "", url);
+}
+
+async function openPopup(kind, key, opts = {}) {
+    if (!_popup.root) return;
+    _popup.lastFocused = document.activeElement;
+    _popup.currentKind = kind; _popup.currentKey = key;
+    _popup.root.classList.remove("hidden");
+    _popup.root.setAttribute("aria-hidden", "false");
+    _popup.body.className = "popup-body loading";
+    _popup.body.textContent = "loading…";
+    _popup.foot.textContent = "";
+    _popup.sub.textContent = "";
+    _popup.title.textContent = kind === "block" ? "Block detail"
+                             : kind === "contract" ? "Contract detail"
+                             : kind === "reorg" ? "Reorg trace" : "Detail";
+    _popup.closeBtn.focus();
+    if (!opts.skipPush) _writePopupToURL(kind, key);
+
+    // Cancel any previous in-flight fetch from a rapid switch.
+    if (_popup.abortCtl) _popup.abortCtl.abort();
+    _popup.abortCtl = new AbortController();
+    const signal = _popup.abortCtl.signal;
+
+    try {
+        if (kind === "block") {
+            const r = await fetch(`/api/blocks/${encodeURIComponent(key)}`, { signal });
+            if (r.status === 404) { _popupError(`block #${key} not in retention window`); return; }
+            if (!r.ok) throw new Error(r.statusText);
+            _renderBlockPopup(await r.json());
+        } else if (kind === "contract") {
+            const r = await fetch(`/api/contracts/${encodeURIComponent(key)}?hours=24`, { signal });
+            if (!r.ok) throw new Error(r.statusText);
+            _renderContractPopup(await r.json());
+        } else if (kind === "reorg") {
+            const r = await fetch(`/api/reorgs/${encodeURIComponent(key)}?window=15&level=public`, { signal });
+            if (r.status === 404) { _popupError(`no reorg alert for block #${key}`); return; }
+            if (!r.ok) throw new Error(r.statusText);
+            _renderReorgPopup(await r.json());
+        } else {
+            _popupError("unknown popup kind");
+        }
+    } catch (e) {
+        if (e && e.name === "AbortError") return;
+        _popupError("failed to load detail — try again");
+    }
+}
+
+function _closePopupDOM() {
+    _popup.root.classList.add("hidden");
+    _popup.root.setAttribute("aria-hidden", "true");
+    _popup.body.textContent = "";
+    _popup.foot.textContent = "";
+    if (_popup.abortCtl) { _popup.abortCtl.abort(); _popup.abortCtl = null; }
+    if (_popup.lastFocused && typeof _popup.lastFocused.focus === "function") {
+        try { _popup.lastFocused.focus(); } catch (_) { /* detached */ }
+    }
+    _popup.currentKind = null; _popup.currentKey = null;
+}
+
+function closePopup() {
+    if (!_popup.root || _popup.root.classList.contains("hidden")) return;
+    _closePopupDOM();
+    _clearPopupFromURL();
+}
+
+function _popupError(msg) {
+    _popup.body.className = "popup-body loading";
+    _popup.body.textContent = msg;
+}
+
+// ---- popup render: block ----------------------------------------------
+function _renderBlockPopup(d) {
+    _popup.body.className = "popup-body";
+    const b = d.block;
+    const ageMs = Date.now() - b.t;
+    _popup.title.textContent = `Block #${fmtInt(b.n)}`;
+    _popup.sub.textContent = `${_fmtLocal(b.t)} ${_tzShort} · ${fmtSince(b.t)} · ${d.top_contracts.length} contracts in block`;
+
+    const rtpCls = classifyRtp(b.rtp);
+
+    const reorgBanner = d.reorg_near
+        ? `<div class="pk-reorg-banner">
+               <span>⚠ reorg alert ${d.reorg_near.delta === 0 ? "on this block" : `${d.reorg_near.delta > 0 ? "+" : ""}${d.reorg_near.delta} blocks from here`}</span>
+               <a href="#" data-reorg-link="${d.reorg_near.block_number}">view trace →</a>
+           </div>`
+        : "";
+
+    const topRows = d.top_contracts.map(c => {
+        const sharePct = Math.round((c.share || 0) * 100);
+        const labelPart = c.label
+            ? `<div><span class="name">${escapeHTML(c.label)}</span>${c.category && c.category !== "unknown"
+                ? `<span class="cat">${escapeHTML(c.category)}</span>` : ""}</div>
+               <div class="addr">${shortAddr(c.to_addr)}</div>`
+            : `<div class="addr">${shortAddr(c.to_addr)}</div>`;
+        return `<div class="pk-top-row" data-contract="${escapeHTML(c.to_addr)}" tabindex="0" role="button">
+                    <div>${labelPart}</div>
+                    <div class="share-cell">
+                        <div class="share-pct">${sharePct}% share</div>
+                        <div class="share-bar"><div class="share-bar-fill" data-pct="${sharePct}"></div></div>
+                    </div>
+                    <div class="metric">${fmtInt(c.tx_count)} tx</div>
+                </div>`;
+    }).join("");
+
+    _popup.body.innerHTML = `
+        ${reorgBanner}
+        <div class="pk-grid">
+            <div class="pk-cell"><div class="pk-label">tx</div><div class="pk-val">${fmtInt(b.tx)}</div>
+                <div class="pk-sub">${fmtInt(b.retried)} retried</div></div>
+            <div class="pk-cell"><div class="pk-label">retry_pct</div>
+                <div class="pk-val ${rtpCls}">${fmtPct(b.rtp)}</div></div>
+            <div class="pk-cell"><div class="pk-label">gas used</div>
+                <div class="pk-val">${fmtCompact(b.gas)}</div>
+                <div class="pk-sub">${fmtInt(b.gas)}</div></div>
+            <div class="pk-cell"><div class="pk-label">effective tps</div>
+                <div class="pk-val">${fmtCompact(b.tpse)}</div>
+                <div class="pk-sub">intrablock peak</div></div>
+            <div class="pk-cell"><div class="pk-label">total exec</div>
+                <div class="pk-val">${fmtInt(b.tot_us)}µs</div>
+                <div class="pk-sub">sr ${fmtInt(b.sr_us)} · te ${fmtInt(b.te_us)} · cm ${fmtInt(b.cm_us)}</div></div>
+        </div>
+
+        <div class="pk-section">top contracts in block</div>
+        ${d.top_contracts.length
+            ? `<div class="pk-top-list">${topRows}</div>`
+            : `<div class="pk-sub">no contract-targeted tx in this block</div>`}
+
+        <div class="pk-section">neighbor retry_pct (±${Math.floor(d.neighbors.length / 2)} blocks)</div>
+        <svg class="pk-spark" id="pk-spark-rtp" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+            <polyline id="pk-spark-rtp-line" points=""></polyline>
+        </svg>
+        <div class="pk-spark-caption" id="pk-spark-caption"></div>
+    `;
+
+    // CSSOM for CSP-safe dynamic styles.
+    for (const el of _popup.body.querySelectorAll(".share-bar-fill")) {
+        el.style.width = el.dataset.pct + "%";
+    }
+    _drawSparkline(d.neighbors.map(x => x.rtp), "#pk-spark-rtp-line", _themedStroke());
+    const mn = d.neighbors.reduce((a, x) => Math.min(a, x.rtp), Infinity);
+    const mx = d.neighbors.reduce((a, x) => Math.max(a, x.rtp), -Infinity);
+    document.getElementById("pk-spark-caption").textContent =
+        `min ${isFinite(mn) ? mn.toFixed(1) : "—"}% · max ${isFinite(mx) ? mx.toFixed(1) : "—"}%`;
+
+    // Click handlers on top-contract rows.
+    for (const row of _popup.body.querySelectorAll(".pk-top-row")) {
+        row.addEventListener("click", () => openPopup("contract", row.dataset.contract));
+        row.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault(); openPopup("contract", row.dataset.contract);
+            }
+        });
+    }
+    // Reorg-banner link.
+    const reorgLink = _popup.body.querySelector("[data-reorg-link]");
+    if (reorgLink) {
+        reorgLink.addEventListener("click", (e) => {
+            e.preventDefault();
+            openPopup("reorg", parseInt(reorgLink.dataset.reorgLink, 10));
+        });
+    }
+
+    _popup.foot.innerHTML = `
+        <a href="${MONADSCAN_BASE}/block/${b.n}" target="_blank" rel="noopener noreferrer">MonadScan →</a>
+        <a href="${MONADVISION_BASE}/block/${b.n}" target="_blank" rel="noopener noreferrer">MonadVision →</a>
+        <span class="foot-note">data from this node · tx-level detail external</span>
+    `;
+}
+
+// ---- popup render: contract -------------------------------------------
+function _renderContractPopup(d) {
+    _popup.body.className = "popup-body";
+    const label = d.label || shortAddr(d.to_addr);
+    _popup.title.textContent = label;
+    const windowHours = Math.round((d.window.to_ts_ms - d.window.from_ts_ms) / 3600_000);
+    _popup.sub.textContent = `${d.to_addr} · last ${windowHours}h`;
+
+    const s = d.stats;
+    const rtpCls = classifyRtp(s.avg_rtp_in_blocks);
+
+    // Dominance interpretation: find the most distinctive threshold and
+    // phrase it as a single operator-readable line.
+    const dominanceInterpret = _describeDominance(d.dominance, s.avg_rtp_in_blocks);
+
+    const domRows = d.dominance.map(x => {
+        const cls = classifyRtp(x.avg_rtp);
+        return `<tr>
+                    <td>≥ ${x.threshold_pct}% of block tx</td>
+                    <td>${fmtInt(x.blocks)}</td>
+                    <td class="${cls}">${x.avg_rtp.toFixed(1)}%</td>
+                </tr>`;
+    }).join("");
+
+    const peakPart = d.peak_block ? `
+        <div class="pk-section">peak block</div>
+        <div class="pk-peak-card" data-block="${d.peak_block.n}" role="button" tabindex="0">
+            <span class="block-num">#${fmtInt(d.peak_block.n)}</span>
+            <div class="detail">
+                ${fmtInt(d.peak_block.tx_count)}/${fmtInt(d.peak_block.block_tx)} tx
+                (${Math.round(d.peak_block.share * 100)}% share) ·
+                retry ${d.peak_block.rtp.toFixed(1)}% ·
+                ${fmtSince(d.peak_block.t)}
+            </div>
+            <span class="pk-sub">open →</span>
+        </div>
+    ` : "";
+
+    const rankPart = d.rank && d.rank.by_tx ? `
+        <span class="foot-note">rank ${d.rank.by_tx}/${fmtInt(d.rank.peers)} by tx · ${d.rank.by_gas}/${fmtInt(d.rank.peers)} by gas</span>
+    ` : "";
+
+    _popup.body.innerHTML = `
+        <div class="pk-grid">
+            <div class="pk-cell"><div class="pk-label">blocks touched</div>
+                <div class="pk-val">${fmtInt(s.blocks_appeared)}</div>
+                <div class="pk-sub">${fmtInt(s.retried_blocks)} retried (${Math.round(s.retried_ratio * 100)}%)</div></div>
+            <div class="pk-cell"><div class="pk-label">avg retry in touched blocks</div>
+                <div class="pk-val ${rtpCls}">${s.avg_rtp_in_blocks.toFixed(1)}%</div>
+                <div class="pk-sub">baseline for dominance compare</div></div>
+            <div class="pk-cell"><div class="pk-label">tx count</div>
+                <div class="pk-val">${fmtCompact(s.tx_count)}</div>
+                <div class="pk-sub">${fmtInt(s.tx_count)}</div></div>
+            <div class="pk-cell"><div class="pk-label">gas</div>
+                <div class="pk-val">${fmtCompact(s.total_gas)}</div>
+                <div class="pk-sub">avg ${fmtInt(s.avg_gas_per_tx)} / tx</div></div>
+        </div>
+
+        <div class="pk-section">retry correlation by dominance</div>
+        <table class="pk-dom-table">
+            <thead><tr><th>dominance in block</th><th>blocks</th><th>avg rtp</th></tr></thead>
+            <tbody>${domRows || `<tr><td colspan="3">no activity in window</td></tr>`}</tbody>
+        </table>
+        ${dominanceInterpret ? `<div class="pk-interpret">${dominanceInterpret}</div>` : ""}
+
+        ${peakPart}
+
+        <div class="pk-section">hourly activity</div>
+        <svg class="pk-spark" id="pk-spark-hr" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+            <polyline id="pk-spark-hr-line" points=""></polyline>
+        </svg>
+        <div class="pk-spark-caption" id="pk-spark-hr-caption"></div>
+    `;
+
+    // Hourly tx sparkline from contract_hour. `ba >= 10` rollup filter
+    // means hours with fewer than 10 blocks for this contract drop out —
+    // documented limitation, visible as gaps for long-tail contracts.
+    const hrSeries = d.hourly.map(h => h.tx);
+    _drawSparkline(hrSeries, "#pk-spark-hr-line", _themedStroke());
+    document.getElementById("pk-spark-hr-caption").textContent =
+        d.hourly.length
+            ? `${d.hourly.length}h · peak ${fmtInt(Math.max(...hrSeries))} tx/h · latest ${fmtInt(hrSeries[hrSeries.length - 1] || 0)}`
+            : "no hourly samples (rollup filter or sparse activity)";
+
+    const peakCard = _popup.body.querySelector(".pk-peak-card");
+    if (peakCard) {
+        peakCard.addEventListener("click", () => openPopup("block", parseInt(peakCard.dataset.block, 10)));
+        peakCard.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault(); openPopup("block", parseInt(peakCard.dataset.block, 10));
+            }
+        });
+    }
+
+    _popup.foot.innerHTML = `
+        <a href="${MONADSCAN_BASE}/address/${d.to_addr}" target="_blank" rel="noopener noreferrer">MonadScan →</a>
+        ${rankPart}
+    `;
+}
+
+// Produce a one-line interpretation of the dominance buckets — the
+// single phrase that tells an operator what the table actually says.
+// Compares the highest-threshold bucket's avg_rtp vs the overall baseline.
+function _describeDominance(dom, baseline) {
+    if (!dom || !dom.length) return "";
+    // Pick the highest threshold that has non-trivial sample size.
+    const strong = [...dom].reverse().find(x => x.blocks >= 20);
+    if (!strong) return "";
+    const delta = strong.avg_rtp - baseline;
+    const sign = delta >= 0 ? "+" : "−";
+    const mag = Math.abs(delta);
+    const direction = delta >= 0 ? "higher" : "lower";
+    const nature = delta >= 0 ? "conflict-prone" : "parallelism-friendly";
+    return `<strong>When dominant (≥${strong.threshold_pct}% of block tx, ${fmtInt(strong.blocks)} blocks),
+        avg retry ${strong.avg_rtp.toFixed(1)}% — ${sign}${mag.toFixed(1)}pp ${direction} than baseline.</strong>
+        Reads as <em>${nature}</em> under Monad's parallel execution.`;
+}
+
+// ---- popup render: reorg ----------------------------------------------
+function _renderReorgPopup(d) {
+    _popup.body.className = "popup-body";
+    _popup.title.textContent = `Reorg at block #${fmtInt(d.block_number)}`;
+    _popup.sub.textContent = `${_fmtLocal(d.alert.ts_ms)} ${_tzShort} · ${fmtSince(d.alert.ts_ms)} · trace ±${d.window} blocks`;
+
+    // Find the reorged block in the trace so we can show its metrics
+    // prominently. Public-level trace may omit some fields — render
+    // only what's present.
+    const center = (d.blocks || []).find(b => b.block_number === d.block_number);
+    const metrics = center ? `
+        <div class="pk-grid">
+            <div class="pk-cell"><div class="pk-label">tx</div>
+                <div class="pk-val">${fmtInt(center.tx_count ?? 0)}</div>
+                <div class="pk-sub">${fmtInt(center.retried ?? 0)} retried</div></div>
+            <div class="pk-cell"><div class="pk-label">retry_pct</div>
+                <div class="pk-val ${classifyRtp(center.retry_pct)}">${fmtPct(center.retry_pct)}</div></div>
+            <div class="pk-cell"><div class="pk-label">gas</div>
+                <div class="pk-val">${fmtCompact(center.gas_used ?? 0)}</div></div>
+        </div>` : `<div class="pk-sub">reorged-block metrics not in retention window</div>`;
+
+    _popup.body.innerHTML = `
+        <div class="pk-reorg-banner">
+            <span>${escapeHTML(d.alert.title)}</span>
+        </div>
+        ${metrics}
+
+        <div class="pk-section">block id</div>
+        <div class="pk-ids">
+            ${d.block_id_before ? `<div class="pk-id-row before"><span class="lbl">before</span><span class="val">${escapeHTML(d.block_id_before)}</span></div>` : ""}
+            ${d.block_id_after ? `<div class="pk-id-row after"><span class="lbl">after</span><span class="val">${escapeHTML(d.block_id_after)}</span></div>` : ""}
+        </div>
+
+        <div class="pk-section">detail</div>
+        <div class="pk-sub">${escapeHTML(d.alert.detail || "—")}</div>
+
+        <div class="pk-section">neighbor retry_pct</div>
+        <svg class="pk-spark" id="pk-spark-reorg" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
+            <polyline id="pk-spark-reorg-line" points=""></polyline>
+        </svg>
+        <div class="pk-spark-caption" id="pk-spark-reorg-caption"></div>
+    `;
+
+    const series = (d.blocks || []).map(b => b.retry_pct ?? 0);
+    _drawSparkline(series, "#pk-spark-reorg-line", _themedStroke());
+    document.getElementById("pk-spark-reorg-caption").textContent =
+        series.length
+            ? `${series.length} blocks in trace · peak ${Math.max(...series).toFixed(1)}%`
+            : "no neighbor data in retention window";
+
+    _popup.foot.innerHTML = `
+        <a href="${MONADSCAN_BASE}/block/${d.block_number}" target="_blank" rel="noopener noreferrer">MonadScan block →</a>
+        <a href="/alerts?severity=critical" class="footlink">alerts history →</a>
+        <span class="foot-note">point event · no RECOVERED by design</span>
+    `;
+}
+
+// ---- sparkline draw --------------------------------------------------
+function _drawSparkline(values, selector, stroke) {
+    const line = _popup.body.querySelector(selector);
+    if (!line || !values.length) return;
+    const mn = Math.min(...values);
+    const mx = Math.max(...values);
+    const span = mx - mn || 1;
+    const pts = values.map((v, i) => {
+        const x = values.length === 1 ? 50 : (i / (values.length - 1)) * 100;
+        const y = 40 - ((v - mn) / span) * 36 - 2;  // 2px padding top/bottom
+        return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+    line.setAttribute("points", pts);
+    line.style.stroke = stroke;
+}
+
+function _themedStroke() {
+    // Read the accent color from CSSOM so the sparkline matches the
+    // active theme without duplicating the palette in JS.
+    const cs = getComputedStyle(document.documentElement);
+    return cs.getPropertyValue("--accent").trim() || "#5b9cf5";
+}
+
+// ---- wire clickable cells --------------------------------------------
+// The KPI block-number cells are plain text; we wrap them in a span with
+// role=button after the textContent update so keyboard users can tab to
+// them. Also wire a click listener on the contracts table (delegated,
+// since renderContracts rewrites innerHTML on every poll).
+
+function _wirePopupTriggers() {
+    // Last-block KPI — the headline number IS the block number.
+    const lastBlock = document.getElementById("k-last-block");
+    if (lastBlock) {
+        lastBlock.classList.add("bn-click");
+        lastBlock.setAttribute("role", "button");
+        lastBlock.setAttribute("tabindex", "0");
+        lastBlock.setAttribute("aria-label", "open last block detail");
+        const handler = () => {
+            const n = parseInt(lastBlock.textContent.replace(/[^\d]/g, ""), 10);
+            if (Number.isFinite(n) && n > 0) openPopup("block", n);
+        };
+        lastBlock.addEventListener("click", handler);
+        lastBlock.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
+        });
+    }
+
+    // Delegated click on contracts table — rows rewritten on each poll.
+    const contractsBody = document.getElementById("contracts-body");
+    if (contractsBody) {
+        contractsBody.addEventListener("click", (e) => {
+            const row = e.target.closest("tr");
+            if (!row || row.classList.contains("empty")) return;
+            const addr = row.querySelector(".contract-addr")?.getAttribute("title");
+            if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) openPopup("contract", addr.toLowerCase());
+        });
+        // Visual cue: the row is tappable. Uses existing hover state on cells.
+        contractsBody.style.cursor = "pointer";
+    }
+
+    // Integrity card — click the last-reorg block number opens the reorg popup.
+    const integrityDetail = document.getElementById("integrity-detail");
+    if (integrityDetail) {
+        integrityDetail.addEventListener("click", (e) => {
+            // Only intercept when there IS a last reorg to open.
+            const m = integrityDetail.textContent.match(/block #([\d,]+)/);
+            if (!m) return;
+            const n = parseInt(m[1].replace(/,/g, ""), 10);
+            if (Number.isFinite(n) && n > 0) openPopup("reorg", n);
+        });
+    }
+}
+
+// Intercept inline "block #N" text that fetchState() writes into the
+// k-tps-eff-avg / k-gas-eff-peak-sub sublabels. We can't easily replace
+// those span-by-span without refactoring fetchState, so we delegate: a
+// single document-level click handler reads the clicked text node and,
+// if the click landed inside one of those KPI sublabels near a block-
+// number pattern, opens the block popup.
+function _wireKpiSubBlockClicks() {
+    const targets = ["k-tps-eff-avg", "k-gas-eff-peak-sub"];
+    for (const id of targets) {
+        const el = document.getElementById(id);
+        if (!el) continue;
+        el.addEventListener("click", () => {
+            const m = el.textContent.match(/block #([\d,]+)/);
+            if (!m) return;
+            const n = parseInt(m[1].replace(/,/g, ""), 10);
+            if (Number.isFinite(n) && n > 0) openPopup("block", n);
+        });
+        // Help cursor when a block number is present.
+        const observer = new MutationObserver(() => {
+            el.style.cursor = /block #\d/.test(el.textContent) ? "pointer" : "";
+        });
+        observer.observe(el, { childList: true, characterData: true, subtree: true });
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    _popupInit();
+    _wirePopupTriggers();
+    _wireKpiSubBlockClicks();
+    // Auto-open from query param.
+    const p = _readPopupFromURL();
+    if (p) openPopup(p.kind, p.key, { skipPush: true });
+});
