@@ -1255,6 +1255,12 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
 
 .pk-spark { width: 100%; height: 40px; display: block; }
 .pk-spark polyline { fill: none; stroke-width: 1.5; }
+.pk-spark-marker-line {
+    stroke: var(--crit); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.7;
+}
+.pk-spark-marker-dot {
+    fill: var(--crit); stroke: var(--bg-card); stroke-width: 1.5;
+}
 .pk-spark-caption {
     font-family: var(--mono); font-size: 10.5px;
     color: var(--text-faint); margin-top: 2px;
