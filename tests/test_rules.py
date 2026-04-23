@@ -1,10 +1,12 @@
 from monad_ops.parser import ExecBlock
 from monad_ops.rules import (
+    CodeColor,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
     Severity,
     StallRule,
+    code_color_for,
 )
 
 
@@ -566,3 +568,36 @@ class TestReferenceLagRule:
         # whose min-of-window falls below the disarm threshold.
         ev = self._s(rule, 1005, 1000)
         assert ev is not None and ev.severity == Severity.RECOVERED
+
+
+class TestCodeColor:
+    """Severity-to-Foundation-colour-code mapping.
+
+    The mapping is Foundation-facing (Jackson's 2026-03-26 colour-code
+    framework) and must remain stable: dashboards, Telegram alerts and
+    third-party integrators will key on the emitted strings. Test every
+    severity explicitly so a future reshuffle shows up as a failure
+    rather than a silent semantic drift.
+    """
+
+    def test_critical_is_red(self):
+        assert code_color_for(Severity.CRITICAL) is CodeColor.RED
+
+    def test_warn_is_orange(self):
+        assert code_color_for(Severity.WARN) is CodeColor.ORANGE
+
+    def test_info_is_green(self):
+        assert code_color_for(Severity.INFO) is CodeColor.GREEN
+
+    def test_recovered_is_green(self):
+        """RECOVERED is informational: the incident that drove the arm is
+        over, no operator action required. Maps to GREEN same as INFO."""
+        assert code_color_for(Severity.RECOVERED) is CodeColor.GREEN
+
+    def test_values_are_plain_lowercase(self):
+        """The JSON payload uses the string value, not the enum name.
+        Pin the wire format so it can't drift to e.g. "RED" uppercase
+        (which would break a deployed dashboard after a restart)."""
+        assert CodeColor.RED.value == "red"
+        assert CodeColor.ORANGE.value == "orange"
+        assert CodeColor.GREEN.value == "green"

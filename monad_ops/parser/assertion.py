@@ -31,6 +31,7 @@ class AssertionKind(StrEnum):
     RUST_PANIC = "rust_panic"         # thread '...' panicked at ...
     QC_OVERSHOOT = "qc_overshoot"     # high qc too far ahead of block tree root
     CHUNK_EXHAUSTION = "chunks"       # Disk usage: 0.99xx ... Chunks: N fast
+    IO_URING_INIT = "io_uring_init"   # io_uring_queue_init_params failed at startup
     GENERIC_FATAL = "generic_fatal"   # catch-all FATAL / fatal error
 
 
@@ -83,6 +84,16 @@ _CHUNK_EXHAUSTION = re.compile(
 )
 _CHUNK_CRITICAL_RATIO = 0.90  # below this we don't fire
 
+# io_uring startup failure observed 2026-03-02 Karlo / Endorphine Stake:
+# monad-execution can't initialize its io_uring, service ABRTs. The
+# remediation is a kernel/sysctl/container config change rather than a
+# code-level assertion, so the alert sink wants this classified apart
+# from generic C++ assertions.
+_IO_URING_INIT = re.compile(
+    r"io_uring_queue_init_params\s+failed",
+    re.IGNORECASE,
+)
+
 # Generic fatal catch-all — last resort. Intentionally narrow: only
 # fires on capitalized FATAL token at start of line-content, to avoid
 # matching "...fatal error in user space..." type debug noise.
@@ -125,7 +136,29 @@ def parse_assertion(line: str) -> AssertionEvent | None:
                      + (f": {detail[:120]}" if detail else "")),
         )
 
-    # 3. C++ assertion.
+    # 3. io_uring startup failure — specific sub-kind of startup crash
+    # with a targeted remediation hint (kernel / sysctl / container seccomp).
+    # Checked before the generic C++ assertion so if both patterns ever
+    # appear on the same line the operator gets the actionable one.
+    if _IO_URING_INIT.search(line):
+        return AssertionEvent(
+            kind=AssertionKind.IO_URING_INIT,
+            raw=line,
+            # One dedup key across every io_uring startup failure on this
+            # node — operators see a single alert on boot, not one per
+            # retry. The kernel/sysctl/container diagnostic flow is the
+            # same regardless of which specific EINVAL bit tripped.
+            key=f"{AssertionKind.IO_URING_INIT.value}:startup",
+            location=_extract_file_line(line),
+            summary=(
+                "io_uring startup failure — monad-execution couldn't "
+                "initialize io_uring. Check kernel >= 5.10 and "
+                "`kernel.io_uring_disabled` sysctl; inside containers "
+                "verify seccomp/apparmor permits io_uring syscalls."
+            ),
+        )
+
+    # 4. C++ assertion.
     m = _CXX_ASSERT.search(line)
     if m:
         expr = m.group(1)
@@ -139,7 +172,7 @@ def parse_assertion(line: str) -> AssertionEvent | None:
             summary=f"C++ assertion failed: {expr[:160]}",
         )
 
-    # 4. Chunk exhaustion (triedb-side disk full).
+    # 5. Chunk exhaustion (triedb-side disk full).
     m = _CHUNK_EXHAUSTION.search(line)
     if m:
         ratio = float(m.group(1))
@@ -155,7 +188,7 @@ def parse_assertion(line: str) -> AssertionEvent | None:
                 summary=f"TrieDB chunk exhaustion: {ratio:.4f} used, {fast_chunks} fast chunks",
             )
 
-    # 5. Generic FATAL. Keep last so specific patterns get priority.
+    # 6. Generic FATAL. Keep last so specific patterns get priority.
     if _GENERIC_FATAL.search(line):
         return AssertionEvent(
             kind=AssertionKind.GENERIC_FATAL,

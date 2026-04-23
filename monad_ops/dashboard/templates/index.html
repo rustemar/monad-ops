@@ -363,8 +363,15 @@
         <div class="popup-backdrop" id="popup-backdrop"></div>
         <div class="popup-panel" role="document">
             <header class="popup-head">
-                <h2 id="popup-title" class="popup-title">—</h2>
-                <span class="popup-sub" id="popup-sub"></span>
+                <div class="popup-head-text">
+                    <h2 id="popup-title" class="popup-title">—</h2>
+                    <div class="popup-sub-row">
+                        <span class="popup-sub" id="popup-sub"></span>
+                        <button type="button" class="popup-copy hidden" id="popup-copy"
+                                aria-label="copy address to clipboard"
+                                title="copy full address">copy</button>
+                    </div>
+                </div>
                 <button type="button" class="popup-close" id="popup-close"
                         aria-label="close popup">✕</button>
             </header>

@@ -41,6 +41,54 @@ def test_cxx_assertion_ring_cpp_captures_location() -> None:
     assert "ring.cpp:45" in ev.location
 
 
+# ── Karlo Endorphine Stake 2026-03-02 (io_uring startup failure) ──────
+# The second line emitted by monad-execution when ring.cpp assertion
+# trips — carries the specific kernel-level cause ("Invalid argument (22)")
+# that separates this class from a generic C++ assertion. The remediation
+# is environment-level (kernel / sysctl / container), not code-level, so
+# the alert sink needs to differentiate it.
+def test_io_uring_init_failure_classified_separately() -> None:
+    line = (
+        "monad-node: assertion failure message: "
+        "io_uring_queue_init_params failed: Invalid argument (22)"
+    )
+    ev = parse_assertion(line)
+    assert ev is not None
+    assert ev.kind is AssertionKind.IO_URING_INIT
+    # Summary must carry the remediation pointers operators act on.
+    assert "kernel" in ev.summary.lower()
+    assert "io_uring_disabled" in ev.summary
+    # Stable dedup key: identical startup failures collapse to one alert.
+    assert ev.key == "io_uring_init:startup"
+
+
+def test_io_uring_init_dedup_key_stable_across_retries() -> None:
+    """systemd restarts the service; every attempt emits a fresh
+    ``io_uring_queue_init_params failed`` line. They must share a dedup
+    key so the operator sees one alert per boot loop, not N."""
+    a = parse_assertion(
+        "io_uring_queue_init_params failed: Invalid argument (22)"
+    )
+    b = parse_assertion(
+        "[retry #3] io_uring_queue_init_params failed: Invalid argument (22)"
+    )
+    assert a is not None and b is not None
+    assert a.key == b.key
+
+
+def test_io_uring_takes_priority_over_cxx_assert_on_same_line() -> None:
+    """If both patterns appear in one line (unusual but possible with
+    bundled log output), the operator-actionable IO_URING_INIT wins —
+    a "C++ assertion failed" title would bury the remediation hint."""
+    line = (
+        "ring.cpp:45: Assertion 'result == 0' failed. "
+        "io_uring_queue_init_params failed: Invalid argument (22)"
+    )
+    ev = parse_assertion(line)
+    assert ev is not None
+    assert ev.kind is AssertionKind.IO_URING_INIT
+
+
 # ── Unit410 consensus panic 2025-12-04 ────────────────────────────────
 def test_qc_overshoot_exact_phrase() -> None:
     line = (

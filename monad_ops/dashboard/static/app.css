@@ -96,10 +96,15 @@ html, body {
     display: flex; align-items: center; justify-content: space-between;
 }
 .brand { display: flex; align-items: center; gap: 10px; }
-.brand .logo { color: var(--accent); font-size: 18px; }
-.brand .name { font-weight: 600; letter-spacing: 0.02em; }
+.brand .logo { color: var(--accent); font-size: 18px; flex: 0 0 auto; }
+/* ``nowrap`` on each piece prevents the mobile header from breaking
+   words mid-string ("monad-" / "ops") when the flex row runs out of
+   space. On mobile the mobile media-query below also stacks the node
+   name onto its own line, so "monad-testnet" sits directly under the
+   logo/name rather than competing for horizontal space. */
+.brand .name { font-weight: 600; letter-spacing: 0.02em; white-space: nowrap; }
 .brand .sep { color: var(--text-faint); }
-.brand .node { color: var(--text-dim); font-family: var(--mono); font-size: 12.5px; }
+.brand .node { color: var(--text-dim); font-family: var(--mono); font-size: 12.5px; white-space: nowrap; }
 .brand-link { color: inherit; text-decoration: none; display: inline-flex; align-items: center; gap: 10px; }
 .brand-link:hover .name { color: var(--accent); }
 
@@ -115,6 +120,7 @@ html, body {
     position: relative;
     padding: 10px 12px; border-radius: 4px;
     border: 1px solid var(--border);
+    white-space: nowrap;
 }
 .nav-links a::before {
     content: ""; position: absolute; inset: -6px;
@@ -257,7 +263,7 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
 .status.unknown  { color: var(--text-dim); background: rgba(138,143,153,0.12); }
 
 .alerts { list-style: none; padding: 0; margin: 0; }
-.alerts li { padding: 10px 0; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); display: grid; grid-template-columns: 110px 80px 180px 1fr; gap: 12px; align-items: baseline; }
+.alerts li { padding: 10px 0; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 12.5px; color: var(--text-dim); display: grid; grid-template-columns: 110px 190px 180px 1fr; gap: 12px; align-items: baseline; }
 .alerts li:last-child { border-bottom: none; }
 .alerts li.empty { color: var(--text-faint); text-align: center; grid-template-columns: 1fr; font-style: italic; }
 .alert-ts { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -266,6 +272,21 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
 .sev.warn      { color: var(--warn); background: rgba(255,180,84,0.12); }
 .sev.critical  { color: var(--crit); background: rgba(255,107,107,0.12); }
 .sev.recovered { color: var(--ok);   background: rgba(107,207,118,0.12); }
+
+/* Severity + Foundation colour-code chip pair. They share one grid cell
+   so the base grid stays 4-column; flex-wrap lets the code-color chip
+   drop to a second line on narrow cards rather than pushing out. */
+.sev-cc, .kind-cc { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: baseline; width: fit-content; }
+
+/* Code-color chip. Matches Jackson's 2026-03-26 Foundation vocabulary —
+   "CODE RED / ORANGE / GREEN" — so operators read local alerts in the
+   same language as Foundation announcements. Visually thinner than .sev
+   (no background fill, just a coloured border) to avoid two heavy
+   chips side-by-side. */
+.cc { text-transform: uppercase; font-weight: 600; letter-spacing: 0.06em; font-size: 10px; padding: 1px 6px; border-radius: 4px; border: 1px solid transparent; background: transparent; white-space: nowrap; }
+.cc-red    { color: var(--crit); border-color: rgba(255,107,107,0.45); }
+.cc-orange { color: var(--warn); border-color: rgba(255,180,84,0.45); }
+.cc-green  { color: var(--ok);   border-color: rgba(107,207,118,0.45); }
 
 .rule { color: var(--text); }
 .detail { color: var(--text-dim); }
@@ -507,15 +528,28 @@ table.contracts tbody tr.empty td {
     color: var(--text-faint); font-style: italic; text-align: center;
 }
 
-.contract-cell { display: flex; flex-direction: column; gap: 2px; }
+.contract-cell { display: flex; flex-direction: column; gap: 3px; }
 .contract-label {
     color: var(--text); font-size: 12.5px;
-    display: flex; align-items: center; gap: 8px;
+    /* ``flex-wrap: wrap`` lets the category chip drop to its own line
+       when the contract column narrows on mobile. Without it, the
+       anonymous flex-item that holds the label text wrapped between
+       words instead, creating a 2-line-tall text block next to a
+       vertically-centred chip — which read as an awkward overlap.
+       ``align-items: flex-start`` pins the chip to the top of the
+       label so when the text wraps to 2+ lines, the chip stays next
+       to the first line (e.g. "Staking" / "Precompile" has [SYSTEM]
+       next to "Staking", not to "Precompile"). */
+    display: flex; flex-wrap: wrap; align-items: flex-start; gap: 3px 8px;
+}
+.contract-name { /* explicit span so word-wrap stays within the name */
+    min-width: 0; word-break: break-word;
 }
 .contract-label .cat {
     font-size: 9.5px; padding: 1px 6px; border-radius: 3px;
     background: rgba(91,156,245,0.12); color: var(--accent);
     text-transform: uppercase; letter-spacing: 0.05em;
+    white-space: nowrap;
 }
 .contract-addr {
     color: var(--text-faint); font-size: 11px; user-select: all;
@@ -695,7 +729,7 @@ table.contracts.history .col-rule { width: 170px; }
 .incidents li {
     padding: 10px 0;
     border-bottom: 1px solid var(--border);
-    display: grid; grid-template-columns: 80px 120px 1fr auto;
+    display: grid; grid-template-columns: 190px 120px 1fr auto;
     gap: 12px; align-items: center; color: var(--text-dim);
 }
 .incidents li:last-child { border-bottom: none; }
@@ -736,6 +770,24 @@ table.contracts.history .col-rule { width: 170px; }
     .top { padding: 10px 0; }
     .top-inner { padding: 0 12px; }
 
+    /* Header brand on narrow screens: stack node name under the logo
+       line so "monad-ops" and "monad-testnet" each sit on their own
+       row instead of competing for horizontal space with nav-links +
+       status pill (which pushed the brand into mid-word wraps like
+       "monad-" / "ops"). The `·` separator is only meaningful on the
+       inline desktop layout; hide it when we stack. */
+    .brand { flex-wrap: wrap; row-gap: 2px; }
+    .brand .sep { display: none; }
+    .brand .node { flex-basis: 100%; padding-left: 28px; }
+
+    /* Card header on narrow screens: default `justify-content: space-between`
+       runs the hint text right up against the title with no visible gap
+       (they read as one glued string, e.g. "RETRY_PCTavg rtp · p95 …").
+       Stack title and hint vertically so the descriptor becomes its own
+       line with breathing room. Desktop keeps the tight inline layout. */
+    .card-header { flex-direction: column; align-items: flex-start; gap: 4px; }
+    .card-hint { font-size: 11px; }
+
     .incidents li { grid-template-columns: 1fr; gap: 4px; }
     .incidents .ago { justify-self: start; }
     /* Mobile: stack card-style. Time and severity share a top row so the
@@ -748,7 +800,7 @@ table.contracts.history .col-rule { width: 170px; }
             "detail";
         gap: 4px;
     }
-    .alerts li .sev { grid-area: head; align-self: start; }
+    .alerts li .sev-cc { grid-area: head; align-self: start; }
     .alerts li .alert-ts {
         grid-area: head;
         justify-self: end;
@@ -757,6 +809,7 @@ table.contracts.history .col-rule { width: 170px; }
     .alerts li .rule   { grid-area: rule; }
     .alerts li .detail { grid-area: detail; }
     .sev { font-size: 10px; padding: 2px 6px; }
+    .cc  { font-size: 9px;  padding: 1px 5px; }
 
     /* Alert-history table: re-flow as stacked cards on narrow screens.
        The 4-column table collapsed the `detail` column to ~80px, wrapping
@@ -1123,7 +1176,14 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
     position: absolute;
     left: 50%; top: 50%; transform: translate(-50%, -50%);
     width: min(720px, calc(100vw - 24px));
+    /* ``dvh`` (dynamic viewport height) matches the *currently visible*
+       viewport on mobile browsers where the address bar expands/shrinks
+       — unlike ``vh``, which always measures to the "large" viewport
+       with the bar hidden and lets the popup extend past the visible
+       area. Ship the ``vh`` line first as a fallback so older Safari
+       (<15.4) still gets a reasonable cap. */
     max-height: calc(100vh - 48px);
+    max-height: calc(100dvh - 48px);
     display: flex; flex-direction: column;
     background: var(--bg-card);
     border: 1px solid var(--border);
@@ -1132,22 +1192,52 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
     font-size: 13px;
 }
 .popup-head {
-    display: flex; align-items: center; gap: 10px;
+    display: flex; align-items: flex-start; gap: 10px;
     padding: 12px 16px;
     border-bottom: 1px solid var(--border);
+}
+/* Title + sub stack vertically so the full contract address no longer
+   has to compete with the title for horizontal space (it used to ellipse
+   on desktop and overflow on mobile). Close button stays on the right. */
+.popup-head-text {
+    display: flex; flex-direction: column; gap: 4px;
+    flex: 1 1 auto; min-width: 0;
 }
 .popup-title {
     margin: 0; font-size: 14px; font-weight: 600;
     letter-spacing: 0.02em; text-transform: uppercase;
     color: var(--text); flex: 0 0 auto;
 }
+.popup-sub-row {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    min-width: 0;
+}
 .popup-sub {
     font-family: var(--mono);
     color: var(--text-faint);
     font-size: 11.5px;
-    flex: 1 1 auto; min-width: 0;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-width: 0;
+    /* ``overflow-wrap: anywhere`` breaks a token only when it can't fit
+       otherwise (e.g. the 42-char hex address). Prior ``word-break:
+       break-all`` was aggressive and also split plain words like "last
+       24h" at character boundaries — "la" / "st 24h". */
+    overflow-wrap: anywhere;
 }
+.popup-copy {
+    background: none; border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text-dim);
+    font-family: var(--sans); font-size: 10.5px; letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 2px 8px; cursor: pointer; flex: 0 0 auto;
+    transition: color 120ms, border-color 120ms, background 120ms;
+}
+.popup-copy:hover { color: var(--text); border-color: var(--text-dim); }
+.popup-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.popup-copy.copied {
+    color: var(--ok); border-color: rgba(107,207,118,0.45);
+    background: rgba(107,207,118,0.08);
+}
+.popup-copy.hidden { display: none; }
 .popup-close {
     background: none; border: 1px solid var(--border); border-radius: 4px;
     color: var(--text-dim); font-size: 14px; line-height: 1;
@@ -1339,12 +1429,19 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
     .popup-panel {
         width: calc(100vw - 12px);
         max-height: calc(100vh - 24px);
+        max-height: calc(100dvh - 24px);
     }
     .popup-body { padding: 12px; }
     .pk-grid { grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 8px; }
     .pk-top-row { grid-template-columns: 1fr 70px; }
     .pk-top-row .share-cell { display: none; }
 }
+
+/* Body-scroll lock when a popup is open. Keeps the dashboard beneath
+   from scrolling underneath the modal on touch devices (otherwise a
+   momentum swipe can drift the page behind the backdrop). Toggled by
+   ``openPopup`` / ``closePopup`` in app.js. */
+body.popup-open { overflow: hidden; touch-action: none; }
 
 /* Pattern tag shown in the contract popup header row. "uniform" flags
    the 1-tx-per-block signature — common bot pattern. Kept muted so it

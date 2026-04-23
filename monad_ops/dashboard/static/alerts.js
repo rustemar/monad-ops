@@ -35,6 +35,28 @@ function escapeHTML(s) {
     })[c]);
 }
 
+// Foundation colour-code chip — matches the dashboard's rendering so both
+// pages share the same vocabulary. Server ships ``a.code_color`` as of F2;
+// derive from severity for payloads served from a stale cache.
+const _CODE_COLOR_BY_SEV = {
+    critical: "red",
+    warn:     "orange",
+    info:     "green",
+    recovered: "green",
+};
+function codeColorFor(alert) {
+    const fromServer = (alert && alert.code_color) || "";
+    if (fromServer === "red" || fromServer === "orange" || fromServer === "green") {
+        return fromServer;
+    }
+    return _CODE_COLOR_BY_SEV[(alert && alert.severity) || ""] || "";
+}
+function codeColorChip(alert) {
+    const c = codeColorFor(alert);
+    if (!c) return "";
+    return `<span class="cc cc-${c}">CODE ${c.toUpperCase()}</span>`;
+}
+
 // Reorg alert detail is deterministic: "Block #<n> id changed: …".
 // Pull the block_number so we can link to the trace endpoint. Returns
 // null if the detail doesn't match (future-proofs the rendering —
@@ -98,7 +120,7 @@ async function fetchHistory() {
             return `
                 <tr>
                     <td class="mono-time" title="${escapeHTML(fullTs)}">${fmtTime(a.ts_ms)}</td>
-                    <td><span class="sev ${sevClass}">${escapeHTML(sev)}</span></td>
+                    <td><span class="sev ${sevClass}">${escapeHTML(sev)}</span> ${codeColorChip(a)}</td>
                     <td class="rule">${escapeHTML(a.rule || "")}</td>
                     <td class="detail-cell">
                         <div class="alert-title">${escapeHTML(a.title || "")}</div>

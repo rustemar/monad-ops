@@ -502,6 +502,31 @@ function setKpi(id, text, sevClass) {
     if (sevClass) el.classList.add(sevClass);
 }
 
+// ---- Foundation colour-code chip -----------------------------------
+// Maps an alert's severity onto Jackson's 2026-03-26 colour-code
+// vocabulary so operators can read local alerts and Foundation
+// announcements (#fullnode-announcements, email, TG) in the same
+// language. The server also ships the mapping as ``a.code_color`` — we
+// derive here as a fallback for payloads served from a stale cache.
+const _CODE_COLOR_BY_SEV = {
+    critical: "red",
+    warn:     "orange",
+    info:     "green",
+    recovered: "green",
+};
+function codeColorFor(alert) {
+    const fromServer = (alert && alert.code_color) || "";
+    if (fromServer === "red" || fromServer === "orange" || fromServer === "green") {
+        return fromServer;
+    }
+    return _CODE_COLOR_BY_SEV[(alert && alert.severity) || ""] || "";
+}
+function codeColorChip(alert) {
+    const c = codeColorFor(alert);
+    if (!c) return "";
+    return `<span class="cc cc-${c}">CODE ${c.toUpperCase()}</span>`;
+}
+
 // Health-pill click handler: operators instinctively tap the status
 // pill in the header when they see CRITICAL, expecting to learn what
 // failed. On the dashboard, the incidents card is visible on the same
@@ -646,7 +671,7 @@ function renderAlerts(alerts) {
         return `
         <li>
             <time class="alert-ts" datetime="${timeAttr}" title="${escapeHTML(fullTs)}">${escapeHTML(timeStr)}</time>
-            <span class="sev ${sevClass}">${escapeHTML(sev)}</span>
+            <span class="sev-cc"><span class="sev ${sevClass}">${escapeHTML(sev)}</span>${codeColorChip(a)}</span>
             <span class="rule">${escapeHTML(a.rule || "")}</span>
             <span class="detail">${escapeHTML(a.title || "")}${a.detail ? " — " + escapeHTML(a.detail) : ""}</span>
         </li>`;
@@ -1360,11 +1385,17 @@ function renderContracts(rows, windowSec) {
     body.innerHTML = rows.map(r => {
         const pct = Math.round(r.retried_ratio * 100);
         const rtpCls = classifyRtp(r.avg_rtp_of_blocks);
+        // `data-addr` holds the full hex address for the delegated click
+        // handler that opens the contract popup. Previously this lived in
+        // `title`, but on mobile a long-press surfaces the native tooltip
+        // — a 42-char hex stripe that overflows adjacent rows. The popup
+        // is the sanctioned way to see the full address (with a copy
+        // button), so we drop the native tooltip entirely.
         const labeled = r.label
-            ? `<div class="contract-label">${escapeHTML(r.label)}${r.category && r.category !== "unknown"
+            ? `<div class="contract-label"><span class="contract-name">${escapeHTML(r.label)}</span>${r.category && r.category !== "unknown"
                 ? `<span class="cat">${escapeHTML(r.category)}</span>` : ""}</div>
-               <div class="contract-addr" title="${escapeHTML(r.to_addr)}">${shortAddr(r.to_addr)}</div>`
-            : `<div class="contract-addr unlabeled" title="${escapeHTML(r.to_addr)}">${shortAddr(r.to_addr)}</div>`;
+               <div class="contract-addr" data-addr="${escapeHTML(r.to_addr)}">${shortAddr(r.to_addr)}</div>`
+            : `<div class="contract-addr unlabeled" data-addr="${escapeHTML(r.to_addr)}">${shortAddr(r.to_addr)}</div>`;
         return `
             <tr>
                 <td><div class="contract-cell">${labeled}</div></td>
@@ -1541,7 +1572,7 @@ function renderIncidents(alerts) {
             : "";
         return `
             <li>
-                <span class="kind ${sev}">${escapeHTML(sev)}</span>
+                <span class="kind-cc"><span class="kind ${sev}">${escapeHTML(sev)}</span>${codeColorChip(a)}</span>
                 <span class="detail">${escapeHTML(kindLabel)}${recurrenceTag}</span>
                 <span class="detail">${escapeHTML(a.title || "")}${
                     detailFragment ? " — " + escapeHTML(detailFragment) : ""
@@ -1861,6 +1892,7 @@ function _popupInit() {
     _popup.body = document.getElementById("popup-body");
     _popup.foot = document.getElementById("popup-foot");
     _popup.closeBtn = document.getElementById("popup-close");
+    _popup.copyBtn = document.getElementById("popup-copy");
     const backdrop = document.getElementById("popup-backdrop");
 
     _popup.closeBtn.addEventListener("click", () => closePopup());
@@ -1869,6 +1901,35 @@ function _popupInit() {
         if (_popup.root.classList.contains("hidden")) return;
         if (e.key === "Escape") { e.stopPropagation(); closePopup(); }
     });
+
+    // Copy-address. Only visible on contract popups; hidden in the default
+    // openPopup() reset and re-shown by _renderContractPopup once we know
+    // the address. navigator.clipboard requires HTTPS or localhost — ops.
+    // rustemar.dev serves https so this is fine in prod; local dev hits
+    // http://127.0.0.1 which Chrome also treats as secure context.
+    if (_popup.copyBtn) {
+        _popup.copyBtn.addEventListener("click", async () => {
+            const addr = _popup.copyBtn.dataset.addr || "";
+            if (!addr) return;
+            try {
+                await navigator.clipboard.writeText(addr);
+                _popup.copyBtn.classList.add("copied");
+                const prev = _popup.copyBtn.textContent;
+                _popup.copyBtn.textContent = "copied";
+                setTimeout(() => {
+                    _popup.copyBtn.classList.remove("copied");
+                    _popup.copyBtn.textContent = prev;
+                }, 1500);
+            } catch (e) {
+                // Clipboard API can fail inside iframes or when the page
+                // isn't a secure context — leave the user an audible hint
+                // by briefly flashing an error class; full fallback to a
+                // selection-based copy isn't worth the code for this UX.
+                _popup.copyBtn.textContent = "copy failed";
+                setTimeout(() => { _popup.copyBtn.textContent = "copy"; }, 1500);
+            }
+        });
+    }
     // Popstate so browser back/forward closes or switches popups.
     window.addEventListener("popstate", () => {
         const p = _readPopupFromURL();
@@ -1911,6 +1972,9 @@ async function openPopup(kind, key, opts = {}) {
     _popup.currentKind = kind; _popup.currentKey = key;
     _popup.root.classList.remove("hidden");
     _popup.root.setAttribute("aria-hidden", "false");
+    // Lock background scroll while the popup is open — without this,
+    // a touch swipe on mobile can drift the dashboard behind the backdrop.
+    document.body.classList.add("popup-open");
     _popup.body.className = "popup-body loading";
     _popup.body.textContent = "loading…";
     _popup.foot.textContent = "";
@@ -1918,6 +1982,14 @@ async function openPopup(kind, key, opts = {}) {
     _popup.title.textContent = kind === "block" ? "Block detail"
                              : kind === "contract" ? "Contract detail"
                              : kind === "reorg" ? "Reorg trace" : "Detail";
+    // Hide + reset the copy button on every open; the contract-popup
+    // renderer re-enables it once the address is known.
+    if (_popup.copyBtn) {
+        _popup.copyBtn.classList.add("hidden");
+        _popup.copyBtn.classList.remove("copied");
+        _popup.copyBtn.textContent = "copy";
+        _popup.copyBtn.dataset.addr = "";
+    }
     _popup.closeBtn.focus();
     if (!opts.skipPush) _writePopupToURL(kind, key);
 
@@ -1955,6 +2027,7 @@ function _closePopupDOM() {
     _popup.root.setAttribute("aria-hidden", "true");
     _popup.body.textContent = "";
     _popup.foot.textContent = "";
+    document.body.classList.remove("popup-open");
     if (_popup.abortCtl) { _popup.abortCtl.abort(); _popup.abortCtl = null; }
     if (_popup.lastFocused && typeof _popup.lastFocused.focus === "function") {
         try { _popup.lastFocused.focus(); } catch (_) { /* detached */ }
@@ -2079,6 +2152,12 @@ function _renderContractPopup(d) {
     _popup.title.textContent = label;
     const windowHours = Math.round((d.window.to_ts_ms - d.window.from_ts_ms) / 3600_000);
     _popup.sub.textContent = `${d.to_addr} · last ${windowHours}h`;
+    // Reveal the copy button now that we know the address. The click
+    // handler wired in _popupInit reads data-addr.
+    if (_popup.copyBtn) {
+        _popup.copyBtn.dataset.addr = d.to_addr;
+        _popup.copyBtn.classList.remove("hidden");
+    }
 
     const s = d.stats;
     const rtpCls = classifyRtp(s.avg_rtp_in_blocks);
@@ -2344,7 +2423,7 @@ function _wirePopupTriggers() {
         contractsBody.addEventListener("click", (e) => {
             const row = e.target.closest("tr");
             if (!row || row.classList.contains("empty")) return;
-            const addr = row.querySelector(".contract-addr")?.getAttribute("title");
+            const addr = row.querySelector(".contract-addr")?.dataset.addr;
             if (addr && /^0x[0-9a-fA-F]{40}$/.test(addr)) openPopup("contract", addr.toLowerCase());
         });
         // Visual cue: the row is tappable. Uses existing hover state on cells.

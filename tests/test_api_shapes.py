@@ -18,6 +18,7 @@ import pytest
 
 from monad_ops.api.app import build_app
 from monad_ops.config import Config, NodeConfig
+from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
 from monad_ops.storage import Storage
 
@@ -112,6 +113,62 @@ async def test_api_alerts_history_returns_dict(client: httpx.AsyncClient) -> Non
     assert "count" in body
     assert "alerts" in body
     assert isinstance(body["alerts"], list)
+
+
+@pytest.mark.asyncio
+async def test_alert_endpoints_carry_code_color(
+    state_with_storage: State,
+) -> None:
+    """Every alert payload served by the API must carry a ``code_color``
+    field mapping severity onto Jackson's 2026-03-26 Foundation
+    colour-code vocabulary. Operators read Foundation announcements in
+    that language (CODE RED / ORANGE / GREEN) — aligning the local
+    dashboard and ``/api/alerts*`` payloads with the same chips removes
+    a translation step during incidents.
+    """
+    # One alert per severity so the mapping is exercised end-to-end.
+    state_with_storage.add_alert(AlertEvent(
+        rule="assertion", severity=Severity.CRITICAL,
+        key="k-crit", title="halt", detail="",
+    ))
+    state_with_storage.add_alert(AlertEvent(
+        rule="retry_spike", severity=Severity.WARN,
+        key="k-warn", title="spike", detail="",
+    ))
+    state_with_storage.add_alert(AlertEvent(
+        rule="retry_spike", severity=Severity.RECOVERED,
+        key="k-rec", title="normalized", detail="",
+    ))
+    state_with_storage.add_alert(AlertEvent(
+        rule="reference_lag", severity=Severity.INFO,
+        key="k-info", title="info", detail="",
+    ))
+
+    app = build_app(
+        state_with_storage, _minimal_config(), enricher=None, labels=None,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        live = (await c.get("/api/alerts")).json()
+        history = (await c.get("/api/alerts/history")).json()["alerts"]
+        state_body = (await c.get("/api/state")).json()
+
+    expected = {
+        "critical": "red",
+        "warn": "orange",
+        "recovered": "green",
+        "info": "green",
+    }
+    for payload_name, payload in (
+        ("live", live), ("history", history), ("state.current_alerts", state_body["current_alerts"]),
+    ):
+        assert payload, f"{payload_name} empty — test setup issue"
+        for a in payload:
+            assert "code_color" in a, f"missing code_color in {payload_name}: {a}"
+            assert a["code_color"] == expected[a["severity"]], (
+                f"mismatch in {payload_name}: sev={a['severity']} "
+                f"code_color={a['code_color']} (expected {expected[a['severity']]})"
+            )
 
 
 @pytest.mark.asyncio

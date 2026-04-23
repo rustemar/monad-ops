@@ -20,6 +20,7 @@ _DEFAULT_SEVERITY: dict[AssertionKind, Severity] = {
     AssertionKind.CXX_ASSERT: Severity.CRITICAL,
     AssertionKind.RUST_PANIC: Severity.CRITICAL,
     AssertionKind.QC_OVERSHOOT: Severity.CRITICAL,
+    AssertionKind.IO_URING_INIT: Severity.CRITICAL,
     AssertionKind.GENERIC_FATAL: Severity.CRITICAL,
     # Chunk exhaustion handled specially below.
 }
@@ -58,6 +59,7 @@ class AssertionRule:
             AssertionKind.RUST_PANIC: "monad process panicked",
             AssertionKind.QC_OVERSHOOT: "consensus QC overshoot (statesync needed)",
             AssertionKind.CHUNK_EXHAUSTION: "TrieDB chunk exhaustion",
+            AssertionKind.IO_URING_INIT: "io_uring init failure (kernel / sysctl / container config)",
             AssertionKind.GENERIC_FATAL: "FATAL log line",
         }
         return titles.get(ev.kind, "monad incident")

@@ -28,6 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
+from monad_ops.rules.events import code_color_for
 from monad_ops.state import State
 
 _THIS_DIR = Path(__file__).parent
@@ -371,6 +372,7 @@ def build_app(
                 {
                     "rule": a.rule,
                     "severity": a.severity.value,
+                    "code_color": code_color_for(a.severity).value,
                     "title": a.title,
                     "detail": a.detail,
                     "ts_ms": int(ts * 1000),
@@ -409,6 +411,7 @@ def build_app(
                     "ts_ms": int(r.ts * 1000),
                     "rule": r.rule,
                     "severity": r.severity.value,
+                    "code_color": code_color_for(r.severity).value,
                     "key": r.key,
                     "title": r.title,
                     "detail": r.detail,

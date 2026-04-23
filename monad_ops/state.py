@@ -18,7 +18,7 @@ from threading import Lock
 from monad_ops.collector.probes import ProbeResult
 from monad_ops.collector.reference_rpc import ReferenceSample
 from monad_ops.parser import ExecBlock
-from monad_ops.rules.events import AlertEvent
+from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
 from monad_ops.storage import Storage
 
@@ -351,6 +351,7 @@ class State:
             {
                 "rule": a.rule,
                 "severity": a.severity.value,
+                "code_color": code_color_for(a.severity).value,
                 "title": a.title,
                 "detail": a.detail,
                 "ts_ms": int(ts * 1000),
