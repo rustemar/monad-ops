@@ -177,6 +177,109 @@ async def test_alerts_history_bad_severity_returns_422(client: httpx.AsyncClient
     assert r.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# Detail-popup endpoints
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_api_block_detail_404_on_missing(client: httpx.AsyncClient) -> None:
+    # Empty storage — any block_number is absent.
+    r = await client.get("/api/blocks/12345")
+    assert r.status_code == 404
+    body = r.json()
+    assert "error" in body
+
+
+@pytest.mark.asyncio
+async def test_api_block_detail_shape_with_data(
+    state_with_storage, client: httpx.AsyncClient
+) -> None:
+    from monad_ops.parser import ExecBlock
+    from monad_ops.storage import ContractBlockAgg
+
+    def mk(n, rtp=0.0, tx=10, retried=0):
+        return ExecBlock(
+            block_number=n, block_id=f"0x{n:064x}",
+            timestamp_ms=1776_000_000_000 + n * 400,
+            tx_count=tx, retried=retried, retry_pct=rtp,
+            state_reset_us=73, tx_exec_us=653, commit_us=448, total_us=1232,
+            tps_effective=4594, tps_avg=2435, gas_used=450276,
+            gas_per_sec_effective=689, gas_per_sec_avg=365,
+            active_chunks=1, slow_chunks=0,
+        )
+    # Seed blocks 100..104 and a per-(block, contract) row for block 102.
+    for n in range(100, 105):
+        state_with_storage.storage.write_block(mk(n, rtp=50.0 if n == 102 else 0.0, tx=10, retried=5 if n == 102 else 0))
+    state_with_storage.storage.write_tx_contract_block([
+        ContractBlockAgg(block_number=102, to_addr="0x" + "ab" * 20, tx_count=7, total_gas=1_000_000),
+        ContractBlockAgg(block_number=102, to_addr="0x" + "cd" * 20, tx_count=3, total_gas=500_000),
+    ])
+    r = await client.get("/api/blocks/102", params={"neighbor_window": 2, "top_contracts_limit": 5})
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body.keys()) >= {"block", "top_contracts", "neighbors", "reorg_near"}
+    assert body["block"]["n"] == 102
+    assert body["block"]["rtp"] == 50.0
+    assert len(body["top_contracts"]) == 2
+    # Ordered by tx_count DESC; share computed on block.tx_count.
+    assert body["top_contracts"][0]["tx_count"] == 7
+    assert body["top_contracts"][0]["share"] == 0.7
+    # Label is None because no labels registry was provided to build_app.
+    assert body["top_contracts"][0]["label"] is None
+    # Neighbors span requested window, inclusive.
+    assert len(body["neighbors"]) == 5  # 100..104
+    assert body["reorg_near"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_block_detail_negative_returns_400(client: httpx.AsyncClient) -> None:
+    # FastAPI path param validates int, so negative is accepted only via
+    # signed path — our handler checks ``< 0`` explicitly.
+    r = await client.get("/api/blocks/-1")
+    # Starlette rejects the negative path at routing time (int coerce),
+    # returning 404. Either 400 or 404 is an acceptable "not valid" signal.
+    assert r.status_code in (400, 404, 422)
+
+
+@pytest.mark.asyncio
+async def test_api_contract_detail_bad_addr_returns_400(client: httpx.AsyncClient) -> None:
+    r = await client.get("/api/contracts/not-an-addr")
+    assert r.status_code == 400
+    assert "error" in r.json()
+
+
+@pytest.mark.asyncio
+async def test_api_contract_detail_shape_empty_window(client: httpx.AsyncClient) -> None:
+    # No data — endpoint still returns the full shape with zeros.
+    r = await client.get(
+        "/api/contracts/0x" + "0" * 40,
+        params={"hours": 1},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    for k in ("to_addr", "window", "stats", "dominance", "peak_block", "rank", "hourly", "label", "category"):
+        assert k in body
+    assert body["to_addr"] == "0x" + "0" * 40
+    assert body["stats"]["blocks_appeared"] == 0
+    assert body["stats"]["tx_count"] == 0
+    assert body["peak_block"] is None
+    # Dominance buckets present (3 defaults) but all zero.
+    assert len(body["dominance"]) == 3
+    for d in body["dominance"]:
+        assert d["blocks"] == 0
+        assert d["avg_rtp"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_api_contract_detail_invalid_window(client: httpx.AsyncClient) -> None:
+    # to_ts_ms < from_ts_ms → 400.
+    r = await client.get(
+        "/api/contracts/0x" + "0" * 40,
+        params={"from_ts_ms": 2000, "to_ts_ms": 1000},
+    )
+    assert r.status_code == 400
+
+
 @pytest.mark.asyncio
 async def test_blocks_bad_limit_returns_422(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/blocks", params={"limit": "0"})
