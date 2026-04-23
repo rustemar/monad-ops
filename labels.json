@@ -13,6 +13,10 @@
     "0xa2b0067002df61df015c11b2cf0be4f34fc41cf8": {
       "name": "Bolt Multi-Feed Adapter",
       "category": "oracle"
+    },
+    "0xacc0a0cf13571d30b4b8637996f5d6d774d4fd62": {
+      "name": "Stork",
+      "category": "oracle"
     }
   }
 }
