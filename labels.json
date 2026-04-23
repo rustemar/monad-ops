@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
-  "note": "Known contract labels for the monad-ops dashboard. Addresses are 0x-prefixed, lowercase, exactly 42 chars. Category is a short tag used for grouping in the UI. Community contributions welcome via PR.",
-  "labels": {}
+  "note": "Known contract labels for the monad-ops dashboard. Addresses are 0x-prefixed, lowercase, exactly 42 chars. Category is a short tag used for grouping in the UI. Community contributions welcome via PR — only add entries with an identifiable source (Monad docs, verified contract on MonadScan, universal EVM deterministic deployment). Conservative on purpose: a wrong label poisons the dataset more than a bare address ever could.",
+  "labels": {
+    "0x0000000000000000000000000000000000001000": {
+      "name": "Staking Precompile",
+      "category": "system"
+    },
+    "0xca11bde05977b3631167028862be2a173976ca11": {
+      "name": "Multicall3",
+      "category": "infra"
+    },
+    "0xa2b0067002df61df015c11b2cf0be4f34fc41cf8": {
+      "name": "Bolt Multi-Feed Adapter",
+      "category": "oracle"
+    }
+  }
 }
