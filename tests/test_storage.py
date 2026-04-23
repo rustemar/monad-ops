@@ -58,6 +58,99 @@ def test_insert_or_ignore_is_idempotent(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_get_block_detail_none_when_missing(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    assert storage.get_block_detail(999) is None
+    storage.close()
+
+
+def test_get_block_detail_includes_top_and_neighbors(tmp_path: Path) -> None:
+    from monad_ops.storage import ContractBlockAgg
+    storage = Storage(tmp_path / "state.db")
+    for n in range(100, 110):
+        storage.write_block(_mk_block(n, rtp=float(n - 100) * 10, tx=10, retried=n - 100))
+    storage.write_tx_contract_block([
+        ContractBlockAgg(block_number=105, to_addr="0xaaaa" + "0" * 36, tx_count=7, total_gas=900),
+        ContractBlockAgg(block_number=105, to_addr="0xbbbb" + "0" * 36, tx_count=3, total_gas=300),
+    ])
+    d = storage.get_block_detail(105, neighbor_window=2, top_contracts_limit=5)
+    assert d is not None
+    assert d["block"]["n"] == 105
+    # Top contracts ordered by tx_count DESC, share computed on block.tx.
+    assert len(d["top_contracts"]) == 2
+    assert d["top_contracts"][0]["to_addr"] == "0xaaaa" + "0" * 36
+    assert d["top_contracts"][0]["share"] == 0.7
+    # Neighbors include the block itself + 2 each side = 5.
+    assert len(d["neighbors"]) == 5
+    storage.close()
+
+
+def test_find_reorg_near_block(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    # Write a reorg alert at block 200 via the key format used by the rule.
+    storage._conn.execute(
+        "INSERT INTO alerts (ts, rule, severity, key, title, detail) "
+        "VALUES (?, 'reorg', 'critical', ?, ?, ?)",
+        (1776_000_000.0, "reorg:200:0x" + "ab" * 32, "reorg #200", "demo"),
+    )
+    # Within window → returns 200.
+    assert storage.find_reorg_near_block(205, window=10) == 200
+    # Outside window → None.
+    assert storage.find_reorg_near_block(500, window=10) is None
+    storage.close()
+
+
+def test_get_contract_detail_empty_window(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    d = storage.get_contract_detail(
+        "0x" + "0" * 40,
+        from_ts_ms=0,
+        to_ts_ms=1_000_000_000,
+    )
+    assert d["to_addr"] == "0x" + "0" * 40
+    assert d["stats"]["blocks_appeared"] == 0
+    assert d["peak_block"] is None
+    assert len(d["dominance"]) == 3
+    storage.close()
+
+
+def test_get_contract_detail_dominance_buckets(tmp_path: Path) -> None:
+    from monad_ops.storage import ContractBlockAgg
+    storage = Storage(tmp_path / "state.db")
+    # Seed 3 blocks: contract makes up 5%, 40%, 80% of each block's tx.
+    # Retry rates 10, 20, 30 respectively. Window covers all three.
+    cfg = [
+        (100, 20, 1, 10.0),   # 5%
+        (101, 10, 4, 20.0),   # 40%
+        (102, 10, 8, 30.0),   # 80%
+    ]
+    for n, tx_total, my_tx, rtp in cfg:
+        storage.write_block(_mk_block(n, rtp=rtp, tx=tx_total, retried=0))
+        storage.write_tx_contract_block([
+            ContractBlockAgg(block_number=n, to_addr="0x" + "ab" * 20, tx_count=my_tx, total_gas=1000 * my_tx),
+        ])
+    d = storage.get_contract_detail(
+        "0x" + "ab" * 20,
+        from_ts_ms=0,
+        to_ts_ms=10 ** 18,
+        dominance_thresholds_pct=(10, 30, 50),
+    )
+    # Flatten for easier assertion.
+    dom = {x["threshold_pct"]: x for x in d["dominance"]}
+    # ≥10% → blocks 101, 102 (40%, 80%): avg rtp = 25.0
+    assert dom[10]["blocks"] == 2
+    assert abs(dom[10]["avg_rtp"] - 25.0) < 0.01
+    # ≥30% → same two: avg rtp = 25.0
+    assert dom[30]["blocks"] == 2
+    # ≥50% → only block 102: avg rtp = 30.0
+    assert dom[50]["blocks"] == 1
+    assert abs(dom[50]["avg_rtp"] - 30.0) < 0.01
+    # Peak block is 102 (highest tx_count).
+    assert d["peak_block"]["n"] == 102
+    assert d["peak_block"]["share"] == 0.8
+    storage.close()
+
+
 def test_pragmas_applied(tmp_path: Path) -> None:
     """Performance/concurrency PRAGMAs are set on fresh connection.
 
