@@ -132,6 +132,47 @@
         </section>
 
         <section class="card">
+            <h2>Stress-test replay (Foundation, 2026-04-20)</h2>
+            <p>
+                Replay the three 2-hour stress batches @Abraar | Monad Foundation ran
+                on testnet (epochs 532 / 533 / 534, ~3–5 k TPS at ~400 M gas/s, block
+                utilisation touching 100 %). Each curl below pulls the aggregate
+                summary for the epoch window this node observed: retry-rate profile,
+                peak / average TPS and gas, top retried contracts, and an optional
+                per-block series. Timestamps are fixed so a fresh reader gets
+                reproducible numbers without looking up epoch boundaries.
+            </p>
+
+            <div class="example">
+                <div class="example-label">Epoch 532 — 2026-04-20 00:00 → 05:37 UTC (batch 1)</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/window_summary\
+?from_ts_ms=1776643200000&amp;to_ts_ms=1776663420000&amp;top_contracts_limit=20" \
+  | jq '.aggregate'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Epoch 533 — 2026-04-20 05:37 → 11:14 UTC (batch 2)</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/window_summary\
+?from_ts_ms=1776663420000&amp;to_ts_ms=1776683640000&amp;top_contracts_limit=20" \
+  | jq '.aggregate'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Epoch 534 — 2026-04-20 11:14 → 16:50 UTC (batch 3)</div>
+                <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/window_summary\
+?from_ts_ms=1776683640000&amp;to_ts_ms=1776703800000&amp;top_contracts_limit=20" \
+  | jq '.aggregate'</code></pre>
+            </div>
+
+            <p class="hint-404">
+                Add <code>&amp;include_blocks=true</code> to any of the above for the per-block
+                series within a batch (capped at 2 h span on the server, so split a full epoch
+                in half if you want the full trace). The <code>.top_contracts</code> array on
+                every response ranks the heaviest re-execution contributors for that window.
+            </p>
+        </section>
+
+        <section class="card">
             <h2>Examples</h2>
             <p class="hint-404">Replace the base URL below with your own if running a fork.
                 <br>Note: <code>date +%s%3N</code> is GNU coreutils. On macOS/BSD use <code>python3 -c 'import time; print(int(time.time()*1000))'</code> or <code>gdate +%s%3N</code> (from coreutils).</p>

@@ -89,6 +89,50 @@ def test_io_uring_takes_priority_over_cxx_assert_on_same_line() -> None:
     assert ev.kind is AssertionKind.IO_URING_INIT
 
 
+# ── danielcamargo / Triton One 2026-01-23 (intermittent startup) ──────
+# "just restarting node causes this issue to start monad-execution or
+# monad-rpc sometimes". Journal carries:
+#   event.cpp:357 LOG_ERROR  event library error -- monad_event_ring_mmap@event_ri[ng…]
+# Different remediation vector from IO_URING_INIT (not a kernel-capability
+# mismatch) — classified as its own sub-kind so the alert summary points
+# operators at the right diagnostic.
+def test_event_ring_mmap_classified_separately() -> None:
+    line = (
+        "monad[3190928] event.cpp:357 LOG_ERROR   "
+        "event library error -- monad_event_ring_mmap@event_ring"
+    )
+    ev = parse_assertion(line)
+    assert ev is not None
+    assert ev.kind is AssertionKind.EVENT_RING_MMAP
+    # Remediation pointers for the operator's diagnostic flow.
+    assert "reboot" in ev.summary.lower() or "memlock" in ev.summary.lower()
+    # File:line location still picked up for forensic reference.
+    assert ev.location is not None and "event.cpp:357" in ev.location
+    assert ev.key == "event_ring_mmap:startup"
+
+
+def test_event_ring_mmap_dedup_key_stable_across_retries() -> None:
+    """Intermittent class — if it fires twice in one boot, the second
+    instance must collapse with the first rather than producing a second
+    alert with a different key."""
+    a = parse_assertion(
+        "event library error -- monad_event_ring_mmap"
+    )
+    b = parse_assertion(
+        "[boot #4] event library error -- monad_event_ring_mmap@event_ring:0x…"
+    )
+    assert a is not None and b is not None
+    assert a.key == b.key
+
+
+def test_event_ring_mmap_does_not_trigger_on_healthy_startup_log() -> None:
+    """Guard against the regex matching a non-error info line that happens
+    to mention the event ring (sanity check — keeps the pattern honest)."""
+    line = "monad event ring initialized successfully"
+    ev = parse_assertion(line)
+    assert ev is None or ev.kind is not AssertionKind.EVENT_RING_MMAP
+
+
 # ── Unit410 consensus panic 2025-12-04 ────────────────────────────────
 def test_qc_overshoot_exact_phrase() -> None:
     line = (

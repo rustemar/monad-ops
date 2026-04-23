@@ -32,6 +32,7 @@ class AssertionKind(StrEnum):
     QC_OVERSHOOT = "qc_overshoot"     # high qc too far ahead of block tree root
     CHUNK_EXHAUSTION = "chunks"       # Disk usage: 0.99xx ... Chunks: N fast
     IO_URING_INIT = "io_uring_init"   # io_uring_queue_init_params failed at startup
+    EVENT_RING_MMAP = "event_ring_mmap"  # monad_event_ring_mmap flaky startup
     GENERIC_FATAL = "generic_fatal"   # catch-all FATAL / fatal error
 
 
@@ -91,6 +92,20 @@ _CHUNK_CRITICAL_RATIO = 0.90  # below this we don't fire
 # from generic C++ assertions.
 _IO_URING_INIT = re.compile(
     r"io_uring_queue_init_params\s+failed",
+    re.IGNORECASE,
+)
+
+# Intermittent startup flakiness observed 2026-01-23 danielcamargo / Triton One:
+# "just restarting node causes this issue to start monad-execution or
+# monad-rpc sometimes" — journal line is
+#     event.cpp:357 LOG_ERROR event library error -- monad_event_ring_mmap@event_ring…
+# Different class from the io_uring init failure: not a kernel-capability
+# mismatch (the bit where io_uring isn't available at all), but a transient
+# mmap failure on fast restart. Public thread had no closure, so the
+# remediation hint stays modest — it's pointing the operator at the
+# class, not at a specific fix.
+_EVENT_RING_MMAP = re.compile(
+    r"event library error\s*--?\s*monad_event_ring_mmap",
     re.IGNORECASE,
 )
 
@@ -158,7 +173,29 @@ def parse_assertion(line: str) -> AssertionEvent | None:
             ),
         )
 
-    # 4. C++ assertion.
+    # 4. Event-ring mmap flakiness — monad_event_ring_mmap fails on fast
+    # restarts "sometimes" (danielcamargo 2026-01-23). Falls into the
+    # same startup-incident bucket as io_uring but the remediation is
+    # different; treat as its own sub-kind so the alert points operators
+    # at the right diagnostic, not a kernel check that won't apply.
+    if _EVENT_RING_MMAP.search(line):
+        return AssertionEvent(
+            kind=AssertionKind.EVENT_RING_MMAP,
+            raw=line,
+            # Single dedup key — the intermittent class doesn't benefit
+            # from per-instance granularity; operators want "it tripped
+            # again on this boot" collapsed into one alert.
+            key=f"{AssertionKind.EVENT_RING_MMAP.value}:startup",
+            location=_extract_file_line(line),
+            summary=(
+                "event-ring mmap failed at startup — intermittent class; "
+                "if it reproduces, try a full reboot instead of a service "
+                "restart, and check `ulimit -l` (memlock) and hugepages "
+                "config. No public root-cause fix as of 2026-01-23."
+            ),
+        )
+
+    # 5. C++ assertion.
     m = _CXX_ASSERT.search(line)
     if m:
         expr = m.group(1)
@@ -172,7 +209,7 @@ def parse_assertion(line: str) -> AssertionEvent | None:
             summary=f"C++ assertion failed: {expr[:160]}",
         )
 
-    # 5. Chunk exhaustion (triedb-side disk full).
+    # 6. Chunk exhaustion (triedb-side disk full).
     m = _CHUNK_EXHAUSTION.search(line)
     if m:
         ratio = float(m.group(1))
@@ -188,7 +225,7 @@ def parse_assertion(line: str) -> AssertionEvent | None:
                 summary=f"TrieDB chunk exhaustion: {ratio:.4f} used, {fast_chunks} fast chunks",
             )
 
-    # 6. Generic FATAL. Keep last so specific patterns get priority.
+    # 7. Generic FATAL. Keep last so specific patterns get priority.
     if _GENERIC_FATAL.search(line):
         return AssertionEvent(
             kind=AssertionKind.GENERIC_FATAL,
