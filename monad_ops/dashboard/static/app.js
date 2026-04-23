@@ -2239,8 +2239,9 @@ function _renderReorgPopup(d) {
         <div class="pk-section">neighbor retry_pct</div>
         <svg class="pk-spark" id="pk-spark-reorg" viewBox="0 0 100 40" preserveAspectRatio="none" aria-hidden="true">
             <polyline id="pk-spark-reorg-line" points=""></polyline>
-            <line id="pk-spark-reorg-marker-line" class="pk-spark-marker-line"
-                  x1="0" y1="0" x2="0" y2="40"></line>
+            <polygon id="pk-spark-reorg-marker-triangle"
+                     class="pk-spark-marker-triangle"
+                     points="0,0 0,0 0,0"></polygon>
             <circle id="pk-spark-reorg-marker-dot" class="pk-spark-marker-dot"
                     cx="0" cy="0" r="2.5"></circle>
         </svg>
@@ -2249,28 +2250,33 @@ function _renderReorgPopup(d) {
 
     const series = (d.blocks || []).map(b => b.retry_pct ?? 0);
     _drawSparkline(series, "#pk-spark-reorg-line", _themedStroke());
-    // Mark the reorged block itself on the sparkline — without this the
-    // reader has to count to the middle to locate the event. Dashed
-    // crit-color vertical + solid dot at the exact data point.
+    // Mark the reorged block: a small ▼ at the top of the chart points
+    // down at the block, and a dot anchors to the data line itself.
+    // Deliberately no through-the-chart vertical — it visually competed
+    // with the data line and looked like a rendering glitch.
     const centerIdx = (d.blocks || []).findIndex(
         b => b.block_number === d.block_number
     );
-    const markerLine = document.getElementById("pk-spark-reorg-marker-line");
+    const markerTri = document.getElementById("pk-spark-reorg-marker-triangle");
     const markerDot = document.getElementById("pk-spark-reorg-marker-dot");
-    if (centerIdx >= 0 && series.length > 1 && markerLine && markerDot) {
+    if (centerIdx >= 0 && series.length > 1 && markerTri && markerDot) {
         const x = (centerIdx / (series.length - 1)) * 100;
         const mn = Math.min(...series);
         const mx = Math.max(...series);
         const span = mx - mn || 1;
         const y = 40 - ((series[centerIdx] - mn) / span) * 36 - 2;
-        markerLine.setAttribute("x1", x.toFixed(2));
-        markerLine.setAttribute("x2", x.toFixed(2));
+        // ▼ positioned flush with the top of the viewBox. SVG x is in
+        // percent units (viewBox width 100); the 2.4-unit half-width
+        // ≈ 10-12 px on a typical 500 px-wide popup sparkline — small
+        // enough to avoid occluding neighbor data, large enough to read.
+        const triPts = `${(x - 2.4).toFixed(2)},0 ${(x + 2.4).toFixed(2)},0 ${x.toFixed(2)},4`;
+        markerTri.setAttribute("points", triPts);
         markerDot.setAttribute("cx", x.toFixed(2));
         markerDot.setAttribute("cy", y.toFixed(2));
-    } else if (markerLine && markerDot) {
-        // No center match (shouldn't happen given the trace is built
-        // around this block) — hide the marker rather than draw at 0,0.
-        markerLine.setAttribute("x2", "0");
+    } else if (markerTri && markerDot) {
+        // No center match (shouldn't happen; trace is built around this
+        // block) — collapse the marker instead of drawing at (0,0).
+        markerTri.setAttribute("points", "0,0 0,0 0,0");
         markerDot.setAttribute("r", "0");
     }
     document.getElementById("pk-spark-reorg-caption").textContent =

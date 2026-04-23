@@ -1255,9 +1255,10 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
 
 .pk-spark { width: 100%; height: 40px; display: block; }
 .pk-spark polyline { fill: none; stroke-width: 1.5; }
-.pk-spark-marker-line {
-    stroke: var(--crit); stroke-width: 1; stroke-dasharray: 2 2; opacity: 0.7;
-}
+/* Event marker in a sparkline (used by the reorg popup). A ▼ at the
+   top points at the block, a dot anchors to the data line — no
+   through-the-chart vertical which visually competes with the series. */
+.pk-spark-marker-triangle { fill: var(--crit); }
 .pk-spark-marker-dot {
     fill: var(--crit); stroke: var(--bg-card); stroke-width: 1.5;
 }
