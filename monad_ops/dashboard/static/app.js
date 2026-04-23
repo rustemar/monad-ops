@@ -1489,7 +1489,7 @@ function renderIncidents(alerts) {
     if (incidents.length === 0) {
         card.classList.remove("has-incidents");
         hint.textContent = "assertions · panics · chunk exhaustion · critical probes";
-        list.innerHTML = '<li class="empty-ok">● clear — no critical incidents in last 24h ·&nbsp;<a href="/alerts">full history →</a></li>';
+        list.innerHTML = '<li class="empty-ok">● clear — no critical incidents in last 24h <a href="/alerts">full history →</a></li>';
         return;
     }
 
