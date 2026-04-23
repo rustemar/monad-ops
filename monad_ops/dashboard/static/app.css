@@ -1338,3 +1338,23 @@ body.theme-light .popup-backdrop { background: rgba(20, 25, 40, 0.35); }
     .pk-top-row { grid-template-columns: 1fr 70px; }
     .pk-top-row .share-cell { display: none; }
 }
+
+/* Pattern tag shown in the contract popup header row. "uniform" flags
+   the 1-tx-per-block signature — common bot pattern. Kept muted so it
+   informs without hijacking the layout. */
+.pk-pattern-tag {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--warn);
+    background: rgba(255, 180, 84, 0.08);
+    border: 1px solid var(--warn);
+    border-radius: 3px;
+    letter-spacing: 0.02em;
+}
+.pk-pattern-tag .pk-pattern-label {
+    font-weight: 600; text-transform: uppercase; margin-right: 6px;
+    letter-spacing: 0.05em; font-size: 10px;
+}

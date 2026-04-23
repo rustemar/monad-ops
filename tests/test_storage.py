@@ -151,6 +151,77 @@ def test_get_contract_detail_dominance_buckets(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_get_contract_detail_rank_is_null_when_empty(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    d = storage.get_contract_detail(
+        "0x" + "1" * 40, from_ts_ms=0, to_ts_ms=10 ** 18,
+    )
+    # iter-11 audit G1-2: empty contract should not advertise a rank.
+    assert d["rank"] is None
+    assert d["pattern"] is None
+    storage.close()
+
+
+def test_get_contract_detail_pattern_uniform_detected(tmp_path: Path) -> None:
+    from monad_ops.storage import ContractBlockAgg
+    storage = Storage(tmp_path / "state.db")
+    # 60 blocks, exactly 1 tx per block — textbook uniform bot signature.
+    for n in range(200, 260):
+        storage.write_block(_mk_block(n, rtp=50.0, tx=10, retried=5))
+        storage.write_tx_contract_block([
+            ContractBlockAgg(
+                block_number=n, to_addr="0x" + "ab" * 20,
+                tx_count=1, total_gas=21_000,
+            ),
+        ])
+    d = storage.get_contract_detail(
+        "0x" + "ab" * 20, from_ts_ms=0, to_ts_ms=10 ** 18,
+    )
+    assert d["pattern"] is not None
+    assert d["pattern"]["label"] == "uniform"
+    assert "tx/block" in d["pattern"]["detail"]
+    storage.close()
+
+
+def test_get_contract_detail_pattern_none_below_min_blocks(tmp_path: Path) -> None:
+    from monad_ops.storage import ContractBlockAgg
+    storage = Storage(tmp_path / "state.db")
+    # Only 30 blocks — below the 50-block floor, pattern stays null even
+    # though the 1:1 ratio is present.
+    for n in range(200, 230):
+        storage.write_block(_mk_block(n, rtp=10.0))
+        storage.write_tx_contract_block([
+            ContractBlockAgg(
+                block_number=n, to_addr="0x" + "cd" * 20,
+                tx_count=1, total_gas=21_000,
+            ),
+        ])
+    d = storage.get_contract_detail(
+        "0x" + "cd" * 20, from_ts_ms=0, to_ts_ms=10 ** 18,
+    )
+    assert d["pattern"] is None
+    storage.close()
+
+
+def test_get_contract_detail_pattern_none_for_non_uniform(tmp_path: Path) -> None:
+    from monad_ops.storage import ContractBlockAgg
+    storage = Storage(tmp_path / "state.db")
+    # 80 blocks, 3 tx/block avg — not uniform.
+    for n in range(300, 380):
+        storage.write_block(_mk_block(n, rtp=10.0, tx=10, retried=3))
+        storage.write_tx_contract_block([
+            ContractBlockAgg(
+                block_number=n, to_addr="0x" + "ef" * 20,
+                tx_count=3, total_gas=63_000,
+            ),
+        ])
+    d = storage.get_contract_detail(
+        "0x" + "ef" * 20, from_ts_ms=0, to_ts_ms=10 ** 18,
+    )
+    assert d["pattern"] is None
+    storage.close()
+
+
 def test_pragmas_applied(tmp_path: Path) -> None:
     """Performance/concurrency PRAGMAs are set on fresh connection.
 

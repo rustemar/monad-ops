@@ -281,6 +281,95 @@ async def test_api_contract_detail_invalid_window(client: httpx.AsyncClient) -> 
 
 
 @pytest.mark.asyncio
+async def test_api_contract_detail_empty_hides_rank(
+    client: httpx.AsyncClient,
+) -> None:
+    # iter-11 audit G1-2: rank should be null on an empty contract.
+    r = await client.get(
+        "/api/contracts/0x" + "0" * 40, params={"hours": 1}
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rank"] is None
+    assert body["pattern"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_contract_detail_suppresses_pattern_for_system(
+    state_with_storage, tmp_path,
+) -> None:
+    # Build an app with a labels registry that marks our test address
+    # as category=system. With 60 blocks of 1 tx each (uniform hit),
+    # storage would flag pattern; API should suppress it.
+    from monad_ops.api.app import build_app
+    from monad_ops.labels import ContractLabels, Label
+    from monad_ops.storage import ContractBlockAgg
+    from monad_ops.parser import ExecBlock
+
+    sys_addr = "0x" + "ab" * 20
+    labels = ContractLabels({sys_addr: Label(name="Test System", category="system")})
+
+    def mk(n, rtp=0.0, tx=10, retried=0):
+        return ExecBlock(
+            block_number=n, block_id=f"0x{n:064x}",
+            timestamp_ms=1776_000_000_000 + n * 400, tx_count=tx,
+            retried=retried, retry_pct=rtp,
+            state_reset_us=1, tx_exec_us=1, commit_us=1, total_us=3,
+            tps_effective=1, tps_avg=1, gas_used=1,
+            gas_per_sec_effective=1, gas_per_sec_avg=1,
+            active_chunks=0, slow_chunks=0,
+        )
+    for n in range(100, 160):
+        state_with_storage.storage.write_block(mk(n, rtp=10.0))
+        state_with_storage.storage.write_tx_contract_block([
+            ContractBlockAgg(block_number=n, to_addr=sys_addr, tx_count=1, total_gas=21_000),
+        ])
+
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=labels)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as c:
+        # Fixture timestamps live around 1776_000_000_000; use a 1h
+        # window that covers all 60 blocks (~24s span) and stays inside
+        # the 30-day API cap.
+        base = 1776_000_000_000
+        r = await c.get(
+            f"/api/contracts/{sys_addr}",
+            params={"from_ts_ms": base, "to_ts_ms": base + 3_600_000},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["category"] == "system"
+        # Raw storage would flag pattern=uniform here; API suppressed it.
+        assert body["pattern"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_detail_endpoints_set_cache_header(
+    state_with_storage, client: httpx.AsyncClient,
+) -> None:
+    # iter-11 audit G1-4: Cache-Control on the two detail endpoints so
+    # repeat opens within 30s are served by the browser cache.
+    from monad_ops.parser import ExecBlock
+    b = ExecBlock(
+        block_number=1234, block_id="0x" + "a" * 64,
+        timestamp_ms=1776_000_000_000, tx_count=1, retried=0,
+        retry_pct=0.0, state_reset_us=1, tx_exec_us=1, commit_us=1,
+        total_us=3, tps_effective=1, tps_avg=1, gas_used=1,
+        gas_per_sec_effective=1, gas_per_sec_avg=1, active_chunks=0,
+        slow_chunks=0,
+    )
+    state_with_storage.storage.write_block(b)
+    r = await client.get("/api/blocks/1234")
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "private, max-age=30"
+
+    r = await client.get("/api/contracts/0x" + "0" * 40, params={"hours": 1})
+    assert r.status_code == 200
+    assert r.headers.get("cache-control") == "private, max-age=30"
+
+
+@pytest.mark.asyncio
 async def test_blocks_bad_limit_returns_422(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/blocks", params={"limit": "0"})
     assert r.status_code == 422

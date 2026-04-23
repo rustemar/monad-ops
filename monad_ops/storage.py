@@ -1447,6 +1447,13 @@ class Storage:
             for r in hourly_rows
         ]
 
+        # Hide rank on an empty contract — returning 1/158 for a contract
+        # with zero activity misleads the popup into claiming a top slot.
+        if blocks_appeared == 0:
+            rank = None
+
+        pattern = _classify_pattern(blocks_appeared, tx_count_total)
+
         return {
             "to_addr": addr,
             "window": {"from_ts_ms": from_ts, "to_ts_ms": to_ts},
@@ -1455,11 +1462,47 @@ class Storage:
             "peak_block": peak_block,
             "rank": rank,
             "hourly": hourly,
+            "pattern": pattern,
         }
 
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+# Pattern classifier used by get_contract_detail. Intentionally narrow:
+# we only flag the one shape that's both unambiguous from aggregate stats
+# AND useful to operators — "exactly one tx per block over many blocks",
+# the airdrop-farmer / heartbeat signature that dominates testnet top-N.
+# Intent is described, not inferred: we report the *pattern* ("uniform"),
+# not the *motive* ("scam"), so the tag stays defensible. Contracts that
+# don't match the pattern return None — better a missing tag than a
+# wrong one, same policy as labels.
+#
+# Why 50 blocks as the floor: a contract touching fewer than 50 blocks
+# in the window may coincidentally have a 1:1 ratio from too-small a
+# sample. Measured on 24h top-N data, every genuine bot-pattern address
+# had ≥1 000 blocks in the window, so 50 is a conservative minimum.
+_PATTERN_UNIFORM_MIN_BLOCKS = 50
+_PATTERN_UNIFORM_RATIO_LO = 0.98
+_PATTERN_UNIFORM_RATIO_HI = 1.02
+
+
+def _classify_pattern(
+    blocks_appeared: int, tx_count: int
+) -> dict[str, str] | None:
+    if blocks_appeared < _PATTERN_UNIFORM_MIN_BLOCKS:
+        return None
+    ratio = tx_count / blocks_appeared
+    if _PATTERN_UNIFORM_RATIO_LO <= ratio <= _PATTERN_UNIFORM_RATIO_HI:
+        return {
+            "label": "uniform",
+            "detail": (
+                f"{ratio:.2f} tx/block over {blocks_appeared:,} blocks "
+                f"· likely bot pattern"
+            ),
+        }
+    return None
 
 
 def _row_to_block(r: sqlite3.Row) -> ExecBlock:

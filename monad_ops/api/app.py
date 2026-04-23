@@ -656,6 +656,10 @@ def build_app(
     # event loop free for the dashboard's 10s block tail.
     _BLOCK_DETAIL_TTL = 60.0
     _CONTRACT_DETAIL_TTL = 60.0
+    # Matched to TTL so a repeat open inside 30s serves from the browser
+    # without hitting origin. `private` because the cached response is
+    # per-user (no auth header today but future-proofs us).
+    _DETAIL_CACHE_HEADER = {"Cache-Control": "private, max-age=30"}
     _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
     @app.api_route("/api/blocks/{block_number}", methods=["GET", "HEAD"])
@@ -717,7 +721,7 @@ def build_app(
             return JSONResponse(
                 {"error": "block not found"}, status_code=404
             )
-        return JSONResponse(payload)
+        return JSONResponse(payload, headers=_DETAIL_CACHE_HEADER)
 
     @app.api_route("/api/contracts/{addr}", methods=["GET", "HEAD"])
     async def api_contract_detail(
@@ -780,12 +784,20 @@ def build_app(
             lbl = labels.get(addr_lower)
             detail["label"] = lbl.name if lbl else None
             detail["category"] = lbl.category if lbl else None
+            # Suppress the uniform-pattern heuristic for system-category
+            # contracts. The Staking Precompile is by construction "1 tx
+            # per block" — every delegator stake/unstake op hits it
+            # separately, which matches the uniform-ratio signature but
+            # carries none of the bot-pattern meaning. For known-legit
+            # infra we skip the flag entirely to avoid a false signal.
+            if lbl is not None and lbl.category == "system":
+                detail["pattern"] = None
             return detail
 
         payload = await _cached(
             "contract_detail", _CONTRACT_DETAIL_TTL, cache_key, _load
         )
-        return JSONResponse(payload)
+        return JSONResponse(payload, headers=_DETAIL_CACHE_HEADER)
 
     @app.api_route("/api/status/errors", methods=["GET", "HEAD"])
     async def api_status_errors() -> JSONResponse:

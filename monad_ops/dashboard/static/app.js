@@ -2083,6 +2083,15 @@ function _renderContractPopup(d) {
     const s = d.stats;
     const rtpCls = classifyRtp(s.avg_rtp_in_blocks);
 
+    // Pattern tag — server-side heuristic flags the 1-tx-per-block
+    // signature (typical airdrop farmer). Only rendered when a pattern
+    // is actually detected; absent otherwise to keep the popup clean.
+    const patternTag = d.pattern ? `
+        <div class="pk-pattern-tag" title="${escapeHTML(d.pattern.detail)}">
+            <span class="pk-pattern-label">${escapeHTML(d.pattern.label)}</span>
+            <span>${escapeHTML(d.pattern.detail)}</span>
+        </div>` : "";
+
     // Dominance interpretation: find the most distinctive threshold and
     // phrase it as a single operator-readable line.
     const dominanceInterpret = _describeDominance(d.dominance, s.avg_rtp_in_blocks);
@@ -2115,6 +2124,7 @@ function _renderContractPopup(d) {
     ` : "";
 
     _popup.body.innerHTML = `
+        ${patternTag}
         <div class="pk-grid">
             <div class="pk-cell"><div class="pk-label">blocks touched</div>
                 <div class="pk-val">${fmtInt(s.blocks_appeared)}</div>
@@ -2307,15 +2317,44 @@ function _wirePopupTriggers() {
         contractsBody.style.cursor = "pointer";
     }
 
-    // Integrity card — click the last-reorg block number opens the reorg popup.
+    // Integrity card — click the last-reorg block number opens the
+    // reorg popup. MutationObserver toggles cursor/tabindex/role when
+    // the textContent actually contains a "block #N" reference; without
+    // this, the line looks like plain text (iter-11 audit C4) and
+    // keyboard users can't focus it.
     const integrityDetail = document.getElementById("integrity-detail");
     if (integrityDetail) {
-        integrityDetail.addEventListener("click", (e) => {
-            // Only intercept when there IS a last reorg to open.
+        const openFromText = () => {
             const m = integrityDetail.textContent.match(/block #([\d,]+)/);
-            if (!m) return;
+            if (!m) return false;
             const n = parseInt(m[1].replace(/,/g, ""), 10);
-            if (Number.isFinite(n) && n > 0) openPopup("reorg", n);
+            if (!Number.isFinite(n) || n <= 0) return false;
+            openPopup("reorg", n);
+            return true;
+        };
+        integrityDetail.addEventListener("click", () => openFromText());
+        integrityDetail.addEventListener("keydown", (e) => {
+            if (e.key !== "Enter" && e.key !== " ") return;
+            if (openFromText()) e.preventDefault();
+        });
+        const applyClickable = () => {
+            const hasRef = /block #\d/.test(integrityDetail.textContent);
+            integrityDetail.style.cursor = hasRef ? "pointer" : "";
+            if (hasRef) {
+                integrityDetail.setAttribute("tabindex", "0");
+                integrityDetail.setAttribute("role", "button");
+                integrityDetail.setAttribute(
+                    "aria-label", "open last-reorg detail"
+                );
+            } else {
+                integrityDetail.removeAttribute("tabindex");
+                integrityDetail.removeAttribute("role");
+                integrityDetail.removeAttribute("aria-label");
+            }
+        };
+        applyClickable();
+        new MutationObserver(applyClickable).observe(integrityDetail, {
+            childList: true, characterData: true, subtree: true,
         });
     }
 }
