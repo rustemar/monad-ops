@@ -1042,6 +1042,43 @@ class Storage:
             for r in rows
         ]
 
+    def list_bft_minutes(
+        self,
+        from_ts_ms: int,
+        to_ts_ms: int,
+        *,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Per-minute rows in [from_ts_ms, to_ts_ms] for the chart.
+
+        Returns dicts (not BftMinute) with ``timeout_pct`` precomputed
+        so the dashboard doesn't have to repeat the division per point.
+        Hard limit caps the response at 2000 rows (~33h of 1-min data) —
+        enough for any reasonable visible range; the API endpoint should
+        also bound from/to span before this is called.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts
+                   FROM bft_minute
+                   WHERE ts_minute >= ? AND ts_minute <= ?
+                   ORDER BY ts_minute ASC
+                   LIMIT ?""",
+                (int(from_ts_ms), int(to_ts_ms), max(1, int(limit))),
+            ).fetchall()
+        out = []
+        for r in rows:
+            total = int(r["rounds_total"])
+            tc = int(r["rounds_tc"])
+            out.append({
+                "t": int(r["ts_minute"]),
+                "rounds_total": total,
+                "rounds_tc": tc,
+                "local_timeouts": int(r["local_timeouts"]),
+                "timeout_pct": round(tc / total * 100, 2) if total else 0.0,
+            })
+        return out
+
     def load_bft_window(self, from_ts_ms: int, to_ts_ms: int) -> dict:
         """Aggregate bft counters over an arbitrary time window.
 

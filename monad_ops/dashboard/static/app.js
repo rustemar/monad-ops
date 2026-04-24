@@ -42,6 +42,7 @@ async function pollFetch(key, url, init = {}) {
 }
 
 let rtpChart = null;
+let vtpChart = null;
 let txChart = null;
 let execChart = null;
 
@@ -855,6 +856,7 @@ function _setChartRange(sec) {
     _persistChartState();
     _syncChartControlsUI();
     fetchBlocks();
+    fetchBftSeries();
 }
 
 function _setChartCustomRange(fromMs, toMs) {
@@ -864,6 +866,7 @@ function _setChartCustomRange(fromMs, toMs) {
     _persistChartState();
     _syncChartControlsUI();
     fetchBlocks();
+    fetchBftSeries();
 }
 
 function _setChartCustomLive(fromMs) {
@@ -873,6 +876,7 @@ function _setChartCustomLive(fromMs) {
     _persistChartState();
     _syncChartControlsUI();
     fetchBlocks();
+    fetchBftSeries();
 }
 
 function _syncChartControlsUI() {
@@ -944,6 +948,30 @@ async function fetchBlocks() {
     } catch (e) { /* swallow; next tick retries (AbortError too — already replaced) */ }
 }
 
+// Per-minute validator-timeout series for the bft chart. Cached
+// alongside fetchBlocks so a range change refreshes both — but on its
+// own poll-id so a stalled bft query doesn't block the throughput
+// charts (and vice versa). 33h cap matches the API endpoint; longer
+// ranges silently return empty rather than 400-spamming the console.
+const _MAX_BFT_SPAN_MS = 33 * 3600 * 1000;
+async function fetchBftSeries() {
+    const { fromMs, toMs } = _chartWindow();
+    if ((toMs - fromMs) > _MAX_BFT_SPAN_MS) {
+        drawValTimeout([]);
+        return;
+    }
+    try {
+        const r = await pollFetch(
+            "bft-series",
+            `/api/bft_series?from_ts_ms=${fromMs}&to_ts_ms=${toMs}`);
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        drawValTimeout(d.bins || []);
+    } catch (e) {
+        if (e && e.name === "AbortError") return;
+    }
+}
+
 // Tiny SVG sparkline renderer (G5). Takes an array of numbers and
 // renders a polyline + filled area into the target element.
 function _renderSparkline(elId, values) {
@@ -1006,6 +1034,72 @@ function _applyChartPayload(d) {
     const tail = bins.slice(-60);
     _renderSparkline("spark-rtp", tail.map(b => b.rtp_avg ?? 0));
     _renderSparkline("spark-tx", tail.map(b => b.tx_avg ?? 0));
+
+    // Update the bft chart hint with the same range label so all four
+    // charts read as one period.
+    const vtpHint = document.getElementById("chart-vtp-hint");
+    if (vtpHint) vtpHint.textContent =
+        `share of consensus rounds closed by TimeoutCertificate · per-minute · ${rangeLabel}`;
+}
+
+// drawValTimeout: simple line chart with three threshold zones.
+// Unlike drawRtp we don't bother with a zone-clipping plugin — the
+// signal is bounded to a few % at most and a single Chart.js dataset
+// with segment-colored borders reads fine. The horizontal annotation
+// at 3% is the Foundation target.
+function drawValTimeout(bins) {
+    const labels = bins.map(b => {
+        const d = new Date(b.t);
+        const hh = String(d.getUTCHours()).padStart(2, "0");
+        const mm = String(d.getUTCMinutes()).padStart(2, "0");
+        return `${hh}:${mm}Z`;
+    });
+    const data = bins.map(b => b.timeout_pct ?? 0);
+    if (vtpChart) {
+        vtpChart.data.labels = labels;
+        vtpChart.data.datasets[0].data = data;
+        vtpChart.update("none");
+        return;
+    }
+    const colorAt = v =>
+        v == null ? "#7a7f86"
+        : v < 1 ? "#6bcf76"
+        : v < 3 ? "#5b9cf5"
+        : v < 5 ? "#ffb454"
+        : "#ff6b6b";
+    vtpChart = new Chart(document.getElementById("chart-vtp"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                data,
+                borderColor: "rgba(150,180,210,0.9)",
+                segment: {
+                    borderColor: ctx => colorAt(ctx.p1.parsed.y),
+                },
+                fill: false,
+                borderWidth: 1.75,
+                tension: 0.2,
+                pointRadius: 0,
+            }],
+        },
+        options: {
+            ...chartCommon,
+            layout: { padding: { top: 14 } },
+            scales: {
+                ...chartCommon.scales,
+                y: {
+                    ...chartCommon.scales.y,
+                    min: 0,
+                    suggestedMax: 5,
+                    ticks: {
+                        ...chartCommon.scales.y.ticks,
+                        callback: v => v + "%",
+                    },
+                },
+            },
+        },
+    });
 }
 
 function setLagVal(id, text, sevClass) {
@@ -1757,6 +1851,7 @@ _syncChartControlsUI();
 
 fetchState();
 fetchBlocks();
+fetchBftSeries();
 fetchContracts();
 fetchIncidents();
 fetchProbes();
@@ -1774,6 +1869,7 @@ function _schedule(fn, interval) {
 }
 _schedule(fetchState, STATE_INTERVAL);
 _schedule(fetchBlocks, BLOCKS_INTERVAL);
+_schedule(fetchBftSeries, BLOCKS_INTERVAL);
 _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);

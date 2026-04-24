@@ -101,6 +101,37 @@ def test_bft_window_aggregate_computes_timeout_pct(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_list_bft_minutes_returns_dicts_with_precomputed_pct(tmp_path: Path) -> None:
+    """list_bft_minutes serves the per-minute series for the chart.
+    Each row carries a precomputed timeout_pct so the dashboard
+    doesn't repeat the division per point."""
+    storage = Storage(tmp_path / "state.db")
+    storage.upsert_bft_minute(BftMinute(_T0_MS,            200, 4, 0))    # 2%
+    storage.upsert_bft_minute(BftMinute(_T0_MS + _MIN_MS,  100, 0, 0))    # 0%
+    storage.upsert_bft_minute(BftMinute(_T0_MS + 2*_MIN_MS, 50, 5, 1))    # 10%
+
+    rows = storage.list_bft_minutes(_T0_MS, _T0_MS + 3 * _MIN_MS)
+    assert len(rows) == 3
+    assert rows[0]["timeout_pct"] == 2.0
+    assert rows[1]["timeout_pct"] == 0.0
+    assert rows[2]["timeout_pct"] == 10.0
+    # Ascending by timestamp — chart consumer relies on order.
+    assert rows[0]["t"] < rows[1]["t"] < rows[2]["t"]
+    storage.close()
+
+
+def test_list_bft_minutes_filters_by_window(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    storage.upsert_bft_minute(BftMinute(_T0_MS - _MIN_MS, 100, 1, 0))  # before
+    storage.upsert_bft_minute(BftMinute(_T0_MS,           100, 1, 0))  # inside
+    storage.upsert_bft_minute(BftMinute(_T0_MS + _MIN_MS, 100, 1, 0))  # inside
+    storage.upsert_bft_minute(BftMinute(_T0_MS + 5*_MIN_MS, 100, 1, 0))  # after
+
+    rows = storage.list_bft_minutes(_T0_MS, _T0_MS + _MIN_MS)
+    assert len(rows) == 2
+    storage.close()
+
+
 def test_bft_window_empty_returns_zeros(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     summary = storage.load_bft_window(_T0_MS, _T0_MS + 5 * _MIN_MS)

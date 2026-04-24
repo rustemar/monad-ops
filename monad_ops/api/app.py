@@ -333,6 +333,59 @@ def build_app(
         payload = await _cached("sampled", ttl_sec, cache_key, _load)
         return JSONResponse(payload)
 
+    @app.api_route("/api/bft_series", methods=["GET", "HEAD"])
+    async def api_bft_series(
+        from_ts_ms: int = Query(..., ge=0),
+        to_ts_ms: int = Query(..., ge=0),
+    ) -> JSONResponse:
+        """Per-minute consensus series for the validator-timeout chart.
+
+        1-min resolution is the storage cadence — no client-side bucketing
+        and no server-side downsampling. At the storage cap of 2000 rows
+        the longest visible range is ~33 hours; the dashboard's 24h
+        preset is comfortably inside that. For replay queries beyond
+        that horizon, callers should use the aggregated
+        ``/api/window_summary.consensus`` shape instead.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if to_ts_ms <= from_ts_ms:
+            return JSONResponse(
+                {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
+            )
+        # 33h hard cap (2000 minute-buckets) so a misconfigured client
+        # can't pull the whole table; matches Storage.list_bft_minutes
+        # default limit.
+        MAX_SPAN_MS = 33 * 3600 * 1000
+        span_ms = to_ts_ms - from_ts_ms
+        if span_ms > MAX_SPAN_MS:
+            return JSONResponse(
+                {"error": "span too large (max 33 hours)"}, status_code=400
+            )
+        # Cache TTL = 5s, matched quantization. Series doesn't move fast
+        # (one new bucket per minute) so 5s is plenty fresh for chart UX
+        # and lets multiple viewers share the same cache slot.
+        step = 5_000
+        cache_key = (
+            (from_ts_ms // step) * step,
+            (to_ts_ms // step) * step,
+        )
+
+        async def _load():
+            bins = await asyncio.to_thread(
+                state.storage.list_bft_minutes,
+                from_ts_ms,
+                to_ts_ms,
+            )
+            return {
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+                "bin_ms": 60_000,
+                "bins": bins,
+            }
+        payload = await _cached("bft_series", 5.0, cache_key, _load)
+        return JSONResponse(payload)
+
     @app.api_route("/api/blocks/range", methods=["GET", "HEAD"])
     async def api_blocks_range(
         from_block: int | None = Query(None, ge=0),
