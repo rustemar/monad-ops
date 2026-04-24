@@ -46,14 +46,15 @@ class ConsensusEventKind(StrEnum):
     ROUND_ADVANCE_QC = "round_advance_qc"   # round closed by QuorumCertificate (normal)
     ROUND_ADVANCE_TC = "round_advance_tc"   # round closed by TimeoutCertificate (chain-wide timeout)
     LOCAL_TIMEOUT = "local_timeout"         # this node's pacemaker fired
+    PROPOSAL = "proposal"                    # proposal message with base_fee for the fee curve
 
 
 @dataclass(frozen=True, slots=True)
 class ConsensusEvent:
     """One parsed consensus event.
 
-    ``epoch`` is None for ``LOCAL_TIMEOUT`` (the message doesn't carry
-    epoch — only round/leader/next_leader). All other fields are best-
+    ``epoch`` is None for ``LOCAL_TIMEOUT`` and ``PROPOSAL`` (those
+    messages don't carry epoch directly). All other fields are best-
     effort: extraction failures fall back to 0/None rather than raising,
     because the dashboard tolerates occasional gaps far better than the
     tailer dying on a single malformed line.
@@ -64,6 +65,8 @@ class ConsensusEvent:
     ts_ms: int
     leader: str | None = None        # populated for LOCAL_TIMEOUT
     next_leader: str | None = None   # populated for LOCAL_TIMEOUT
+    block_seq: int | None = None     # populated for PROPOSAL (= block_number)
+    base_fee: int | None = None      # populated for PROPOSAL, in wei
 
 
 # ── pre-filter substrings ─────────────────────────────────────────────
@@ -72,6 +75,13 @@ class ConsensusEvent:
 # accidentally match the literal phrases inside arbitrary Debug reprs.
 _LOCAL_TIMEOUT_MARKER = '"local timeout"'
 _ADVANCING_ROUND_MARKER = '"advancing round"'
+# A live proposal carries `seq_num: NNN, ..., base_fee: NNN` inside
+# the ``proposal`` field's Rust Debug repr. Pre-filter on the message
+# string PLUS the base_fee literal so the cheaper "dropping proposal,
+# already received for this round" sibling lines (which lack base_fee)
+# don't even pay the regex cost.
+_PROPOSAL_MARKER = '"proposal message"'
+_BASE_FEE_MARKER = "base_fee:"
 
 # ── extraction patterns ───────────────────────────────────────────────
 # ISO-8601 timestamp at start of the JSON envelope.
@@ -92,6 +102,17 @@ _ADVANCING_ROUND_TC_RX = re.compile(
     r'"advancing round","certificate":"Tc\(TimeoutCertificate \{ epoch: (\d+), round: (\d+),'
 )
 
+# proposal message — extract seq_num + base_fee from inside the Debug
+# repr of ProposalMessage. We anchor on `seq_num: <digits>, ...,
+# base_fee: <digits>` because both are sibling fields on the same
+# ConsensusBlockHeader and appear in that order in monad-bft 0.14.x.
+# proposal_round is captured for completeness so the snapshot can
+# correlate fee changes with consensus rounds without a second parse.
+_PROPOSAL_RX = re.compile(
+    r'"proposal message".*?proposal_round: (\d+).*?'
+    r'seq_num: (\d+),\s*timestamp_ns: \d+,\s*id: [0-9a-f.]+,\s*base_fee: (\d+)'
+)
+
 
 def parse_consensus(line: str) -> ConsensusEvent | None:
     """Inspect one monad-bft journal line; return a ConsensusEvent or None.
@@ -104,7 +125,8 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
 
     has_local_timeout = _LOCAL_TIMEOUT_MARKER in line
     has_advancing_round = _ADVANCING_ROUND_MARKER in line
-    if not (has_local_timeout or has_advancing_round):
+    has_proposal = _PROPOSAL_MARKER in line and _BASE_FEE_MARKER in line
+    if not (has_local_timeout or has_advancing_round or has_proposal):
         return None
 
     ts_ms = _extract_ts_ms(line)
@@ -140,6 +162,18 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
             epoch=int(m.group(1)),
             ts_ms=ts_ms,
         )
+
+    if has_proposal:
+        m = _PROPOSAL_RX.search(line)
+        if m is not None:
+            return ConsensusEvent(
+                kind=ConsensusEventKind.PROPOSAL,
+                round=int(m.group(1)),
+                epoch=None,
+                ts_ms=ts_ms,
+                block_seq=int(m.group(2)),
+                base_fee=int(m.group(3)),
+            )
 
     # Marker matched but neither extractor did — schema drift (e.g.
     # monad-bft renamed a field). Skip rather than raise; the caller

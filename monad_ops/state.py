@@ -20,7 +20,7 @@ from monad_ops.collector.reference_rpc import ReferenceSample
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
-from monad_ops.storage import BftMinute, Storage
+from monad_ops.storage import BftBaseFee, BftMinute, Storage
 
 
 # Keep ~1 hour of blocks (testnet cadence ~2.5 blk/s → 9000 blocks/hr).
@@ -349,7 +349,13 @@ class State:
         Falls back to wall-clock now() if the event has no parsed ts —
         the parser uses 0 as a soft-failure sentinel, and putting those
         events into the 1970 bucket would silently corrupt the rollup.
+
+        Proposals carry per-block base_fee, not minute-aggregate counts;
+        they're handled in the async wrapper via storage write only and
+        no-op here.
         """
+        if event.kind is ConsensusEventKind.PROPOSAL:
+            return
         ts_ms = event.ts_ms if event.ts_ms > 0 else int(time.time() * 1000)
         bucket = (ts_ms // _MINUTE_MS) * _MINUTE_MS
         with self._lock:
@@ -379,14 +385,30 @@ class State:
                 self._bft_current_local += 1
 
     async def add_consensus_event_async(self, event: ConsensusEvent) -> None:
-        """Async wrapper that also persists the in-progress minute.
+        """Async wrapper that also persists the event.
 
-        Storage upsert runs on every event so a crash mid-minute doesn't
-        lose the partial counts — REPLACE semantics (see
-        ``Storage.upsert_bft_minute``) means this is idempotent and
-        the cost is one tiny SQLite row write per parsed bft event
-        (~2-3/sec, well within the host's WAL throughput).
+        Round/timeout events update the in-progress minute bucket and
+        flush a fresh upsert (REPLACE semantics) — idempotent and one
+        tiny SQLite row write per parsed bft event (~2-3/sec at
+        steady-state, well within WAL throughput).
+
+        Proposal events carry per-block base_fee for the F6 fee curve.
+        Stored once per block_seq via INSERT OR IGNORE so the 2-3
+        rebroadcasts per round collapse into a single row.
         """
+        if event.kind is ConsensusEventKind.PROPOSAL:
+            if self._storage is None or event.block_seq is None or event.base_fee is None:
+                return
+            await asyncio.to_thread(
+                self._storage.insert_bft_base_fee,
+                BftBaseFee(
+                    block_seq=event.block_seq,
+                    ts_ms=event.ts_ms if event.ts_ms > 0 else int(time.time() * 1000),
+                    base_fee_wei=event.base_fee,
+                ),
+            )
+            return
+
         self.add_consensus_event(event)
         if self._storage is None:
             return

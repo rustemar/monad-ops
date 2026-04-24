@@ -163,6 +163,25 @@ CREATE TABLE IF NOT EXISTS bft_minute (
     rounds_tc      INTEGER NOT NULL,
     local_timeouts INTEGER NOT NULL
 );
+
+-- Per-block base-fee samples from monad-bft proposal messages.
+-- One row per block_seq via INSERT OR IGNORE — proposals are
+-- rebroadcast 2-3× per round, the first observation wins. Used by
+-- the F6 base-fee response curve, the analogue to the validator-
+-- timeouts panel: chart the chain's base_fee over time, and replay
+-- queries (epochs 532/533/534) overlay it against gas utilization
+-- to demonstrate Monad's dynamic-fee behaviour under load.
+--
+-- Storing in wei (raw on-chain unit) so reads can downscale per
+-- consumer — wei → gwei (÷ 1e9) for the operator chart, wei → gas-
+-- price-equivalent for builder-side analysis.
+CREATE TABLE IF NOT EXISTS bft_base_fee (
+    block_seq    INTEGER PRIMARY KEY,
+    ts_ms        INTEGER NOT NULL,
+    base_fee_wei INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bft_base_fee_ts ON bft_base_fee (ts_ms);
 """
 
 _HOUR_MS = 3_600_000
@@ -231,6 +250,14 @@ class BftMinute:
     rounds_total: int    # advancing round count (QC + TC)
     rounds_tc: int       # subset closed by TimeoutCertificate
     local_timeouts: int  # local pacemaker fires
+
+
+@dataclass(frozen=True, slots=True)
+class BftBaseFee:
+    """One per-block base-fee sample from a monad-bft proposal message."""
+    block_seq: int       # = block_number (matches blocks table)
+    ts_ms: int           # parsed from the JSON envelope timestamp
+    base_fee_wei: int    # raw on-chain unit; divide by 1e9 for gwei
 
 
 class _PercentileAgg:
@@ -1042,6 +1069,111 @@ class Storage:
             for r in rows
         ]
 
+    def insert_bft_base_fee(self, sample: BftBaseFee) -> None:
+        """Insert one base-fee observation, ignoring duplicates.
+
+        IGNORE (not REPLACE) because monad-bft rebroadcasts proposals
+        2-3× per round; the base_fee value is fixed at proposal time
+        so the first observation is canonical and later rebroadcasts
+        carry the same wei value. IGNORE also prevents a malicious
+        rewrite if a peer ever sends an inconsistent rebroadcast.
+        """
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO bft_base_fee
+                   (block_seq, ts_ms, base_fee_wei)
+                   VALUES (?, ?, ?)""",
+                (int(sample.block_seq), int(sample.ts_ms),
+                 int(sample.base_fee_wei)),
+            )
+
+    def list_bft_base_fee(
+        self,
+        from_ts_ms: int,
+        to_ts_ms: int,
+        *,
+        limit: int = 5000,
+    ) -> list[dict]:
+        """Per-block base-fee rows in [from_ts_ms, to_ts_ms].
+
+        Returns dicts with block_seq, t (ms), base_fee_gwei (precomputed
+        from wei for chart consumers). Hard limit caps the response at
+        5000 rows — at testnet's ~2.5 blocks/sec that's ~33 minutes;
+        wider visible ranges should switch to a sampled-bins approach
+        if the chart ever needs them.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT block_seq, ts_ms, base_fee_wei
+                   FROM bft_base_fee
+                   WHERE ts_ms >= ? AND ts_ms <= ?
+                   ORDER BY ts_ms ASC
+                   LIMIT ?""",
+                (int(from_ts_ms), int(to_ts_ms), max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "block_seq": int(r["block_seq"]),
+                "t": int(r["ts_ms"]),
+                # Convert wei → gwei for the chart. base_fee values on
+                # testnet sit at the 100-gwei floor (= 1e11 wei) and
+                # well within JS Number safe integer range either way,
+                # so this conversion never loses precision.
+                "base_fee_gwei": int(r["base_fee_wei"]) / 1_000_000_000,
+            }
+            for r in rows
+        ]
+
+    def sampled_bft_base_fee(
+        self,
+        from_ts_ms: int,
+        to_ts_ms: int,
+        *,
+        target_points: int = 300,
+    ) -> list[dict]:
+        """Downsampled base-fee series for arbitrary windows.
+
+        Mirrors ``sampled_blocks`` shape: bucket the window into fixed-
+        width time bins, return per-bin avg + min/max for the chart
+        envelope. Lets the dashboard show a 24h base-fee curve without
+        moving 200 K rows.
+        """
+        if to_ts_ms <= from_ts_ms:
+            return []
+        target_points = max(1, min(int(target_points), 2000))
+        span_ms = to_ts_ms - from_ts_ms
+        bin_ms = max(1, span_ms // target_points)
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT
+                    MIN(ts_ms)              AS t,
+                    MIN(block_seq)          AS n_first,
+                    MAX(block_seq)          AS n_last,
+                    AVG(base_fee_wei)       AS avg_wei,
+                    MIN(base_fee_wei)       AS min_wei,
+                    MAX(base_fee_wei)       AS max_wei,
+                    COUNT(*)                AS samples
+                FROM bft_base_fee
+                WHERE ts_ms BETWEEN ? AND ?
+                GROUP BY (ts_ms - ?) / ?
+                ORDER BY t ASC
+                """,
+                (int(from_ts_ms), int(to_ts_ms), int(from_ts_ms), int(bin_ms)),
+            ).fetchall()
+        return [
+            {
+                "t": int(r["t"]),
+                "n_first": int(r["n_first"]),
+                "n_last": int(r["n_last"]),
+                "base_fee_gwei_avg": float(r["avg_wei"] or 0) / 1_000_000_000,
+                "base_fee_gwei_min": float(r["min_wei"] or 0) / 1_000_000_000,
+                "base_fee_gwei_max": float(r["max_wei"] or 0) / 1_000_000_000,
+                "samples": int(r["samples"]),
+            }
+            for r in rows
+        ]
+
     def list_bft_minutes(
         self,
         from_ts_ms: int,
@@ -1078,6 +1210,44 @@ class Storage:
                 "timeout_pct": round(tc / total * 100, 2) if total else 0.0,
             })
         return out
+
+    def load_base_fee_window(self, from_ts_ms: int, to_ts_ms: int) -> dict:
+        """Base-fee aggregate over an arbitrary time window.
+
+        Used by /api/window_summary so a Foundation-replay query for
+        epochs 532/533/534 returns the headline fee numbers (avg/min/
+        max in gwei + sample count) without pulling per-block rows.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT COUNT(*)        AS samples,
+                          AVG(base_fee_wei) AS avg_wei,
+                          MIN(base_fee_wei) AS min_wei,
+                          MAX(base_fee_wei) AS max_wei,
+                          MIN(ts_ms)        AS first_ts,
+                          MAX(ts_ms)        AS last_ts
+                   FROM bft_base_fee
+                   WHERE ts_ms >= ? AND ts_ms <= ?""",
+                (int(from_ts_ms), int(to_ts_ms)),
+            ).fetchone()
+        n = int(row["samples"] or 0)
+        if n == 0:
+            return {
+                "samples": 0,
+                "base_fee_gwei_avg": 0.0,
+                "base_fee_gwei_min": 0.0,
+                "base_fee_gwei_max": 0.0,
+                "first_ts": None,
+                "last_ts": None,
+            }
+        return {
+            "samples": n,
+            "base_fee_gwei_avg": round(float(row["avg_wei"]) / 1_000_000_000, 4),
+            "base_fee_gwei_min": round(float(row["min_wei"]) / 1_000_000_000, 4),
+            "base_fee_gwei_max": round(float(row["max_wei"]) / 1_000_000_000, 4),
+            "first_ts": int(row["first_ts"]),
+            "last_ts": int(row["last_ts"]),
+        }
 
     def load_bft_window(self, from_ts_ms: int, to_ts_ms: int) -> dict:
         """Aggregate bft counters over an arbitrary time window.
@@ -1284,6 +1454,15 @@ class Storage:
                 (cutoff_ms,),
             )
             deleted["bft_minute"] = cur.rowcount
+            # bft_base_fee — same retention as blocks. At ~2.5 blocks/sec
+            # 7 days of data is ~1.5 M rows; trivial to keep, but prune
+            # in lockstep with the rest so an operator with tighter
+            # retention sees a uniform window.
+            cur = self._conn.execute(
+                "DELETE FROM bft_base_fee WHERE ts_ms < ?",
+                (cutoff_ms,),
+            )
+            deleted["bft_base_fee"] = cur.rowcount
         return deleted
 
     # -- popup detail queries ---------------------------------------------

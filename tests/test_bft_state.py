@@ -19,7 +19,7 @@ import pytest
 
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind
 from monad_ops.state import State
-from monad_ops.storage import BftMinute, Storage
+from monad_ops.storage import BftBaseFee, BftMinute, Storage
 
 
 # Fixed reference timestamp inside a known minute boundary so tests
@@ -132,6 +132,86 @@ def test_list_bft_minutes_filters_by_window(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_bft_base_fee_round_trip(tmp_path: Path) -> None:
+    """insert_bft_base_fee + list_bft_base_fee round-trip per-block samples."""
+    storage = Storage(tmp_path / "state.db")
+    samples = [
+        BftBaseFee(block_seq=27_470_000 + i,
+                   ts_ms=_T0_MS + i * 400,            # ~2.5 blocks/sec cadence
+                   base_fee_wei=100_000_000_000)       # 100 gwei floor
+        for i in range(5)
+    ]
+    for s in samples:
+        storage.insert_bft_base_fee(s)
+
+    rows = storage.list_bft_base_fee(_T0_MS, _T0_MS + 5 * 400)
+    assert len(rows) == 5
+    assert rows[0]["block_seq"] == 27_470_000
+    assert rows[0]["base_fee_gwei"] == 100.0
+    storage.close()
+
+
+def test_bft_base_fee_ignore_on_rebroadcast(tmp_path: Path) -> None:
+    """A proposal is rebroadcast 2-3× per round; INSERT OR IGNORE keeps
+    only the first observation. If two rebroadcasts disagreed (peer
+    sent inconsistent base_fee), the first one — not the latest — is
+    canonical."""
+    storage = Storage(tmp_path / "state.db")
+    storage.insert_bft_base_fee(BftBaseFee(100, _T0_MS, 100_000_000_000))
+    # Rebroadcast — same block, same ts (same proposal in flight), same
+    # base_fee. IGNORE means this is a no-op.
+    storage.insert_bft_base_fee(BftBaseFee(100, _T0_MS + 50, 200_000_000_000))
+
+    rows = storage.list_bft_base_fee(_T0_MS, _T0_MS + 1000)
+    assert len(rows) == 1
+    assert rows[0]["base_fee_gwei"] == 100.0    # first wins
+    storage.close()
+
+
+def test_sampled_bft_base_fee_buckets_long_window(tmp_path: Path) -> None:
+    """For arbitrary windows the chart needs avg/min/max per bin so a
+    24h view doesn't return 200 K rows."""
+    storage = Storage(tmp_path / "state.db")
+    # 100 samples spread across 100 seconds; values walk between 100 and 110 gwei.
+    for i in range(100):
+        wei = (100 + (i % 11)) * 1_000_000_000
+        storage.insert_bft_base_fee(
+            BftBaseFee(block_seq=200 + i, ts_ms=_T0_MS + i * 1000, base_fee_wei=wei)
+        )
+
+    bins = storage.sampled_bft_base_fee(_T0_MS, _T0_MS + 100_000, target_points=10)
+    assert 1 <= len(bins) <= 10
+    # Each bin reports avg/min/max — the chart envelope.
+    assert "base_fee_gwei_avg" in bins[0]
+    assert "base_fee_gwei_min" in bins[0]
+    assert "base_fee_gwei_max" in bins[0]
+    # min ≤ avg ≤ max in every bin
+    for b in bins:
+        assert b["base_fee_gwei_min"] <= b["base_fee_gwei_avg"] <= b["base_fee_gwei_max"]
+    storage.close()
+
+
+def test_proposal_event_does_not_increment_round_counters() -> None:
+    """PROPOSAL is per-block fee data, not consensus-round flow.
+    State.add_consensus_event must skip the minute-bucket math so a
+    rebroadcast of an old proposal doesn't pollute timeout_pct."""
+    state = State()
+    proposal = ConsensusEvent(
+        kind=ConsensusEventKind.PROPOSAL,
+        round=27_597_178,
+        epoch=None,
+        ts_ms=_T0_MS,
+        block_seq=27_470_000,
+        base_fee=100_000_000_000,
+    )
+    state.add_consensus_event(proposal)
+
+    snap = state.snapshot()
+    # No round increment, no TC, no local fire — the snapshot stays cold.
+    assert snap.bft_rounds_observed_5m == 0
+    assert snap.validator_timeout_pct_5m == 0.0
+
+
 def test_bft_window_empty_returns_zeros(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     summary = storage.load_bft_window(_T0_MS, _T0_MS + 5 * _MIN_MS)
@@ -143,8 +223,8 @@ def test_bft_window_empty_returns_zeros(tmp_path: Path) -> None:
 
 
 def test_prune_older_than_drops_old_bft_minutes(tmp_path: Path) -> None:
-    """Retention sweep must include bft_minute or the rollup grows
-    unbounded after the operator turns on prune."""
+    """Retention sweep must include bft_minute + bft_base_fee or the
+    bft layer grows unbounded after the operator turns on prune."""
     storage = Storage(tmp_path / "state.db")
     now_ms = int(time.time() * 1000)
     # one row well inside retention, one well outside
@@ -152,13 +232,19 @@ def test_prune_older_than_drops_old_bft_minutes(tmp_path: Path) -> None:
     stale = now_ms - 30 * 86400_000         # 30 days ago
     storage.upsert_bft_minute(BftMinute(fresh, 100, 0, 0))
     storage.upsert_bft_minute(BftMinute(stale, 100, 0, 0))
+    storage.insert_bft_base_fee(BftBaseFee(1000, fresh, 100_000_000_000))
+    storage.insert_bft_base_fee(BftBaseFee(2000, stale, 100_000_000_000))
 
     deleted = storage.prune_older_than(keep_days=7)
     assert deleted.get("bft_minute", 0) >= 1
+    assert deleted.get("bft_base_fee", 0) >= 1
 
     remaining = storage.load_recent_bft_minutes(limit=10)
     assert len(remaining) == 1
     assert remaining[0].ts_minute == fresh
+    base_remaining = storage.list_bft_base_fee(0, now_ms + 1)
+    assert len(base_remaining) == 1
+    assert base_remaining[0]["block_seq"] == 1000
     storage.close()
 
 

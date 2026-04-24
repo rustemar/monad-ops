@@ -386,6 +386,65 @@ def build_app(
         payload = await _cached("bft_series", 5.0, cache_key, _load)
         return JSONResponse(payload)
 
+    @app.api_route("/api/base_fee_series", methods=["GET", "HEAD"])
+    async def api_base_fee_series(
+        from_ts_ms: int = Query(..., ge=0),
+        to_ts_ms: int = Query(..., ge=0),
+        points: int = Query(300, ge=10, le=2000),
+    ) -> JSONResponse:
+        """Per-block base-fee samples from the bft proposal stream.
+
+        Backs the F6 base-fee response curve on the dashboard, the
+        operator-side analogue of Foundation's "dynamic-fee behaviour
+        worked as expected" framing from 2026-04-20.
+
+        Server-side downsampling so a 24h window returns ~300 bins
+        with avg/min/max envelope, not 200 K raw block samples.
+        Wrapped in to_thread because long windows still walk every
+        ts_ms in the range index.
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if to_ts_ms <= from_ts_ms:
+            return JSONResponse(
+                {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
+            )
+        # 7-day cap matches the chart toolbar's max preset; replays beyond
+        # that horizon should call /api/window_summary for aggregates.
+        MAX_SPAN_MS = 7 * 86400 * 1000
+        span_ms = to_ts_ms - from_ts_ms
+        if span_ms > MAX_SPAN_MS:
+            return JSONResponse(
+                {"error": "span too large (max 7 days)"}, status_code=400
+            )
+        # Same dynamic TTL/quantization pattern as /api/blocks/sampled —
+        # short windows refresh fast (live chart), long windows tolerate
+        # 15 s of staleness so multiple viewers share cache slots.
+        bin_ms = max(1, span_ms // max(1, min(points, 2000)))
+        ttl_sec = max(2.0, min(bin_ms / 1000 / 3, 15.0))
+        step = int(ttl_sec * 1000)
+        cache_key = (
+            (from_ts_ms // step) * step,
+            (to_ts_ms // step) * step,
+            int(points),
+        )
+
+        async def _load():
+            bins = await asyncio.to_thread(
+                state.storage.sampled_bft_base_fee,
+                from_ts_ms=from_ts_ms,
+                to_ts_ms=to_ts_ms,
+                target_points=points,
+            )
+            return {
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+                "bin_ms": span_ms // max(1, min(points, len(bins) if bins else points)),
+                "bins": bins,
+            }
+        payload = await _cached("base_fee_series", ttl_sec, cache_key, _load)
+        return JSONResponse(payload)
+
     @app.api_route("/api/blocks/range", methods=["GET", "HEAD"])
     async def api_blocks_range(
         from_block: int | None = Query(None, ge=0),
@@ -1002,6 +1061,11 @@ def build_app(
                 from_ts_ms,
                 to_ts_ms,
             )
+            base_fee = await asyncio.to_thread(
+                state.storage.load_base_fee_window,
+                from_ts_ms,
+                to_ts_ms,
+            )
             if span_ms <= _ROLLUP_SPAN_THRESHOLD_MS:
                 contracts = await asyncio.to_thread(
                     state.storage.top_retried_contracts,
@@ -1043,6 +1107,7 @@ def build_app(
                 },
                 "aggregate": aggregate,
                 "consensus": consensus,
+                "base_fee": base_fee,
                 "top_contracts": [_row(s) for s in contracts],
             }
             if include_blocks:

@@ -115,6 +115,34 @@ async def test_api_alerts_returns_list(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_base_fee_series_endpoint_shape(client: httpx.AsyncClient) -> None:
+    """``/api/base_fee_series`` returns a downsampled per-block series.
+    Smoke against fresh DB — empty bins, valid envelope."""
+    r = await client.get("/api/base_fee_series?from_ts_ms=1000&to_ts_ms=60001")
+    assert r.status_code == 200
+    body = r.json()
+    assert {"from_ts_ms", "to_ts_ms", "bin_ms", "bins"} <= set(body.keys())
+    assert isinstance(body["bins"], list)
+
+
+@pytest.mark.asyncio
+async def test_window_summary_includes_base_fee_aggregate(
+    client: httpx.AsyncClient,
+) -> None:
+    """``/api/window_summary`` carries a ``base_fee`` block with
+    avg/min/max in gwei. Empty DB → all zeros, matching the consensus
+    block's empty contract."""
+    r = await client.get("/api/window_summary?from_ts_ms=1000&to_ts_ms=2000")
+    assert r.status_code == 200
+    body = r.json()
+    assert "base_fee" in body
+    base = body["base_fee"]
+    assert {"samples", "base_fee_gwei_avg", "base_fee_gwei_min",
+            "base_fee_gwei_max"} <= set(base.keys())
+    assert base["samples"] == 0
+
+
+@pytest.mark.asyncio
 async def test_bft_series_endpoint_shape(client: httpx.AsyncClient) -> None:
     """``/api/bft_series`` returns a per-minute series for the chart.
     Smoke against fresh DB — empty bins, valid envelope."""

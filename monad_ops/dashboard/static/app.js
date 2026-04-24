@@ -43,6 +43,7 @@ async function pollFetch(key, url, init = {}) {
 
 let rtpChart = null;
 let vtpChart = null;
+let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
 
@@ -857,6 +858,7 @@ function _setChartRange(sec) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchBaseFeeSeries();
 }
 
 function _setChartCustomRange(fromMs, toMs) {
@@ -867,6 +869,7 @@ function _setChartCustomRange(fromMs, toMs) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchBaseFeeSeries();
 }
 
 function _setChartCustomLive(fromMs) {
@@ -877,6 +880,7 @@ function _setChartCustomLive(fromMs) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchBaseFeeSeries();
 }
 
 function _syncChartControlsUI() {
@@ -972,6 +976,22 @@ async function fetchBftSeries() {
     }
 }
 
+// Per-block base_fee series (downsampled server-side) for the F6
+// fee curve. Same independent-poll pattern as fetchBftSeries.
+async function fetchBaseFeeSeries() {
+    const { fromMs, toMs } = _chartWindow();
+    try {
+        const r = await pollFetch(
+            "base-fee-series",
+            `/api/base_fee_series?from_ts_ms=${fromMs}&to_ts_ms=${toMs}&points=300`);
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        drawBaseFee(d.bins || []);
+    } catch (e) {
+        if (e && e.name === "AbortError") return;
+    }
+}
+
 // Tiny SVG sparkline renderer (G5). Takes an array of numbers and
 // renders a polyline + filled area into the target element.
 function _renderSparkline(elId, values) {
@@ -1040,6 +1060,9 @@ function _applyChartPayload(d) {
     const vtpHint = document.getElementById("chart-vtp-hint");
     if (vtpHint) vtpHint.textContent =
         `share of consensus rounds closed by TimeoutCertificate · per-minute · ${rangeLabel}`;
+    const bfHint = document.getElementById("chart-basefee-hint");
+    if (bfHint) bfHint.textContent =
+        `per-block base_fee from monad-bft proposals · downsampled per window · ${rangeLabel}`;
 }
 
 // drawValTimeout: simple line chart with three threshold zones.
@@ -1047,6 +1070,56 @@ function _applyChartPayload(d) {
 // signal is bounded to a few % at most and a single Chart.js dataset
 // with segment-colored borders reads fine. The horizontal annotation
 // at 3% is the Foundation target.
+// Per-block base-fee, plotted as a single line in gwei. Testnet sits
+// at the 100-gwei floor most of the time; the chart's value is in
+// showing how the fee responds to load (the 2026-04-20 stress batch
+// is the canonical "see Monad's dynamic fee curve" moment, exactly
+// what Abraar's announcement called out).
+function drawBaseFee(bins) {
+    const labels = bins.map(b => {
+        const d = new Date(b.t);
+        const hh = String(d.getUTCHours()).padStart(2, "0");
+        const mm = String(d.getUTCMinutes()).padStart(2, "0");
+        return `${hh}:${mm}Z`;
+    });
+    const data = bins.map(b => b.base_fee_gwei_avg ?? 0);
+    if (baseFeeChart) {
+        baseFeeChart.data.labels = labels;
+        baseFeeChart.data.datasets[0].data = data;
+        baseFeeChart.update("none");
+        return;
+    }
+    baseFeeChart = new Chart(document.getElementById("chart-basefee"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                data,
+                borderColor: "rgba(150,180,210,0.9)",
+                fill: false,
+                borderWidth: 1.5,
+                tension: 0.2,
+                pointRadius: 0,
+            }],
+        },
+        options: {
+            ...chartCommon,
+            layout: { padding: { top: 14 } },
+            scales: {
+                ...chartCommon.scales,
+                y: {
+                    ...chartCommon.scales.y,
+                    suggestedMin: 0,
+                    ticks: {
+                        ...chartCommon.scales.y.ticks,
+                        callback: v => v + " gwei",
+                    },
+                },
+            },
+        },
+    });
+}
+
 function drawValTimeout(bins) {
     const labels = bins.map(b => {
         const d = new Date(b.t);
@@ -1852,6 +1925,7 @@ _syncChartControlsUI();
 fetchState();
 fetchBlocks();
 fetchBftSeries();
+fetchBaseFeeSeries();
 fetchContracts();
 fetchIncidents();
 fetchProbes();
@@ -1870,6 +1944,7 @@ function _schedule(fn, interval) {
 _schedule(fetchState, STATE_INTERVAL);
 _schedule(fetchBlocks, BLOCKS_INTERVAL);
 _schedule(fetchBftSeries, BLOCKS_INTERVAL);
+_schedule(fetchBaseFeeSeries, BLOCKS_INTERVAL);
 _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);

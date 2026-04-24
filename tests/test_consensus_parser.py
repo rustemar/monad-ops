@@ -75,6 +75,38 @@ def test_parses_local_timeout() -> None:
     assert ev.next_leader == "02dffcb8ecaffd9eaf85c13b10c9c8ce7d1b874543c3661daeccb34e54339a7a54"
 
 
+def test_parses_proposal_with_base_fee() -> None:
+    """Proposal messages carry seq_num + base_fee for the fee curve.
+    Captured from a live testnet node 2026-04-24 06:29Z (the testnet
+    has been quiescent for weeks at base_fee=100 gwei = 100000000000 wei,
+    which is the floor and should look uniform on the chart)."""
+    fixture = (
+        Path(__file__).parent / "fixtures" / "bft_proposal_sample.log"
+    ).read_text().splitlines()
+    assert fixture, "bft_proposal_sample.log fixture is empty"
+
+    ev = parse_consensus(fixture[0])
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.PROPOSAL
+    assert ev.block_seq == 27_470_642
+    assert ev.base_fee == 100_000_000_000   # 100 gwei × 1e9
+    assert ev.round > 0                      # proposal_round captured
+    assert ev.ts_ms > 0
+
+
+def test_proposal_without_base_fee_is_skipped() -> None:
+    """A "dropping proposal, already received" sibling line lacks the
+    base_fee field — the cheap pre-filter must reject it before the
+    regex even fires (otherwise we'd waste regex work on every dedup
+    hit, which fires roughly once per real proposal)."""
+    drop = (
+        '{"timestamp":"2026-04-24T06:45:09.520280Z","level":"DEBUG",'
+        '"fields":{"message":"dropping proposal, already received for this round",'
+        '"proposal_round":"27603878"},"target":"monad_consensus_state"}'
+    )
+    assert parse_consensus(drop) is None
+
+
 def test_returns_none_for_keepalive_line() -> None:
     """The vast majority of monad-bft log lines are keepalive packets
     that must be cheaply rejected without firing any regex."""
