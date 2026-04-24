@@ -132,6 +132,14 @@ class State:
         self._bft_current_total = 0
         self._bft_current_tc = 0
         self._bft_current_local = 0
+        # Pending writes accumulator. Drained by the cli.py
+        # bft_flush_loop on a 1s cadence so storage cost scales with
+        # flush interval, not event rate. Closed minutes land here on
+        # rollover; base-fee samples land here on every PROPOSAL event.
+        # In-progress minute is NOT pre-buffered — drain assembles a
+        # fresh BftMinute snapshot at flush time.
+        self._bft_pending_minutes: list[BftMinute] = []
+        self._bft_pending_base_fee: list[BftBaseFee] = []
         self._lock = Lock()  # cheap — collector and FastAPI share loop but we're defensive
 
     def attach_reorg_rule(self, rule: ReorgRule) -> None:
@@ -341,37 +349,44 @@ class State:
     def add_consensus_event(self, event: ConsensusEvent) -> None:
         """Tally one bft consensus event into the current minute bucket.
 
-        Synchronous: in-memory increment under lock, no I/O. The bft
-        tailer is firehose-y; doing the storage write here would block
-        the loop. Storage upserts happen on minute roll-over via the
-        async wrapper below.
+        Synchronous, no I/O — pure in-memory bookkeeping. Pending
+        writes (closed minutes, base-fee samples) accumulate in
+        ``_bft_pending_*`` lists drained by the bft_flush_loop in
+        cli.py on a 1-second cadence (iter-20 fix for write
+        amplification — see ``Storage.bulk_write_bft``).
 
         Falls back to wall-clock now() if the event has no parsed ts —
         the parser uses 0 as a soft-failure sentinel, and putting those
         events into the 1970 bucket would silently corrupt the rollup.
-
-        Proposals carry per-block base_fee, not minute-aggregate counts;
-        they're handled in the async wrapper via storage write only and
-        no-op here.
         """
-        if event.kind is ConsensusEventKind.PROPOSAL:
-            return
         ts_ms = event.ts_ms if event.ts_ms > 0 else int(time.time() * 1000)
+        if event.kind is ConsensusEventKind.PROPOSAL:
+            if event.block_seq is None or event.base_fee is None:
+                return
+            with self._lock:
+                self._bft_pending_base_fee.append(BftBaseFee(
+                    block_seq=event.block_seq,
+                    ts_ms=ts_ms,
+                    base_fee_wei=event.base_fee,
+                ))
+            return
         bucket = (ts_ms // _MINUTE_MS) * _MINUTE_MS
         with self._lock:
             if self._bft_current_ts is None:
                 self._bft_current_ts = bucket
             elif bucket != self._bft_current_ts:
-                # Minute rolled over — close the previous bucket. We
-                # don't flush to storage here (sync method); the async
-                # variant handles persistence. For pure in-memory use
-                # (tests) the bucket still lands in the deque.
-                self._bft_minutes.append(BftMinute(
+                # Minute rolled over — close the previous bucket. The
+                # closed bucket lands in BOTH the in-memory deque (for
+                # snapshot reads) and the pending-flush list (for
+                # storage persistence on the next flush tick).
+                closed = BftMinute(
                     ts_minute=self._bft_current_ts,
                     rounds_total=self._bft_current_total,
                     rounds_tc=self._bft_current_tc,
                     local_timeouts=self._bft_current_local,
-                ))
+                )
+                self._bft_minutes.append(closed)
+                self._bft_pending_minutes.append(closed)
                 self._bft_current_ts = bucket
                 self._bft_current_total = 0
                 self._bft_current_tc = 0
@@ -385,45 +400,42 @@ class State:
                 self._bft_current_local += 1
 
     async def add_consensus_event_async(self, event: ConsensusEvent) -> None:
-        """Async wrapper that also persists the event.
+        """Async wrapper. Sync now — no I/O — kept for shape symmetry
+        with ``add_block_async`` and so callers don't have to know
+        whether the underlying tally is sync or async.
 
-        Round/timeout events update the in-progress minute bucket and
-        flush a fresh upsert (REPLACE semantics) — idempotent and one
-        tiny SQLite row write per parsed bft event (~2-3/sec at
-        steady-state, well within WAL throughput).
-
-        Proposal events carry per-block base_fee for the F6 fee curve.
-        Stored once per block_seq via INSERT OR IGNORE so the 2-3
-        rebroadcasts per round collapse into a single row.
+        Storage persistence happens on the bft_flush_loop cadence via
+        ``drain_bft_pending`` + ``Storage.bulk_write_bft``.
         """
-        if event.kind is ConsensusEventKind.PROPOSAL:
-            if self._storage is None or event.block_seq is None or event.base_fee is None:
-                return
-            await asyncio.to_thread(
-                self._storage.insert_bft_base_fee,
-                BftBaseFee(
-                    block_seq=event.block_seq,
-                    ts_ms=event.ts_ms if event.ts_ms > 0 else int(time.time() * 1000),
-                    base_fee_wei=event.base_fee,
-                ),
-            )
-            return
-
         self.add_consensus_event(event)
-        if self._storage is None:
-            return
+
+    def drain_bft_pending(self) -> tuple[list[BftMinute], list[BftBaseFee], BftMinute | None]:
+        """Snapshot pending closed-minute writes, base-fee samples,
+        and the in-progress minute. Called by the bft_flush_loop;
+        consumer persists all three in one transaction via
+        ``Storage.bulk_write_bft``.
+
+        Closed minutes + base-fee samples are CONSUMED (cleared) on
+        drain — the buffer fills again from new events. The in-progress
+        minute is just a snapshot; it stays in-memory and will be
+        re-snapshotted on the next drain. REPLACE semantics in
+        ``bft_minute`` upsert keep this idempotent across many flushes
+        of the same in-progress bucket.
+        """
         with self._lock:
-            ts = self._bft_current_ts
-            total = self._bft_current_total
-            tc = self._bft_current_tc
-            local = self._bft_current_local
-        if ts is None:
-            return
-        await asyncio.to_thread(
-            self._storage.upsert_bft_minute,
-            BftMinute(ts_minute=ts, rounds_total=total,
-                      rounds_tc=tc, local_timeouts=local),
-        )
+            closed = self._bft_pending_minutes[:]
+            self._bft_pending_minutes.clear()
+            base_fees = self._bft_pending_base_fee[:]
+            self._bft_pending_base_fee.clear()
+            in_progress = None
+            if self._bft_current_ts is not None:
+                in_progress = BftMinute(
+                    ts_minute=self._bft_current_ts,
+                    rounds_total=self._bft_current_total,
+                    rounds_tc=self._bft_current_tc,
+                    local_timeouts=self._bft_current_local,
+                )
+        return closed, base_fees, in_progress
 
     def set_probes(self, results: list[ProbeResult]) -> None:
         with self._lock:

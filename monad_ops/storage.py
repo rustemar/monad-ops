@@ -1069,6 +1069,63 @@ class Storage:
             for r in rows
         ]
 
+    def bulk_write_bft(
+        self,
+        minutes: Iterable[BftMinute],
+        base_fees: Iterable[BftBaseFee],
+    ) -> tuple[int, int]:
+        """Write a batch of bft minute upserts + base-fee inserts in one txn.
+
+        Drives the iter-20 write-amplification fix: instead of one
+        ``upsert_bft_minute`` + one ``insert_bft_base_fee`` per event
+        (~5 storage writes/sec at testnet cadence), the bft_flush_loop
+        drains a 1-second buffer through this single-transaction path,
+        cutting lock-acquire cost ~5x and giving the contract_hour
+        rebuild + retention sweeps a quieter window to grab the writer
+        lock when they need it.
+
+        Idempotent — REPLACE on bft_minute means the in-progress minute
+        can be flushed every second without growing rows; IGNORE on
+        bft_base_fee dedup the same proposal seen across rebroadcasts
+        and across overlapping flush batches.
+
+        Returns (minutes_written, base_fees_written) as a coarse
+        observability signal for the flush-loop logger.
+        """
+        minutes = list(minutes)
+        base_fees = list(base_fees)
+        if not minutes and not base_fees:
+            return (0, 0)
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                if minutes:
+                    self._conn.executemany(
+                        """INSERT OR REPLACE INTO bft_minute
+                           (ts_minute, rounds_total, rounds_tc, local_timeouts)
+                           VALUES (?, ?, ?, ?)""",
+                        [
+                            (int(m.ts_minute), int(m.rounds_total),
+                             int(m.rounds_tc), int(m.local_timeouts))
+                            for m in minutes
+                        ],
+                    )
+                if base_fees:
+                    self._conn.executemany(
+                        """INSERT OR IGNORE INTO bft_base_fee
+                           (block_seq, ts_ms, base_fee_wei) VALUES (?, ?, ?)""",
+                        [
+                            (int(b.block_seq), int(b.ts_ms),
+                             int(b.base_fee_wei))
+                            for b in base_fees
+                        ],
+                    )
+                self._conn.execute("COMMIT")
+                return (len(minutes), len(base_fees))
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+
     def insert_bft_base_fee(self, sample: BftBaseFee) -> None:
         """Insert one base-fee observation, ignoring duplicates.
 

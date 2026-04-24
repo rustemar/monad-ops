@@ -319,6 +319,102 @@ def test_window_excludes_buckets_outside_5m_horizon() -> None:
     assert snap.validator_timeout_pct_5m == 0.0
 
 
+def test_bulk_write_bft_persists_minutes_and_base_fees(tmp_path: Path) -> None:
+    """One transaction writes both classes — the iter-20 batching path."""
+    storage = Storage(tmp_path / "state.db")
+    minutes = [
+        BftMinute(_T0_MS, 100, 1, 0),
+        BftMinute(_T0_MS + _MIN_MS, 95, 0, 1),
+    ]
+    base_fees = [
+        BftBaseFee(100, _T0_MS, 100_000_000_000),
+        BftBaseFee(101, _T0_MS + 400, 100_000_000_000),
+    ]
+    written = storage.bulk_write_bft(minutes, base_fees)
+    assert written == (2, 2)
+
+    assert storage.load_recent_bft_minutes(limit=10) == minutes
+    bf_rows = storage.list_bft_base_fee(_T0_MS, _T0_MS + 1000)
+    assert len(bf_rows) == 2
+    storage.close()
+
+
+def test_bulk_write_bft_empty_inputs_no_op(tmp_path: Path) -> None:
+    """Flush ticks may have nothing to write — must not BEGIN a txn."""
+    storage = Storage(tmp_path / "state.db")
+    written = storage.bulk_write_bft([], [])
+    assert written == (0, 0)
+    assert storage.load_recent_bft_minutes(limit=10) == []
+    storage.close()
+
+
+def test_bulk_write_bft_replace_semantics_for_minutes(tmp_path: Path) -> None:
+    """REPLACE on bft_minute means flushing the in-progress bucket
+    every second is idempotent — counters grow as more events land
+    but the row count stays at one per minute."""
+    storage = Storage(tmp_path / "state.db")
+    storage.bulk_write_bft([BftMinute(_T0_MS, 50, 0, 0)], [])
+    storage.bulk_write_bft([BftMinute(_T0_MS, 100, 1, 0)], [])  # later flush
+    rows = storage.load_recent_bft_minutes(limit=10)
+    assert len(rows) == 1
+    assert rows[0].rounds_total == 100
+    assert rows[0].rounds_tc == 1
+    storage.close()
+
+
+def test_drain_bft_pending_returns_closed_and_in_progress() -> None:
+    """The flush loop reads (closed_minutes, base_fees, in_progress)
+    in one snapshot. After drain the closed/base-fee buffers must be
+    empty; the in-progress bucket stays in-memory."""
+    state = State()
+    # 3 events in minute 0
+    for _ in range(3):
+        state.add_consensus_event(_mk_event(ConsensusEventKind.ROUND_ADVANCE_QC))
+    # cross into minute 1 — closes the previous bucket into pending
+    state.add_consensus_event(_mk_event(ConsensusEventKind.ROUND_ADVANCE_TC,
+                                        offset_ms=_MIN_MS + 1))
+    # one base fee sample
+    state.add_consensus_event(ConsensusEvent(
+        kind=ConsensusEventKind.PROPOSAL,
+        round=1, epoch=None, ts_ms=_T0_MS,
+        block_seq=27_000_000, base_fee=100_000_000_000,
+    ))
+
+    closed, base_fees, in_progress = state.drain_bft_pending()
+    assert len(closed) == 1
+    assert closed[0].rounds_total == 3
+    assert len(base_fees) == 1
+    assert base_fees[0].block_seq == 27_000_000
+    assert in_progress is not None
+    assert in_progress.rounds_total == 1   # the TC event in minute 1
+    assert in_progress.rounds_tc == 1
+
+    # Second drain should return empty closed + empty base-fees +
+    # the in-progress bucket still present (REPLACE keeps it idempotent
+    # on storage).
+    closed2, base_fees2, in_progress2 = state.drain_bft_pending()
+    assert closed2 == []
+    assert base_fees2 == []
+    assert in_progress2 is not None
+    assert in_progress2.rounds_total == 1
+
+
+def test_proposal_only_buffers_base_fee_no_round_count() -> None:
+    """A PROPOSAL must not touch round/timeout counters but MUST
+    accumulate a base-fee sample for the next flush."""
+    state = State()
+    state.add_consensus_event(ConsensusEvent(
+        kind=ConsensusEventKind.PROPOSAL,
+        round=1, epoch=None, ts_ms=_T0_MS,
+        block_seq=27_000_001, base_fee=100_000_000_000,
+    ))
+    closed, base_fees, in_progress = state.drain_bft_pending()
+    assert closed == []
+    assert in_progress is None    # no round events yet → no current bucket
+    assert len(base_fees) == 1
+    assert base_fees[0].block_seq == 27_000_001
+
+
 def test_bootstrap_bft_from_storage_rehydrates_buckets(tmp_path: Path) -> None:
     """A restarted process should see prior minute buckets immediately,
     not start cold for 5 minutes."""

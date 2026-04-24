@@ -50,6 +50,23 @@ _TAILER_LIVENESS_WINDOW_SEC = 2.0
 # typical oscillation into a single alert envelope.
 _RECOVERY_CONFIRM_SEC = 60.0
 
+# Empirical Monad testnet block cadence — used by the RECOVERED message
+# to differentiate chain-side from OPS-side stalls. ~2.5 blk/s holds
+# from iter-1 measurements onward; if Foundation re-tunes block time
+# this should be re-derived from production data, not hard-coded
+# elsewhere as a magic constant.
+_HEALTHY_CHAIN_RATE_BPS = 2.5
+
+# Multiplier above the healthy rate at which we classify a recovery
+# burst as "tailer catch-up" (OPS side) rather than "chain back
+# online" (chain side). 1.2× = >3 blk/s in the recovery window —
+# calibrated against the 2026-04-23 20:29 UTC FP where 180 blocks
+# closed in 60 s = 3.0 blk/s = exactly 1.2× the healthy rate. Setting
+# the threshold at 1.2 catches that canonical case while staying above
+# normal cadence jitter (rolling 60 s avg rarely exceeds 1.05×
+# healthy rate on quiet testnet).
+_CATCHUP_RATE_OPS_FACTOR = 1.2
+
 
 @dataclass(slots=True)
 class StallRule:
@@ -69,6 +86,16 @@ class StallRule:
     # RECOVERED detail can reference the worst state seen, not just the
     # most recent one.
     _peak_severity: Severity | None = None
+    # Last block_number observed at the moment this rule armed
+    # (CLEAR → WARN/CRITICAL). Used by RECOVERED to compute how many
+    # blocks the tailer caught up during recovery — a high
+    # caught-up-rate (well above chain's natural ~2.5 blk/s) means the
+    # apparent "stall" was OPS-side (tailer freeze), not chain-side.
+    # Surfaced in the RECOVERED detail so a public-dashboard viewer
+    # can tell the difference post-hoc, since the WARN text is
+    # identical for both failure modes.
+    # See memory/project_stall_fp_pattern.md.
+    _arm_block: int | None = None
 
     def on_block(self, block: ExecBlock, now_sec: float | None = None) -> AlertEvent | None:
         """Call on each new ExecBlock. RECOVERED is NOT emitted here —
@@ -125,6 +152,12 @@ class StallRule:
             # Suppress WARN if we're already at CRITICAL (escalation-only).
             if self._current_state == Severity.CRITICAL and desired == Severity.WARN:
                 return None
+            # Capture the arm-time block number on CLEAR → arm transition
+            # only. Escalation (WARN → CRITICAL) keeps the original arm
+            # block so the eventual RECOVERED counts catch-up across the
+            # whole envelope, not just the post-escalation slice.
+            if self._current_state is None:
+                self._arm_block = self._last_block
             self._current_state = desired
             self._recovery_pending_since = None
             # Track peak severity across the envelope so the final
@@ -159,9 +192,32 @@ class StallRule:
         peak = self._peak_severity or self._current_state or Severity.WARN
         pending_for = now_sec - self._recovery_pending_since
         last_block = self._last_block
+        arm_block = self._arm_block
         self._current_state = None
         self._recovery_pending_since = None
         self._peak_severity = None
+        self._arm_block = None
+
+        # Chain-vs-OPS differential. If many blocks landed during the
+        # confirm window, the tailer was catching up — chain itself was
+        # producing throughout. Healthy testnet cadence is ~2.5 blk/s,
+        # so a catch-up rate well above that flags an OPS-side
+        # false-positive shape (the dominant failure mode after iter-15
+        # write-amplification, see memory project_stall_fp_pattern.md).
+        # Threshold _CATCHUP_RATE_OPS_FACTOR=2.0 — i.e. >5 blk/s during
+        # recovery is "tailer catch-up", not "chain back online".
+        diagnostic = ""
+        if arm_block is not None and last_block is not None:
+            blocks_in_window = last_block - arm_block
+            if blocks_in_window > 0 and pending_for > 0:
+                rate = blocks_in_window / pending_for
+                if rate >= _HEALTHY_CHAIN_RATE_BPS * _CATCHUP_RATE_OPS_FACTOR:
+                    diagnostic = (
+                        f" Tailer caught up {blocks_in_window} blocks at "
+                        f"{rate:.1f} blk/s (chain produces ~"
+                        f"{_HEALTHY_CHAIN_RATE_BPS:.1f} blk/s) — likely "
+                        f"a monad-ops processing pause, not a chain stall."
+                    )
         return AlertEvent(
             rule="stall",
             severity=Severity.RECOVERED,
@@ -170,5 +226,6 @@ class StallRule:
             detail=(
                 f"Block production steady for {pending_for:.0f}s after a "
                 f"{peak.value} stall. Last seen block: {last_block}."
+                f"{diagnostic}"
             ),
         )

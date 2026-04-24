@@ -198,6 +198,81 @@ class TestStallRule:
         ev = rule.on_tick(now_sec=135.0)
         assert ev is not None and ev.severity == Severity.CRITICAL
 
+    def test_recovered_message_flags_ops_side_when_catchup_burst(self):
+        """Iter-20: when recovery closes a large block-number gap in a
+        short window, the dominant interpretation is 'monad-ops tailer
+        was paused while chain produced normally'. The RECOVERED detail
+        gains a diagnostic line so a public-dashboard viewer reads the
+        envelope as ops-side, not chain-side. Calibrated against the
+        canonical 2026-04-23 20:29 UTC FP — 180 blocks in 60s = 3.0
+        blk/s = 1.2× healthy rate, exactly at the threshold.
+        """
+        rule = StallRule(warn_after_sec=10, critical_after_sec=30)
+        # Baseline at block 100, T=0.
+        rule.on_block(self._block_at(100, 0.0), now_sec=0.0)
+        # WARN fires at T=11 — gap 11s since baseline.
+        warn = rule.on_tick(now_sec=11.0)
+        assert warn is not None and warn.severity == Severity.WARN
+        # Tailer thaws at T=12. During the 60s confirm window, blocks
+        # land continuously (chain was producing throughout); their
+        # chain timestamps track wall-clock so re-arm never triggers.
+        # Anchor for confirm window = T=12 (first post-WARN block).
+        # Final block before confirmation: 280 with chain_ts=72 ≈ wall.
+        # Total caught up: 280-100 = 180 blocks across 60s = 3.0 blk/s.
+        # rate = 3.0 ≥ 1.2 × 2.5 = 3.0 → diagnostic appears.
+        for n, t in [(120, 12.0), (160, 24.0), (200, 36.0),
+                     (240, 48.0), (260, 60.0), (280, 72.0)]:
+            rule.on_block(self._block_at(n, t), now_sec=t)
+        rec = rule.on_tick(now_sec=72.0)
+        assert rec is not None and rec.severity == Severity.RECOVERED
+        assert "Tailer caught up 180 blocks" in rec.detail
+        assert "monad-ops processing pause" in rec.detail
+
+    def test_recovered_message_silent_when_normal_recovery(self):
+        """Inverse: a recovery where the chain genuinely paused (so
+        only a handful of blocks land in the confirm window) should NOT
+        carry the ops-side diagnostic. Otherwise the message reads as
+        'tailer paused' on every recovery, defeating the differential."""
+        rule = StallRule(warn_after_sec=10, critical_after_sec=30)
+        rule.on_block(self._block_at(100, 0.0), now_sec=0.0)
+        warn = rule.on_tick(now_sec=11.0)
+        assert warn is not None and warn.severity == Severity.WARN
+        # Only a few blocks land during recovery — chain was actually
+        # slow. 5 blocks / 60s = 0.08 blk/s, well below the threshold.
+        rule.on_block(self._block_at(101, 12.0), now_sec=12.0)
+        rule.on_block(self._block_at(102, 25.0), now_sec=25.0)
+        rule.on_block(self._block_at(103, 40.0), now_sec=40.0)
+        rule.on_block(self._block_at(104, 55.0), now_sec=55.0)
+        rule.on_block(self._block_at(105, 70.0), now_sec=70.0)
+        # 60s confirm window — anchor at T=12 → fires at T=72.
+        rec = rule.on_tick(now_sec=72.0)
+        assert rec is not None and rec.severity == Severity.RECOVERED
+        assert "Tailer caught up" not in rec.detail
+        assert "processing pause" not in rec.detail
+
+    def test_arm_block_captured_at_clear_to_warn_not_at_escalation(self):
+        """Escalation WARN→CRITICAL must NOT reset the arm-block;
+        otherwise the catchup count for the eventual RECOVERED would
+        underreport (just the post-escalation slice). Captured at
+        CLEAR→WARN, frozen through escalation, cleared on RECOVERED."""
+        rule = StallRule(warn_after_sec=10, critical_after_sec=30)
+        rule.on_block(self._block_at(100, 0.0), now_sec=0.0)
+        # WARN at T=11 — captures arm_block=100
+        warn = rule.on_tick(now_sec=11.0)
+        assert warn is not None
+        assert rule._arm_block == 100
+        # CRITICAL at T=31 — must not overwrite arm_block
+        crit = rule.on_tick(now_sec=31.0)
+        assert crit is not None and crit.severity == Severity.CRITICAL
+        assert rule._arm_block == 100   # still the original arm-time block
+        # Recovery — tailer catches up. Counts (280-100), not (280-N_at_critical).
+        rule.on_block(self._block_at(280, 32.0), now_sec=32.0)
+        rec = rule.on_tick(now_sec=92.0)
+        assert rec is not None and rec.severity == Severity.RECOVERED
+        assert "180 blocks" in rec.detail
+        # Reset on confirmed recovery.
+        assert rule._arm_block is None
+
 
 class TestRetrySpikeRule:
     def test_requires_full_window_before_firing(self):

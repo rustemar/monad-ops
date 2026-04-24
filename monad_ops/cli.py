@@ -365,6 +365,10 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         graceful (signal-initiated, e.g. our restart) logs and returns;
         non-graceful fires a CRITICAL alert so an operator notices that
         validator_timeout_pct will silently flatline at zero.
+
+        Per-event work is purely in-memory (no awaits beyond the
+        async-iterator yield); persistence batches into bft_flush_loop
+        below to avoid contending on Storage._lock at event rate.
         """
         async for item in tail_consensus_events():
             if isinstance(item, TailError):
@@ -382,6 +386,38 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 return
             assert isinstance(item, ConsensusEvent)
             await state.add_consensus_event_async(item)
+
+    async def bft_flush_loop():
+        """Drain bft pending writes to storage on a 1-second cadence.
+
+        Decouples storage write rate from event rate. Pre-iter-20 we
+        wrote once per consensus event (~5 writes/sec at testnet
+        cadence on top of the existing 2.5/sec block writes). After
+        iter-20 we coalesce into one BEGIN-IMMEDIATE transaction per
+        flush tick — an order of magnitude fewer lock acquires, which
+        leaves space for the contract_hour_loop's 60-second
+        rebuild-from-JOIN to grab the writer without a queue forming
+        behind it. Diagnosed against the 2026-04-23 20:29 UTC stall-
+        rule false positive (one 10s tailer freeze, see memory
+        ``project_stall_fp_pattern.md``).
+        """
+        if storage is None:
+            return
+        FLUSH_INTERVAL_SEC = 1.0
+        while True:
+            await asyncio.sleep(FLUSH_INTERVAL_SEC)
+            try:
+                closed, base_fees, in_progress = state.drain_bft_pending()
+                minutes_to_flush = list(closed)
+                if in_progress is not None:
+                    minutes_to_flush.append(in_progress)
+                if minutes_to_flush or base_fees:
+                    await asyncio.to_thread(
+                        storage.bulk_write_bft,
+                        minutes_to_flush, base_fees,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.error("bft_flush.error", exc=str(e))
 
     async def epoch_backfill_task():
         # Fire-and-forget: scan 8h of monad-bft journal and seed the
@@ -504,7 +540,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     reference = asyncio.create_task(reference_loop())
     epoch = asyncio.create_task(epoch_loop(), name="epoch_probe")
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
-    tasks: set[asyncio.Task] = {collector, http, probes, reference, epoch, consensus}
+    bft_flush = asyncio.create_task(bft_flush_loop(), name="bft_flush")
+    tasks: set[asyncio.Task] = {collector, http, probes, reference, epoch, consensus, bft_flush}
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
         tasks.add(
