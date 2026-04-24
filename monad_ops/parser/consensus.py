@@ -1,7 +1,7 @@
 """Parser for monad-bft consensus log lines.
 
 Two signals matter for the validator-timeouts metric Foundation tracks
-(Abraar 2026-04-20: ``<3% validator timeouts``):
+(per the 2026-04-20 stress-test summary: ``<3% validator timeouts``):
 
 1. **Chain-wide round-decision certificate.** Every ``advancing round``
    line carries a ``certificate`` field whose value is a Rust Debug

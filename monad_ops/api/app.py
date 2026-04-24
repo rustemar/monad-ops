@@ -228,8 +228,8 @@ def build_app(
                     "eta_sec": snap.epoch_eta_sec,
                 },
                 # Consensus-health view. Foundation tracks
-                # ``validator_timeout_pct`` chain-wide (Abraar 2026-04-20:
-                # ``<3% target``); ``local_timeout_per_min`` is the
+                # ``validator_timeout_pct`` chain-wide (2026-04-20
+                # stress-test summary: ``<3% target``); ``local_timeout_per_min`` is the
                 # operator-side complement — this node's pacemaker fires
                 # per minute. Both default to 0.0 until the bft tailer
                 # has filled at least one minute bucket.

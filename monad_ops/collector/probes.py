@@ -37,10 +37,10 @@ _DISK_WATCH = [
 _DISK_WARN_PCT = 0.85
 _DISK_CRITICAL_PCT = 0.95
 
-# File-descriptor limit to require on monad-execution. jambo | Perpl hit
-# "Too many open files" on TN1 2025-11-25 because the user's nofile was
-# 1024; Mike H | Category Labs recommended 1048576; the official Docker
-# solonet compose uses 16384. We warn below 16k, critical below 4k.
+# File-descriptor limit to require on monad-execution. A TN1 operator
+# hit "Too many open files" on 2025-11-25 because nofile was 1024;
+# upstream guidance points at 1048576 and the official Docker solonet
+# compose uses 16384. We warn below 16k, critical below 4k.
 _FD_LIMIT_WARN = 16_384
 _FD_LIMIT_CRITICAL = 4_096
 
@@ -382,9 +382,9 @@ async def probe_disk_usage(paths: list[Path] | None = None) -> ProbeResult:
 async def probe_fd_limits(service: str = "monad-execution") -> ProbeResult:
     """Check nofile limit for the monad-execution process.
 
-    A 1024 default breaks the node under load. Hard-learned by jambo |
-    Perpl on TN1 2025-11-25 ("Too many open files"); official solonet
-    compose mandates 16384. Category Labs internally uses 1048576.
+    A 1024 default breaks the node under load (observed on TN1
+    2025-11-25 as "Too many open files"); official solonet compose
+    mandates 16384 and upstream guidance points at 1048576.
     """
     rc, out, _ = await _run(
         ["systemctl", "show", service, "--property=MainPID", "--value"]

@@ -477,7 +477,7 @@ function classifyBlockAgeMs(ms) {
     if (diffSec < 10) return "val-warn";
     return "val-crit";
 }
-// Validator-timeout %, chain-wide. Foundation target is <3% (Abraar
+// Validator-timeout %, chain-wide. Foundation target is <3% (per the
 // 2026-04-20 stress-test summary). The legend chips and this
 // classifier MUST stay in lockstep with any future alert rule
 // thresholds — see feedback_threshold_sync_lockstep.md.
@@ -531,7 +531,7 @@ function setKpi(id, text, sevClass) {
 }
 
 // ---- Foundation colour-code chip -----------------------------------
-// Maps an alert's severity onto Jackson's 2026-03-26 colour-code
+// Maps an alert's severity onto the Foundation's 2026-03-26 colour-code
 // vocabulary so operators can read local alerts and Foundation
 // announcements (#fullnode-announcements, email, TG) in the same
 // language. The server also ships the mapping as ``a.code_color`` — we
@@ -1077,9 +1077,9 @@ function _applyChartPayload(d) {
 // at the 100-gwei floor most of the time; the chart's value is in
 // showing how the fee responds to load (the 2026-04-20 stress batch
 // is the canonical "see Monad's dynamic fee curve" moment, exactly
-// what Abraar's announcement called out). Crosshair + tooltip wired
-// the same way as drawRtp so all four time-series charts share the
-// same hover UX.
+// what the Foundation announcement called out). Crosshair + tooltip
+// wired the same way as drawRtp so all four time-series charts share
+// the same hover UX.
 function drawBaseFee(bins) {
     const labels = _labelsFromBins(bins);
     const data = bins.map(b => b.base_fee_gwei_avg ?? 0);

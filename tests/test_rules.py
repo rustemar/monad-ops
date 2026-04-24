@@ -648,7 +648,7 @@ class TestReferenceLagRule:
 class TestCodeColor:
     """Severity-to-Foundation-colour-code mapping.
 
-    The mapping is Foundation-facing (Jackson's 2026-03-26 colour-code
+    The mapping is Foundation-facing (the 2026-03-26 colour-code
     framework) and must remain stable: dashboards, Telegram alerts and
     third-party integrators will key on the emitted strings. Test every
     severity explicitly so a future reshuffle shows up as a failure

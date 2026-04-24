@@ -201,7 +201,7 @@ async def test_alert_endpoints_carry_code_color(
     state_with_storage: State,
 ) -> None:
     """Every alert payload served by the API must carry a ``code_color``
-    field mapping severity onto Jackson's 2026-03-26 Foundation
+    field mapping severity onto the Foundation's 2026-03-26
     colour-code vocabulary. Operators read Foundation announcements in
     that language (CODE RED / ORANGE / GREEN) — aligning the local
     dashboard and ``/api/alerts*`` payloads with the same chips removes

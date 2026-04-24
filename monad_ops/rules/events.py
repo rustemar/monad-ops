@@ -14,7 +14,7 @@ class Severity(StrEnum):
 
 
 class CodeColor(StrEnum):
-    """Monad Foundation colour-code framework (Jackson, 2026-03-26).
+    """Monad Foundation colour-code framework (2026-03-26).
 
     GREEN = informational / no action. ORANGE = action recommended within
     24–48 h. RED = action recommended immediately. The framework is used
