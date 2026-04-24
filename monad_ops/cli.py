@@ -28,6 +28,7 @@ from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
 from monad_ops.parser import AssertionEvent, ConsensusEvent, ExecBlock
+from monad_ops.replay_export import assemble_window_data, render_static_html
 from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
@@ -558,6 +559,83 @@ async def _cmd_ping(args: argparse.Namespace) -> int:
     return 0
 
 
+async def _cmd_replay_export(args: argparse.Namespace) -> int:
+    """Static replay artifact for a window — JSON data + optional HTML viewer."""
+    config = load_config(args.config)
+    if not config.persistence.enabled:
+        print("replay-export requires persistence to be enabled in config",
+              file=sys.stderr)
+        return 1
+    storage = Storage(config.persistence.path)
+
+    from_ts_ms = _parse_ts(args.from_ts)
+    to_ts_ms = _parse_ts(args.to_ts)
+    if to_ts_ms <= from_ts_ms:
+        print(f"--to ({args.to_ts}) must be after --from ({args.from_ts})",
+              file=sys.stderr)
+        return 1
+
+    data = assemble_window_data(
+        storage, from_ts_ms, to_ts_ms,
+        sampled_points=args.points,
+    )
+
+    out_path = Path(args.out)
+    if args.format == "json":
+        out_path.write_text(_json_pretty(data))
+    else:
+        chart_js = (
+            Path(__file__).parent / "dashboard" / "static" / "vendor"
+            / "chart.umd.min.js"
+        )
+        html_doc = render_static_html(
+            data, node_name=config.node.name, chart_js_path=chart_js,
+        )
+        out_path.write_text(html_doc)
+
+    print(
+        f"wrote {out_path} ({out_path.stat().st_size:,} bytes); "
+        f"window {data['window']['from_iso']} → {data['window']['to_iso']}; "
+        f"{data['aggregate'].get('blocks', 0):,} blocks · "
+        f"{data['consensus'].get('rounds_total', 0):,} rounds · "
+        f"{data['base_fee'].get('samples', 0):,} base-fee samples",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _parse_ts(s: str) -> int:
+    """Parse "YYYY-MM-DD HH:MM[:SS]" UTC OR raw ms-epoch into ms.
+
+    A pure integer string is treated as already-in-ms. Otherwise we
+    parse as UTC — operators usually copy timestamps from Foundation
+    announcements which are UTC.
+    """
+    s = s.strip()
+    if s.isdigit():
+        return int(s)
+    from datetime import datetime, timezone
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S",
+                "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
+        try:
+            return int(
+                datetime.strptime(s, fmt)
+                .replace(tzinfo=timezone.utc)
+                .timestamp() * 1000
+            )
+        except ValueError:
+            continue
+    raise ValueError(
+        f"could not parse timestamp {s!r}; "
+        "expected 'YYYY-MM-DD HH:MM[:SS]' UTC or raw milliseconds"
+    )
+
+
+def _json_pretty(d: dict) -> str:
+    import json
+    return json.dumps(d, indent=2, sort_keys=False)
+
+
 async def _cmd_replay(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     retry = RetrySpikeRule(
@@ -614,6 +692,20 @@ def _parse_args() -> argparse.Namespace:
     r.add_argument("--since", default="10 minutes ago")
     r.add_argument("--limit", type=int, default=10_000)
 
+    rx = sub.add_parser(
+        "replay-export",
+        help="export a static replay artifact (HTML or JSON) for a window",
+    )
+    rx.add_argument("--from", dest="from_ts", required=True,
+                    help="window start: 'YYYY-MM-DD HH:MM' UTC or raw ms-epoch")
+    rx.add_argument("--to", dest="to_ts", required=True,
+                    help="window end: 'YYYY-MM-DD HH:MM' UTC or raw ms-epoch")
+    rx.add_argument("--out", required=True, help="output file path")
+    rx.add_argument("--format", choices=("html", "json"), default="html",
+                    help="output format (default: html — single self-contained file)")
+    rx.add_argument("--points", type=int, default=300,
+                    help="downsampled-series target bin count (default: 300)")
+
     return p.parse_args()
 
 
@@ -635,6 +727,7 @@ def main() -> int:
         "run": _cmd_run,
         "ping": _cmd_ping,
         "replay": _cmd_replay,
+        "replay-export": _cmd_replay_export,
     }
     return asyncio.run(handlers[args.cmd](args))
 
