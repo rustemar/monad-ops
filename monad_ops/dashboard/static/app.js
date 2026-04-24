@@ -121,12 +121,15 @@ const crosshairPlugin = {
         ctx.fill();
         ctx.restore();
 
-        // value label
+        // value label. Charts can override formatting per-instance via
+        // ``chart._tooltipValueFormatter(val, val2) -> string`` — used by
+        // the gwei chart and the per-minute validator-timeouts chart so
+        // they read in their own units, not raw integers.
         const isPercent = chart.config.type === "line";
-        // Round to 1 decimal (percentages) or a thousands-grouped integer
-        // otherwise — raw floats like "1604.3333333" were unreadable.
         let text;
-        if (isPercent) {
+        if (typeof chart._tooltipValueFormatter === "function") {
+            text = chart._tooltipValueFormatter(val, val2);
+        } else if (isPercent) {
             // When the chart carries a max-envelope dataset, surface both
             // numbers so viewers don't have to read it off the faint line.
             text = val2 != null
@@ -1074,18 +1077,16 @@ function _applyChartPayload(d) {
 // at the 100-gwei floor most of the time; the chart's value is in
 // showing how the fee responds to load (the 2026-04-20 stress batch
 // is the canonical "see Monad's dynamic fee curve" moment, exactly
-// what Abraar's announcement called out).
+// what Abraar's announcement called out). Crosshair + tooltip wired
+// the same way as drawRtp so all four time-series charts share the
+// same hover UX.
 function drawBaseFee(bins) {
-    const labels = bins.map(b => {
-        const d = new Date(b.t);
-        const hh = String(d.getUTCHours()).padStart(2, "0");
-        const mm = String(d.getUTCMinutes()).padStart(2, "0");
-        return `${hh}:${mm}Z`;
-    });
+    const labels = _labelsFromBins(bins);
     const data = bins.map(b => b.base_fee_gwei_avg ?? 0);
     if (baseFeeChart) {
         baseFeeChart.data.labels = labels;
         baseFeeChart.data.datasets[0].data = data;
+        _attachBinMeta(baseFeeChart, bins);
         baseFeeChart.update("none");
         return;
     }
@@ -1102,9 +1103,10 @@ function drawBaseFee(bins) {
                 pointRadius: 0,
             }],
         },
+        plugins: [crosshairPlugin],
         options: {
             ...chartCommon,
-            layout: { padding: { top: 14 } },
+            layout: { padding: { top: 36 } },
             scales: {
                 ...chartCommon.scales,
                 y: {
@@ -1118,19 +1120,19 @@ function drawBaseFee(bins) {
             },
         },
     });
+    _attachBinMeta(baseFeeChart, bins);
+    // Tooltip in gwei, not the default "1604" raw-integer form.
+    baseFeeChart._tooltipValueFormatter =
+        (v) => v == null ? "—" : `${Number(v).toFixed(1)} gwei`;
 }
 
 function drawValTimeout(bins) {
-    const labels = bins.map(b => {
-        const d = new Date(b.t);
-        const hh = String(d.getUTCHours()).padStart(2, "0");
-        const mm = String(d.getUTCMinutes()).padStart(2, "0");
-        return `${hh}:${mm}Z`;
-    });
+    const labels = _labelsFromBins(bins);
     const data = bins.map(b => b.timeout_pct ?? 0);
     if (vtpChart) {
         vtpChart.data.labels = labels;
         vtpChart.data.datasets[0].data = data;
+        _attachBinMeta(vtpChart, bins);
         vtpChart.update("none");
         return;
     }
@@ -1156,9 +1158,10 @@ function drawValTimeout(bins) {
                 pointRadius: 0,
             }],
         },
+        plugins: [crosshairPlugin],
         options: {
             ...chartCommon,
-            layout: { padding: { top: 14 } },
+            layout: { padding: { top: 36 } },
             scales: {
                 ...chartCommon.scales,
                 y: {
@@ -1173,6 +1176,11 @@ function drawValTimeout(bins) {
             },
         },
     });
+    _attachBinMeta(vtpChart, bins);
+    // 2-decimal precision for VTP — values often sit at 0.5–2 % so a
+    // single decimal would round 0.67 → 0.7 and lose useful resolution.
+    vtpChart._tooltipValueFormatter =
+        (v) => v == null ? "—" : `${Number(v).toFixed(2)}%`;
 }
 
 function setLagVal(id, text, sevClass) {
