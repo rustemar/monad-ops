@@ -146,6 +146,13 @@
                 <span class="chip warn" title="at or above Foundation target">△ &lt;5%</span>
                 <span class="chip crit" title="significantly degraded">⚠ ≥5%</span>
             </div>
+            <div class="group">
+                <span class="name">local pacemaker fires/min</span>
+                <span class="chip ok" title="quiet — no local timer fires">✓ &lt;1</span>
+                <span class="chip mid" title="occasional fire, typical at chain timeout">○ &lt;3</span>
+                <span class="chip warn" title="elevated — local clock or peering issue worth checking">△ &lt;6</span>
+                <span class="chip crit" title="frequent — consult local journald and peer set">⚠ ≥6</span>
+            </div>
             <span class="note">thresholds set from historic retry_pct distribution (worst case 92%, 2026-04-20 stress batch); validator-timeout target from @Abraar 2026-04-20 stress-test summary</span>
         </div>
 
@@ -244,14 +251,20 @@
                     <span class="card-title">retry_pct</span>
                     <span class="card-hint" id="chart-rtp-hint">retry_pct — share of tx re-run per block</span>
                 </div>
-                <div class="chart-box"><canvas id="chart-rtp"></canvas></div>
+                <div class="chart-box">
+                    <canvas id="chart-rtp" role="img"
+                            aria-label="retry percentage per block over time, color-zoned green to red against the alert thresholds"></canvas>
+                </div>
             </div>
             <div class="card chart" id="chart-tx-card">
                 <div class="card-header">
                     <span class="card-title">tx/block</span>
                     <span class="card-hint" id="chart-tx-hint">tx count per block</span>
                 </div>
-                <div class="chart-box"><canvas id="chart-tx"></canvas></div>
+                <div class="chart-box">
+                    <canvas id="chart-tx" role="img"
+                            aria-label="transaction count per block over time"></canvas>
+                </div>
             </div>
         </section>
 
@@ -261,14 +274,20 @@
                     <span class="card-title">validator timeouts %</span>
                     <span class="card-hint" id="chart-vtp-hint">share of consensus rounds closed by TimeoutCertificate · per-minute</span>
                 </div>
-                <div class="chart-box"><canvas id="chart-vtp"></canvas></div>
+                <div class="chart-box">
+                    <canvas id="chart-vtp" role="img"
+                            aria-label="validator timeout percentage per minute, color-zoned green under one percent through red at five percent"></canvas>
+                </div>
             </div>
             <div class="card chart" id="chart-basefee-card">
                 <div class="card-header">
                     <span class="card-title">base fee (gwei)</span>
                     <span class="card-hint" id="chart-basefee-hint">per-block base_fee from monad-bft proposals · downsampled per window</span>
                 </div>
-                <div class="chart-box"><canvas id="chart-basefee"></canvas></div>
+                <div class="chart-box">
+                    <canvas id="chart-basefee" role="img"
+                            aria-label="base fee in gwei per block over time, downsampled to fit the selected window"></canvas>
+                </div>
             </div>
         </section>
 
@@ -278,7 +297,10 @@
                     <span class="card-title">block execution time breakdown</span>
                     <span class="card-hint" id="chart-exec-hint">time per execution step, in microseconds · stacked</span>
                 </div>
-                <div class="chart-box tall"><canvas id="chart-exec"></canvas></div>
+                <div class="chart-box tall">
+                    <canvas id="chart-exec" role="img"
+                            aria-label="per-block execution time stacked into state reset, transaction execution, and commit phases, in microseconds"></canvas>
+                </div>
                 <div class="chart-legend-inline">
                     <span class="swatch" data-phase="sr"></span><span>state_reset</span>
                     <span class="swatch" data-phase="te"></span><span>tx_exec</span>
