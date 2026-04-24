@@ -472,6 +472,29 @@ function classifyBlockAgeMs(ms) {
     if (diffSec < 10) return "val-warn";
     return "val-crit";
 }
+// Validator-timeout %, chain-wide. Foundation target is <3% (Abraar
+// 2026-04-20 stress-test summary). The legend chips and this
+// classifier MUST stay in lockstep with any future alert rule
+// thresholds — see feedback_threshold_sync_lockstep.md.
+function classifyValidatorTimeoutPct(v) {
+    if (v == null) return "";
+    if (v < 1) return "val-ok";
+    if (v < 3) return "val-mid";
+    if (v < 5) return "val-warn";
+    return "val-crit";
+}
+// Local pacemaker-fire rate (per-minute, this node only). At healthy
+// chain steady-state this hovers near the chain-wide TC count because
+// all honest nodes' timers fire when the network times out. Use a
+// looser scale than the chain-wide pct — a single fire per minute is
+// noise.
+function classifyLocalTimeoutPerMin(v) {
+    if (v == null) return "";
+    if (v < 1) return "val-ok";
+    if (v < 3) return "val-mid";
+    if (v < 6) return "val-warn";
+    return "val-crit";
+}
 // Lag severity: positive delta means reference is ahead (we're behind).
 // A few blocks of jitter is normal (block time ≈ 400ms + network hop).
 // Thresholds are chosen for a 15s polling cadence — tight enough to
@@ -627,6 +650,31 @@ async function fetchState() {
                     ? `${fmtInt(gasPeak)} gas/sec · block #${fmtInt(gasBlock)}`
                     : `${fmtInt(gasPeak)} gas/sec`)
                 : "peak gas/sec inside a single block";
+        }
+
+        // Validator-timeout health (chain-wide TC % + local pacemaker
+        // fire rate). Both default to 0.0 until the bft tailer has
+        // filled at least one minute bucket.
+        const c = d.consensus || {};
+        const vtp = c.validator_timeout_pct_5m;
+        const lt = c.local_timeout_per_min_5m;
+        setKpi("k-vtp", fmtPct(vtp), classifyValidatorTimeoutPct(vtp));
+        setKpi("k-lt",
+               lt != null ? lt.toFixed(2) : "—",
+               classifyLocalTimeoutPerMin(lt));
+        const vtpSub = document.getElementById("k-vtp-sub");
+        if (vtpSub) {
+            const obs = c.rounds_observed_5m;
+            vtpSub.textContent = obs != null && obs > 0
+                ? `Foundation target <3% · ${fmtInt(obs)} rounds observed`
+                : "Foundation target <3% · share of rounds closed by TimeoutCertificate";
+        }
+        const ltSub = document.getElementById("k-lt-sub");
+        if (ltSub) {
+            const tot = c.local_timeouts_5m;
+            ltSub.textContent = tot != null && tot > 0
+                ? `${fmtInt(tot)} fires in 5min · operator-side complement to chain-wide TC %`
+                : "average per minute · operator-side complement to chain-wide TC %";
         }
 
         // Chain integrity panel — reorg counter + last-reorg details.

@@ -142,6 +142,27 @@ CREATE TABLE IF NOT EXISTS contract_hour (
 
 CREATE INDEX IF NOT EXISTS idx_contract_hour_ts ON contract_hour (hour_ms);
 CREATE INDEX IF NOT EXISTS idx_contract_hour_to ON contract_hour (to_addr);
+
+-- Per-minute aggregate of monad-bft consensus events. The bft journal
+-- emits ~5500 lines/sec under load — at the two relevant signals
+-- (round_advance + local_timeout, ~2.6/sec total) and 1440 minutes/day
+-- the rollup table stays under 1500 rows/day, vs 224 K raw events.
+-- Aggregating at write-time per `feedback_no_per_tx_rows_for_fast_chains`.
+--
+-- Columns:
+--   ts_minute       — Unix-ms floored to minute boundary (PK).
+--   rounds_total    — total ``advancing round`` events (QC + TC).
+--   rounds_tc       — subset that closed via TimeoutCertificate;
+--                     timeout_pct = rounds_tc / rounds_total * 100.
+--   local_timeouts  — ``local timeout`` events from this node's own
+--                     pacemaker (operator-side signal, separate from
+--                     the chain-wide TC count).
+CREATE TABLE IF NOT EXISTS bft_minute (
+    ts_minute      INTEGER PRIMARY KEY,
+    rounds_total   INTEGER NOT NULL,
+    rounds_tc      INTEGER NOT NULL,
+    local_timeouts INTEGER NOT NULL
+);
 """
 
 _HOUR_MS = 3_600_000
@@ -201,6 +222,15 @@ class ContractRetryStat:
     avg_rtp_of_blocks: float
     tx_count: int
     total_gas: int
+
+
+@dataclass(frozen=True, slots=True)
+class BftMinute:
+    """One minute-bucket of consensus-event counters from bft_minute."""
+    ts_minute: int       # Unix-ms floored to minute boundary
+    rounds_total: int    # advancing round count (QC + TC)
+    rounds_tc: int       # subset closed by TimeoutCertificate
+    local_timeouts: int  # local pacemaker fires
 
 
 class _PercentileAgg:
@@ -967,6 +997,91 @@ class Storage:
             for r in rows
         ]
 
+    # -- bft consensus minute rollup --------------------------------------
+
+    def upsert_bft_minute(self, m: BftMinute) -> None:
+        """Insert or replace one minute-bucket of consensus counters.
+
+        REPLACE semantics so the collector can flush the in-progress
+        minute incrementally — each event observed within the minute
+        rewrites the row with cumulative counts. The next minute starts
+        a fresh row by virtue of the PK being the floored timestamp.
+        """
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO bft_minute
+                   (ts_minute, rounds_total, rounds_tc, local_timeouts)
+                   VALUES (?, ?, ?, ?)""",
+                (int(m.ts_minute), int(m.rounds_total),
+                 int(m.rounds_tc), int(m.local_timeouts)),
+            )
+
+    def load_recent_bft_minutes(self, limit: int) -> list[BftMinute]:
+        """Return the most-recent ``limit`` minute buckets ascending.
+
+        Used by State.bootstrap_bft_from_storage so a service restart
+        immediately has 5m / 1h windows of consensus data without
+        waiting for the live tailer to fill them.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts
+                   FROM bft_minute
+                   ORDER BY ts_minute DESC
+                   LIMIT ?""",
+                (max(1, int(limit)),),
+            ).fetchall()
+        rows.reverse()
+        return [
+            BftMinute(
+                ts_minute=int(r["ts_minute"]),
+                rounds_total=int(r["rounds_total"]),
+                rounds_tc=int(r["rounds_tc"]),
+                local_timeouts=int(r["local_timeouts"]),
+            )
+            for r in rows
+        ]
+
+    def load_bft_window(self, from_ts_ms: int, to_ts_ms: int) -> dict:
+        """Aggregate bft counters over an arbitrary time window.
+
+        Used by /api/window_summary so a Foundation-replay query for
+        epochs 532/533/534 returns a chain-wide validator-timeout %
+        for that exact window. SUMs over minute buckets so cost is
+        O(window-minutes), not O(events).
+        """
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT
+                       SUM(rounds_total)   AS rt,
+                       SUM(rounds_tc)      AS tc,
+                       SUM(local_timeouts) AS lt,
+                       COUNT(*)            AS minutes,
+                       MIN(ts_minute)      AS first_minute,
+                       MAX(ts_minute)      AS last_minute
+                   FROM bft_minute
+                   WHERE ts_minute >= ? AND ts_minute <= ?""",
+                (int(from_ts_ms), int(to_ts_ms)),
+            ).fetchone()
+        rounds_total = int(row["rt"] or 0)
+        rounds_tc = int(row["tc"] or 0)
+        local_timeouts = int(row["lt"] or 0)
+        minutes = int(row["minutes"] or 0)
+        return {
+            "minutes": minutes,
+            "rounds_total": rounds_total,
+            "rounds_tc": rounds_tc,
+            "local_timeouts": local_timeouts,
+            "validator_timeout_pct": round(
+                rounds_tc / rounds_total * 100, 2
+            ) if rounds_total else 0.0,
+            "local_timeout_per_min": round(
+                local_timeouts / minutes, 2
+            ) if minutes else 0.0,
+            "first_minute": int(row["first_minute"]) if row["first_minute"] is not None else None,
+            "last_minute": int(row["last_minute"]) if row["last_minute"] is not None else None,
+        }
+
     def enrichment_has_block(self, block_number: int) -> bool:
         with self._lock:
             row = self._conn.execute(
@@ -1122,6 +1237,16 @@ class Storage:
                 (cutoff_s,),
             )
             deleted["alerts"] = cur.rowcount
+            # bft_minute prunes on the same window as blocks. At 1440
+            # rows/day a 7-day retention is ~10 K rows total — could be
+            # kept much longer cheaply, but matching block retention
+            # keeps mental model simple ("the dashboard sees the same
+            # window for both layers").
+            cur = self._conn.execute(
+                "DELETE FROM bft_minute WHERE ts_minute < ?",
+                (cutoff_ms,),
+            )
+            deleted["bft_minute"] = cur.rowcount
         return deleted
 
     # -- popup detail queries ---------------------------------------------

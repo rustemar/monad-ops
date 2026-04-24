@@ -19,6 +19,7 @@ import uvicorn
 from monad_ops.alerts import DedupingSink, StdoutSink, TelegramSink
 from monad_ops.alerts.sink import AlertSink
 from monad_ops.api import build_app
+from monad_ops.collector.bft_journal import tail_consensus_events
 from monad_ops.collector.journal import TailError, tail_execution_blocks
 from monad_ops.collector.probes import run_all_probes
 from monad_ops.collector.epoch_probe import probe_epoch, scan_epoch_history
@@ -26,7 +27,7 @@ from monad_ops.collector.reference_rpc import fetch_reference_block
 from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
-from monad_ops.parser import AssertionEvent, ExecBlock
+from monad_ops.parser import AssertionEvent, ConsensusEvent, ExecBlock
 from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
@@ -203,6 +204,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         alerts_loaded = state.bootstrap_alerts_from_storage(limit=200)
         if alerts_loaded:
             log.info("bootstrap.alerts_loaded", alerts=alerts_loaded)
+        # Rehydrate the bft consensus rollup so validator_timeout_pct_5m
+        # snaps to the right number on restart instead of starting cold.
+        # 360 = the in-memory deque cap (6 hours).
+        bft_loaded = state.bootstrap_bft_from_storage(limit=360)
+        if bft_loaded:
+            log.info("bootstrap.bft_loaded", minutes=bft_loaded)
     base_sink = _build_sink(config)
     sink: AlertSink = _RecordingSink(base_sink, state)
 
@@ -347,6 +354,34 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("retention.error", exc=str(e))
             await asyncio.sleep(interval_sec)
 
+    async def consensus_loop():
+        """Tail monad-bft for round advances + local timeouts.
+
+        Independent of ``_collector_loop`` — a journald hiccup on bft
+        must not starve the execution-block reader, and vice versa.
+
+        Tailer exits are handled the same way the execution side does:
+        graceful (signal-initiated, e.g. our restart) logs and returns;
+        non-graceful fires a CRITICAL alert so an operator notices that
+        validator_timeout_pct will silently flatline at zero.
+        """
+        async for item in tail_consensus_events():
+            if isinstance(item, TailError):
+                if item.graceful:
+                    log.info("consensus_tailer.graceful_exit", detail=item.message)
+                else:
+                    log.error("consensus_tailer.exit", detail=item.message)
+                    await sink.deliver(AlertEvent(
+                        rule="monitor",
+                        severity=Severity.CRITICAL,
+                        key="monitor:bft-tailer-dead",
+                        title="monad-ops bft tailer exited",
+                        detail=item.message,
+                    ))
+                return
+            assert isinstance(item, ConsensusEvent)
+            await state.add_consensus_event_async(item)
+
     async def epoch_backfill_task():
         # Fire-and-forget: scan 8h of monad-bft journal and seed the
         # tracker with closed epoch spans. Without this, the dashboard
@@ -467,7 +502,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     probes = asyncio.create_task(probe_loop())
     reference = asyncio.create_task(reference_loop())
     epoch = asyncio.create_task(epoch_loop(), name="epoch_probe")
-    tasks: set[asyncio.Task] = {collector, http, probes, reference, epoch}
+    consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
+    tasks: set[asyncio.Task] = {collector, http, probes, reference, epoch, consensus}
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
         tasks.add(

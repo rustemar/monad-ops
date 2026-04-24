@@ -227,6 +227,18 @@ def build_app(
                     "typical_length": snap.epoch_typical_length,
                     "eta_sec": snap.epoch_eta_sec,
                 },
+                # Consensus-health view. Foundation tracks
+                # ``validator_timeout_pct`` chain-wide (Abraar 2026-04-20:
+                # ``<3% target``); ``local_timeout_per_min`` is the
+                # operator-side complement — this node's pacemaker fires
+                # per minute. Both default to 0.0 until the bft tailer
+                # has filled at least one minute bucket.
+                "consensus": {
+                    "validator_timeout_pct_5m": snap.validator_timeout_pct_5m,
+                    "local_timeout_per_min_5m": snap.local_timeout_per_min_5m,
+                    "rounds_observed_5m": snap.bft_rounds_observed_5m,
+                    "local_timeouts_5m": snap.bft_local_timeouts_5m,
+                },
             }
         payload = await _cached("state", _STATE_TTL, (), _load)
         return JSONResponse(payload)
@@ -927,6 +939,16 @@ def build_app(
                 from_ts_ms=from_ts_ms,
                 to_ts_ms=to_ts_ms,
             )
+            # Consensus-side aggregate for the same window. Cheap —
+            # SUM over minute buckets, O(window-minutes) — and surfaces
+            # Foundation's headline KPI for stress-replay queries:
+            # /api/window_summary?from=...epoch_532...&to=...epoch_534...
+            # returns the chain-wide validator-timeout % directly.
+            consensus = await asyncio.to_thread(
+                state.storage.load_bft_window,
+                from_ts_ms,
+                to_ts_ms,
+            )
             if span_ms <= _ROLLUP_SPAN_THRESHOLD_MS:
                 contracts = await asyncio.to_thread(
                     state.storage.top_retried_contracts,
@@ -967,6 +989,7 @@ def build_app(
                     "span_sec": round(span_ms / 1000.0, 1),
                 },
                 "aggregate": aggregate,
+                "consensus": consensus,
                 "top_contracts": [_row(s) for s in contracts],
             }
             if include_blocks:

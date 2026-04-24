@@ -74,13 +74,22 @@ async def test_api_state_shape(client: httpx.AsyncClient) -> None:
         "last_reorg_new_id", "last_reorg_ts_ms",
         "reference_block", "reference_checked_ms", "reference_error",
         "reference_local_at_sample",
-        "current_alerts", "epoch",
+        "current_alerts", "epoch", "consensus",
     }
     assert expected_keys <= set(body.keys())
     assert body["node_name"] == "test-node"
     # Epoch is a nested dict.
     assert isinstance(body["epoch"], dict)
     assert {"number", "blocks_in", "typical_length", "eta_sec"} <= set(body["epoch"].keys())
+    # Consensus is a nested dict — Foundation's <3% headline KPI plus
+    # the operator-side complement (this node's pacemaker fires).
+    assert isinstance(body["consensus"], dict)
+    assert {
+        "validator_timeout_pct_5m",
+        "local_timeout_per_min_5m",
+        "rounds_observed_5m",
+        "local_timeouts_5m",
+    } <= set(body["consensus"].keys())
 
 
 @pytest.mark.asyncio
@@ -103,6 +112,30 @@ async def test_api_alerts_returns_list(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/alerts")
     assert r.status_code == 200
     assert isinstance(r.json(), list)
+
+
+@pytest.mark.asyncio
+async def test_window_summary_includes_consensus_aggregate(
+    state_with_storage: State,
+    client: httpx.AsyncClient,
+) -> None:
+    """``/api/window_summary`` carries a ``consensus`` block with the
+    chain-wide validator-timeout %. Smoke-test against a fresh DB
+    (no bft data) — the aggregate path must return zeros, not 500."""
+    # Window must be > 0 span to pass the validator.
+    r = await client.get("/api/window_summary?from_ts_ms=1000&to_ts_ms=2000")
+    assert r.status_code == 200
+    body = r.json()
+    assert "consensus" in body
+    consensus = body["consensus"]
+    assert {
+        "rounds_total", "rounds_tc", "local_timeouts",
+        "validator_timeout_pct", "local_timeout_per_min",
+        "minutes",
+    } <= set(consensus.keys())
+    # Empty DB → all zeros, no NaN, no None.
+    assert consensus["rounds_total"] == 0
+    assert consensus["validator_timeout_pct"] == 0.0
 
 
 @pytest.mark.asyncio

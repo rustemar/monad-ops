@@ -17,10 +17,10 @@ from threading import Lock
 
 from monad_ops.collector.probes import ProbeResult
 from monad_ops.collector.reference_rpc import ReferenceSample
-from monad_ops.parser import ExecBlock
+from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
-from monad_ops.storage import Storage
+from monad_ops.storage import BftMinute, Storage
 
 
 # Keep ~1 hour of blocks (testnet cadence ~2.5 blk/s → 9000 blocks/hr).
@@ -28,6 +28,11 @@ from monad_ops.storage import Storage
 _BLOCK_BUFFER = 12_000
 # Keep recent alert events for the dashboard's "recent activity" panel.
 _ALERT_BUFFER = 200
+# Per-minute consensus rollup. 6 hours @ 1 row/min = 360 rows — cheap
+# in memory, comfortably covers the longest "explain that incident"
+# window the dashboard surfaces today (1h chart + 5m KPI both fit).
+_BFT_MINUTE_BUFFER = 360
+_MINUTE_MS = 60_000
 
 
 @dataclass
@@ -82,6 +87,14 @@ class Snapshot:
     epoch_blocks_in: int | None       # blocks produced in this epoch so far
     epoch_typical_length: int | None  # median of closed-epoch sizes seen
     epoch_eta_sec: float | None       # projected seconds until next epoch
+    # Consensus / validator-timeout health (Foundation tracks <3% as
+    # the chain-wide target, see wiki/narratives/stress-test-april-20.md).
+    # All four are 0 until the bft tailer has filled at least one
+    # complete minute bucket.
+    validator_timeout_pct_5m: float    # rounds_tc / rounds_total over last 5m
+    local_timeout_per_min_5m: float    # this node's pacemaker fires per minute
+    bft_rounds_observed_5m: int        # round_advance count in the same window
+    bft_local_timeouts_5m: int         # convenience: same window absolute count
 
 
 class State:
@@ -108,6 +121,17 @@ class State:
         # the epoch probe. We learn typical epoch length empirically so
         # no magic constant has to track upstream chain config changes.
         self._epochs: dict[int, tuple[int, int]] = {}
+        # bft consensus accumulator. Closed minutes live in the deque;
+        # the in-progress minute lives in `_bft_current` and gets flushed
+        # to both the deque and storage on every minute roll.
+        # Snapshot reads sum across `_bft_minutes` for window stats and
+        # adds the in-progress bucket so the live dashboard isn't a
+        # minute behind.
+        self._bft_minutes: deque[BftMinute] = deque(maxlen=_BFT_MINUTE_BUFFER)
+        self._bft_current_ts: int | None = None
+        self._bft_current_total = 0
+        self._bft_current_tc = 0
+        self._bft_current_local = 0
         self._lock = Lock()  # cheap — collector and FastAPI share loop but we're defensive
 
     def attach_reorg_rule(self, rule: ReorgRule) -> None:
@@ -145,6 +169,37 @@ class State:
             if len(self._epochs) > 500:
                 oldest = min(self._epochs)
                 self._epochs.pop(oldest, None)
+
+    def _bft_window_summary(self, window_sec: int) -> tuple[float, float, int, int]:
+        """Aggregate bft counters across the last ``window_sec`` seconds.
+
+        Includes the in-progress bucket so the live dashboard isn't
+        always lagging by up to one minute. Returns
+        ``(timeout_pct, local_per_min, rounds_total, local_timeouts)``;
+        zeros if no buckets cover the window yet (cold start).
+
+        Window is expressed in wall-clock seconds; cutoff is computed
+        against ``time.time()`` rather than the latest event so silence
+        on the bft tailer doesn't masquerade as a moving baseline.
+        """
+        cutoff_ms = int(time.time() * 1000) - window_sec * 1000
+        with self._lock:
+            buckets = [m for m in self._bft_minutes if m.ts_minute >= cutoff_ms]
+            cur_ts = self._bft_current_ts
+            cur_total = self._bft_current_total
+            cur_tc = self._bft_current_tc
+            cur_local = self._bft_current_local
+        rounds_total = sum(m.rounds_total for m in buckets)
+        rounds_tc = sum(m.rounds_tc for m in buckets)
+        local_timeouts = sum(m.local_timeouts for m in buckets)
+        if cur_ts is not None and cur_ts >= cutoff_ms:
+            rounds_total += cur_total
+            rounds_tc += cur_tc
+            local_timeouts += cur_local
+        n_minutes = len(buckets) + (1 if cur_ts is not None else 0)
+        timeout_pct = round(rounds_tc / rounds_total * 100, 2) if rounds_total else 0.0
+        local_per_min = round(local_timeouts / n_minutes, 2) if n_minutes else 0.0
+        return timeout_pct, local_per_min, rounds_total, local_timeouts
 
     def _epoch_progress(self) -> tuple[int | None, int | None, int | None, float | None]:
         """Snapshot helper: (epoch, blocks_in, typical_length, eta_sec).
@@ -192,6 +247,23 @@ class State:
             # Don't inflate blocks_seen_total with pre-existing rows — that
             # counter is scoped to "since process start" for an honest uptime
             # metric.
+        return len(loaded)
+
+    def bootstrap_bft_from_storage(self, limit: int) -> int:
+        """Reload the most-recent ``limit`` minute-buckets from storage.
+
+        Without this, every restart resets the validator-timeout %
+        snapshot to zero for the first 5 minutes after boot. Loading
+        the prior buckets back into the deque gives the dashboard an
+        immediate accurate window — same spirit as
+        ``bootstrap_from_storage`` for blocks.
+        """
+        if self._storage is None or limit <= 0:
+            return 0
+        loaded = self._storage.load_recent_bft_minutes(limit=limit)
+        with self._lock:
+            for m in loaded:
+                self._bft_minutes.append(m)
         return len(loaded)
 
     def bootstrap_alerts_from_storage(self, limit: int) -> int:
@@ -265,6 +337,71 @@ class State:
             self._alert_ts.append(ts)
         if self._storage is not None:
             await asyncio.to_thread(self._storage.write_alert, alert, ts)
+
+    def add_consensus_event(self, event: ConsensusEvent) -> None:
+        """Tally one bft consensus event into the current minute bucket.
+
+        Synchronous: in-memory increment under lock, no I/O. The bft
+        tailer is firehose-y; doing the storage write here would block
+        the loop. Storage upserts happen on minute roll-over via the
+        async wrapper below.
+
+        Falls back to wall-clock now() if the event has no parsed ts —
+        the parser uses 0 as a soft-failure sentinel, and putting those
+        events into the 1970 bucket would silently corrupt the rollup.
+        """
+        ts_ms = event.ts_ms if event.ts_ms > 0 else int(time.time() * 1000)
+        bucket = (ts_ms // _MINUTE_MS) * _MINUTE_MS
+        with self._lock:
+            if self._bft_current_ts is None:
+                self._bft_current_ts = bucket
+            elif bucket != self._bft_current_ts:
+                # Minute rolled over — close the previous bucket. We
+                # don't flush to storage here (sync method); the async
+                # variant handles persistence. For pure in-memory use
+                # (tests) the bucket still lands in the deque.
+                self._bft_minutes.append(BftMinute(
+                    ts_minute=self._bft_current_ts,
+                    rounds_total=self._bft_current_total,
+                    rounds_tc=self._bft_current_tc,
+                    local_timeouts=self._bft_current_local,
+                ))
+                self._bft_current_ts = bucket
+                self._bft_current_total = 0
+                self._bft_current_tc = 0
+                self._bft_current_local = 0
+            if event.kind is ConsensusEventKind.ROUND_ADVANCE_QC:
+                self._bft_current_total += 1
+            elif event.kind is ConsensusEventKind.ROUND_ADVANCE_TC:
+                self._bft_current_total += 1
+                self._bft_current_tc += 1
+            elif event.kind is ConsensusEventKind.LOCAL_TIMEOUT:
+                self._bft_current_local += 1
+
+    async def add_consensus_event_async(self, event: ConsensusEvent) -> None:
+        """Async wrapper that also persists the in-progress minute.
+
+        Storage upsert runs on every event so a crash mid-minute doesn't
+        lose the partial counts — REPLACE semantics (see
+        ``Storage.upsert_bft_minute``) means this is idempotent and
+        the cost is one tiny SQLite row write per parsed bft event
+        (~2-3/sec, well within the host's WAL throughput).
+        """
+        self.add_consensus_event(event)
+        if self._storage is None:
+            return
+        with self._lock:
+            ts = self._bft_current_ts
+            total = self._bft_current_total
+            tc = self._bft_current_tc
+            local = self._bft_current_local
+        if ts is None:
+            return
+        await asyncio.to_thread(
+            self._storage.upsert_bft_minute,
+            BftMinute(ts_minute=ts, rounds_total=total,
+                      rounds_tc=tc, local_timeouts=local),
+        )
 
     def set_probes(self, results: list[ProbeResult]) -> None:
         with self._lock:
@@ -383,6 +520,12 @@ class State:
             if remaining > 0:
                 epoch_eta_sec = remaining / bps_1m
 
+        # Consensus / validator-timeout health over the same 5m window
+        # the dashboard uses for retry_pct trends. Foundation's headline
+        # KPI is chain-wide TC %; we expose local pacemaker fires
+        # alongside as the operator-side complement.
+        timeout_pct, local_per_min, rounds_5m, local_5m = self._bft_window_summary(300)
+
         return Snapshot(
             started_at=self._started_at,
             uptime_sec=int(time.time() - self._started_at),
@@ -414,6 +557,10 @@ class State:
             epoch_blocks_in=epoch_blocks_in,
             epoch_typical_length=epoch_typical,
             epoch_eta_sec=epoch_eta_sec,
+            validator_timeout_pct_5m=timeout_pct,
+            local_timeout_per_min_5m=local_per_min,
+            bft_rounds_observed_5m=rounds_5m,
+            bft_local_timeouts_5m=local_5m,
         )
 
 

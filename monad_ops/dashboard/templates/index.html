@@ -139,7 +139,14 @@
                 <span class="chip warn" title="warning">△ &lt;10s</span>
                 <span class="chip crit" title="critical">⚠ ≥10s</span>
             </div>
-            <span class="note">thresholds set from historic retry_pct distribution (worst case 92%, 2026-04-20 stress batch)</span>
+            <div class="group">
+                <span class="name">validator timeouts</span>
+                <span class="chip ok" title="well under target">✓ &lt;1%</span>
+                <span class="chip mid" title="within Foundation target">○ &lt;3%</span>
+                <span class="chip warn" title="at or above Foundation target">△ &lt;5%</span>
+                <span class="chip crit" title="significantly degraded">⚠ ≥5%</span>
+            </div>
+            <span class="note">thresholds set from historic retry_pct distribution (worst case 92%, 2026-04-20 stress batch); validator-timeout target from @Abraar 2026-04-20 stress-test summary</span>
         </div>
 
         <section class="grid grid-2">
@@ -152,6 +159,19 @@
                 <div class="kpi-label">gas/sec effective peak (1min)</div>
                 <div class="kpi-value" id="k-gas-eff-peak">—</div>
                 <div class="kpi-sub" id="k-gas-eff-peak-sub">peak gas/sec inside a single block</div>
+            </div>
+        </section>
+
+        <section class="grid grid-2">
+            <div class="card kpi" id="k-vtp-card">
+                <div class="kpi-label">validator timeouts % (5min, chain-wide)</div>
+                <div class="kpi-value" id="k-vtp">—</div>
+                <div class="kpi-sub" id="k-vtp-sub">Foundation target &lt;3% · share of rounds closed by TimeoutCertificate</div>
+            </div>
+            <div class="card kpi" id="k-lt-card">
+                <div class="kpi-label">local pacemaker fires (5min, this node)</div>
+                <div class="kpi-value" id="k-lt">—</div>
+                <div class="kpi-sub" id="k-lt-sub">average per minute · operator-side complement to chain-wide TC %</div>
             </div>
         </section>
 
