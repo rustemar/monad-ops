@@ -2070,7 +2070,8 @@ function _renderBlockPopup(d) {
                 ? `<span class="cat">${escapeHTML(c.category)}</span>` : ""}</div>
                <div class="addr">${shortAddr(c.to_addr)}</div>`
             : `<div class="addr">${shortAddr(c.to_addr)}</div>`;
-        return `<div class="pk-top-row" data-contract="${escapeHTML(c.to_addr)}" tabindex="0" role="button">
+        const ariaName = c.label ? c.label : shortAddr(c.to_addr);
+        return `<div class="pk-top-row" data-contract="${escapeHTML(c.to_addr)}" tabindex="0" role="button" aria-label="open ${escapeHTML(ariaName)} contract detail">
                     <div>${labelPart}</div>
                     <div class="share-cell">
                         <div class="share-pct">${sharePct}% share</div>
@@ -2186,7 +2187,7 @@ function _renderContractPopup(d) {
 
     const peakPart = d.peak_block ? `
         <div class="pk-section">peak block</div>
-        <div class="pk-peak-card" data-block="${d.peak_block.n}" role="button" tabindex="0">
+        <div class="pk-peak-card" data-block="${d.peak_block.n}" role="button" tabindex="0" aria-label="open block #${fmtInt(d.peak_block.n)} detail">
             <span class="block-num">#${fmtInt(d.peak_block.n)}</span>
             <div class="detail">
                 ${fmtInt(d.peak_block.tx_count)}/${fmtInt(d.peak_block.block_tx)} tx
