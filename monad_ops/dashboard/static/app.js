@@ -141,7 +141,7 @@ const crosshairPlugin = {
             text = Number(val).toFixed(1);
         }
         const blockText = blockNum != null ? `#${fmtInt(blockNum)}` : "";
-        const timeText = binTs != null ? `${_fmtBinClock(binTs)} ${_tzShort}` : "";
+        const timeText = binTs != null ? `${_fmtBinClockSmart(binTs)} ${_tzShort}` : "";
         ctx.save();
         // Measure at the fonts we'll actually render with — mixing
         // fonts in measureText vs fillText was under-sizing the box.
@@ -284,12 +284,34 @@ const _tzShort = (() => {
     return s ? s.value : "local";
 })();
 
-// HH:MM:SS local tz — used in both tooltips and the x-axis ticks so
-// they agree to the second.
+// HH:MM:SS local tz — used in the x-axis ticks where space is tight
+// and consecutive labels make the date implicit. For tooltips on
+// multi-day windows use _fmtBinClockSmart instead.
 function _fmtBinClock(ms) {
     const d = new Date(ms);
     const p = (n) => String(n).padStart(2, "0");
     return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// Tooltip-friendly variant: prefixes MM-DD when the active chart window
+// spans more than one day, otherwise stays time-only. The single-point
+// tooltip would otherwise be ambiguous on multi-day windows (a 05:56:36
+// could belong to any day in the range).
+function _fmtBinClockSmart(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    const time = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    let span = 0;
+    try {
+        const w = _chartWindow();
+        span = w.toMs - w.fromMs;
+    } catch (e) {
+        // _chartWindow not yet initialized at first paint; fall back to time-only.
+    }
+    if (span > 24 * 3600 * 1000) {
+        return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${time}`;
+    }
+    return time;
 }
 
 // ---- stack crosshair plugin: per-phase tooltip for the stacked
@@ -333,7 +355,7 @@ const stackCrosshairPlugin = {
 
         // Header text built up-front so its width can shape the box.
         const headerTxt = binTs
-            ? `block #${fmtInt(blockNum)} · ${_fmtBinClock(binTs)} ${_tzShort}`
+            ? `block #${fmtInt(blockNum)} · ${_fmtBinClockSmart(binTs)} ${_tzShort}`
             : `block #${fmtInt(blockNum)}`;
         // Tooltip layout. Rows: 1 header + N datasets + 1 separator + 1 total.
         const rows = names.length + 2;
