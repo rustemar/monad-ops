@@ -1333,13 +1333,21 @@ function updateEpoch(ep) {
     const done = ep.blocks_in ?? 0;
     const typical = ep.typical_length;
     if (typical && typical > 0) {
-        const pct = Math.max(0, Math.min(100, done / typical * 100));
-        bar.style.width = `${pct.toFixed(1)}%`;
-        if (progress) progress.setAttribute("aria-valuenow", String(Math.round(pct)));
+        const rawPct = done / typical * 100;
+        const clampedPct = Math.max(0, Math.min(100, rawPct));
+        bar.style.width = `${clampedPct.toFixed(1)}%`;
+        if (progress) progress.setAttribute("aria-valuenow", String(Math.round(clampedPct)));
         const eta = ep.eta_sec;
         const etaStr = eta != null ? _fmtEta(eta) : null;
+        // Overrun: blocks_in exceeded the typical length. Either a live
+        // outlier epoch or a still-skewed median (e.g. only one bracketed
+        // sample so far). Show "running long" instead of a phantom 100%
+        // — the bar already pegs at 100, the text shouldn't lie about it.
+        const pctText = rawPct > 100
+            ? `running long (${rawPct.toFixed(0)}%)`
+            : `${rawPct.toFixed(1)}%`;
         sub.textContent =
-            `${fmtInt(done)} / ~${fmtInt(typical)} blocks · ${pct.toFixed(1)}%`
+            `${fmtInt(done)} / ~${fmtInt(typical)} blocks · ${pctText}`
             + (etaStr ? ` · ~${etaStr} to next epoch` : "");
     } else {
         // No closed-epoch sample yet — show raw count only.
