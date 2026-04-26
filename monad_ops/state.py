@@ -212,9 +212,18 @@ class State:
     def _epoch_progress(self) -> tuple[int | None, int | None, int | None, float | None]:
         """Snapshot helper: (epoch, blocks_in, typical_length, eta_sec).
 
-        ``typical_length`` is the median size of previously-closed epochs
-        (i.e. any epoch whose last_seq is strictly below the current
-        epoch's range — proving it was rolled over, not merely paused).
+        ``typical_length`` is the median size of *fully-bracketed* epochs:
+        an epoch X counts only when both (X-1) and (X+1) are also in our
+        map. The bracket proves we observed the boundary on both sides,
+        so first/last seq for X are the real epoch limits — not the
+        edges of our journal scan window. Without this filter, the
+        oldest epoch in the in-memory map is systematically partial
+        (scan_epoch_history starts mid-epoch X-1) and skews the median
+        downward — bug observed 2026-04-26 with typical=24K vs real ~50K.
+        Returns ``typical=None`` until at least one bracketed epoch
+        exists; the dashboard then renders the "epoch length unknown"
+        placeholder rather than a misleading bar.
+
         ``eta_sec`` is a linear projection off `blocks_per_sec_1m`,
         returned only when we have a typical_length to compare against.
         """
@@ -224,15 +233,16 @@ class State:
             current_epoch = max(self._epochs)
             first, last = self._epochs[current_epoch]
             blocks_in = last - first + 1
-            closed_sizes = [
+            epochs_set = set(self._epochs)
+            bracketed_sizes = [
                 (l - f + 1)
                 for ep, (f, l) in self._epochs.items()
-                if ep != current_epoch
+                if (ep - 1) in epochs_set and (ep + 1) in epochs_set
             ]
         typical = None
-        if closed_sizes:
-            closed_sizes.sort()
-            typical = closed_sizes[len(closed_sizes) // 2]
+        if bracketed_sizes:
+            bracketed_sizes.sort()
+            typical = bracketed_sizes[len(bracketed_sizes) // 2]
         return current_epoch, blocks_in, typical, None  # eta filled at snapshot time
 
     @property

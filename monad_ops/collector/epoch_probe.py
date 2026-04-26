@@ -53,8 +53,8 @@ class EpochSample:
 
 async def scan_epoch_history(
     unit: str = "monad-bft",
-    since: str = "8 hours ago",
-    timeout_sec: float = 300.0,
+    since: str = "24 hours ago",
+    timeout_sec: float = 600.0,
 ) -> list[tuple[int, int]]:
     """Full scan of ``unit`` journal, returning every (seq_num, epoch)
     tuple found in the window.
@@ -69,8 +69,13 @@ async def scan_epoch_history(
     blow the default StreamReader 64KB buffer — we tested an earlier
     communicate()-based implementation that returned 0 tuples because a
     single oversized json line tripped LimitOverrunError silently.
-    Generous timeout (5 min) because an 8h journal at testnet cadence
-    is ~60 MB and `journalctl` is single-threaded on the reader side.
+    Generous timeout (10 min) because a 24h journal at testnet cadence
+    is ~180 MB and `journalctl` is single-threaded on the reader side.
+    Window is 24h (was 8h until 2026-04-26): an 8h scan covers only
+    ~1.4 epochs at testnet pace, so the oldest epoch is always partial
+    and the typical-length median computed in state._epoch_progress
+    falls to ~half the real value. 24h gives 4–5 epochs → 2–3 fully
+    bracketed observations, enough for a stable median on cold start.
     """
     try:
         proc = await asyncio.create_subprocess_exec(
