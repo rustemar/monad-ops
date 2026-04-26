@@ -901,57 +901,107 @@ let _customFromMs = null;
 let _customToMs = null;
 _readChartState();
 
+// Clamp helpers for hand-typed URL params — defensive against
+// `?range=custom&from=…&to=…` values that would otherwise fail the
+// backend's 7d-span / 400 guard and leave the user staring at empty
+// charts. Returns `{ fromMs, toMs?, changed }` or null if the input
+// is unsalvageable (negative, NaN, to<=from). When `changed` is
+// true the caller persists the corrected window so the URL bar
+// reflects what's actually rendering, not what was originally typed.
+function _clampCustomFixed(rawFrom, rawTo) {
+    if (!Number.isFinite(rawFrom) || !Number.isFinite(rawTo)) return null;
+    if (rawFrom <= 0 || rawTo <= 0 || rawTo <= rawFrom) return null;
+    const nowMs = Date.now();
+    const to = Math.min(rawTo, nowMs);
+    const span = Math.min(to - rawFrom, CHART_CUSTOM_MAX_SPAN_MS);
+    if (span <= 0) return null;
+    const from = to - span;
+    return { fromMs: from, toMs: to, changed: from !== rawFrom || to !== rawTo };
+}
+function _clampCustomLive(rawFrom) {
+    if (!Number.isFinite(rawFrom) || rawFrom <= 0) return null;
+    const nowMs = Date.now();
+    if (rawFrom >= nowMs) return null;
+    const minFrom = nowMs - CHART_CUSTOM_MAX_SPAN_MS;
+    const from = Math.max(rawFrom, minFrom);
+    return { fromMs: from, changed: from !== rawFrom };
+}
+function _clampPresetSec(rawSec) {
+    if (!Number.isFinite(rawSec) || rawSec <= 0) return null;
+    const max = Math.floor(CHART_CUSTOM_MAX_SPAN_MS / 1000);
+    const sec = Math.min(rawSec, max);
+    return { sec, changed: sec !== rawSec };
+}
+
 function _readChartState() {
     const p = new URLSearchParams(window.location.search);
     const urlRange = p.get("range");
     if (urlRange === "custom_live") {
-        const from = parseInt(p.get("from") || "", 10);
-        if (Number.isFinite(from) && from > 0) {
+        const clamped = _clampCustomLive(parseInt(p.get("from") || "", 10));
+        if (clamped) {
             _chartMode = "custom_live";
-            _customFromMs = from;
+            _customFromMs = clamped.fromMs;
             _customToMs = null;
+            if (clamped.changed) _persistChartState();
             return;
         }
     }
     if (urlRange === "custom") {
-        const from = parseInt(p.get("from") || "", 10);
-        const to = parseInt(p.get("to") || "", 10);
-        if (Number.isFinite(from) && Number.isFinite(to) && to > from) {
+        const clamped = _clampCustomFixed(
+            parseInt(p.get("from") || "", 10),
+            parseInt(p.get("to") || "", 10),
+        );
+        if (clamped) {
             _chartMode = "custom";
-            _customFromMs = from;
-            _customToMs = to;
+            _customFromMs = clamped.fromMs;
+            _customToMs = clamped.toMs;
+            if (clamped.changed) _persistChartState();
             return;
         }
     }
     const fromUrl = urlRange ? parseInt(urlRange, 10) : NaN;
-    if (Number.isFinite(fromUrl) && fromUrl > 0) {
-        _chartRangeSec = fromUrl;
+    const clampedPreset = _clampPresetSec(fromUrl);
+    if (clampedPreset) {
+        _chartRangeSec = clampedPreset.sec;
+        if (clampedPreset.changed) _persistChartState();
         return;
     }
     const storedMode = localStorage.getItem("ops.chartMode");
     if (storedMode === "custom_live") {
-        const from = parseInt(localStorage.getItem("ops.chartCustomFrom") || "", 10);
-        if (Number.isFinite(from) && from > 0) {
+        const clamped = _clampCustomLive(parseInt(localStorage.getItem("ops.chartCustomFrom") || "", 10));
+        if (clamped) {
             _chartMode = "custom_live";
-            _customFromMs = from;
+            _customFromMs = clamped.fromMs;
             _customToMs = null;
+            if (clamped.changed) _persistChartState();
             return;
         }
     }
     if (storedMode === "custom") {
-        const from = parseInt(localStorage.getItem("ops.chartCustomFrom") || "", 10);
-        const to = parseInt(localStorage.getItem("ops.chartCustomTo") || "", 10);
-        if (Number.isFinite(from) && Number.isFinite(to) && to > from) {
+        const clamped = _clampCustomFixed(
+            parseInt(localStorage.getItem("ops.chartCustomFrom") || "", 10),
+            parseInt(localStorage.getItem("ops.chartCustomTo") || "", 10),
+        );
+        if (clamped) {
             _chartMode = "custom";
-            _customFromMs = from;
-            _customToMs = to;
+            _customFromMs = clamped.fromMs;
+            _customToMs = clamped.toMs;
+            if (clamped.changed) _persistChartState();
             return;
         }
     }
-    const stored = parseInt(localStorage.getItem("ops.chartRange") || "", 10);
-    if (Number.isFinite(stored) && stored > 0) {
-        _chartRangeSec = stored;
+    const clampedStored = _clampPresetSec(parseInt(localStorage.getItem("ops.chartRange") || "", 10));
+    if (clampedStored) {
+        _chartRangeSec = clampedStored.sec;
+        if (clampedStored.changed) _persistChartState();
+        if (urlRange) _persistChartState();  // URL had a stale param — overwrite
+        return;
     }
+    // No URL match, no localStorage match — module-init defaults stand
+    // (preset 12h). If the URL had a `range` param it must have been
+    // unsalvageable garbage; rewrite to the defaults so the address bar
+    // doesn't keep displaying the broken request.
+    if (urlRange) _persistChartState();
 }
 
 function _persistChartState() {
