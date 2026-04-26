@@ -28,6 +28,11 @@ from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
 from monad_ops.parser import AssertionEvent, ConsensusEvent, ExecBlock
+from monad_ops.reorg_capture import (
+    CaptureRequest,
+    capture_reorg_journal,
+    journal_dir_for,
+)
 from monad_ops.replay_export import assemble_window_data, render_static_html
 from monad_ops.rules import (
     AlertEvent,
@@ -77,6 +82,7 @@ async def _collector_loop(
     sink: AlertSink,
     state: State,
     enricher: EnrichmentWorker | None = None,
+    journal_capture_dir: Path | None = None,
 ) -> None:
     stall = StallRule(
         warn_after_sec=config.rules.stall.warn_after_sec,
@@ -173,12 +179,28 @@ async def _collector_loop(
             if enricher is not None and block.tx_count > 0:
                 enricher.submit(block.block_number)
 
-            for ev in _filter_none([
-                stall.on_block(block),
-                retry.on_block(block),
-                reorg.on_block(block),
-            ]):
+            stall_ev = stall.on_block(block)
+            retry_ev = retry.on_block(block)
+            reorg_ev = reorg.on_block(block)
+            for ev in _filter_none([stall_ev, retry_ev, reorg_ev]):
                 await sink.deliver(ev)
+            # Schedule a deferred journal snapshot whenever the reorg
+            # rule fires. Fire-and-forget: the capture coroutine sleeps
+            # past the post-event window before pulling journal lines,
+            # so the main collector loop is never blocked on it. Errors
+            # inside the task are caught + logged by the coroutine itself
+            # and never propagate out.
+            if reorg_ev is not None and journal_capture_dir is not None:
+                asyncio.create_task(
+                    capture_reorg_journal(
+                        CaptureRequest(
+                            block_number=block.block_number,
+                            block_ts_ms=block.timestamp_ms,
+                        ),
+                        journal_capture_dir,
+                    ),
+                    name=f"reorg_capture:{block.block_number}",
+                )
     finally:
         tick_handle.cancel()
 
@@ -232,7 +254,18 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                  tx_rows_on_disk=storage.tx_enrichment_count())
 
     labels = ContractLabels.load(config.labels.path)
-    app = build_app(state, config, enricher=enricher, labels=labels)
+    # Reorg-trace journal artifacts live next to the sqlite DB so the
+    # whole on-disk state shares one parent directory. The collector
+    # loop writes them on every reorg fire; the API layer reads them
+    # via the same helper to advertise + serve downloads.
+    journal_capture_dir = (
+        journal_dir_for(config.persistence.path)
+        if config.persistence.enabled else None
+    )
+    app = build_app(
+        state, config, enricher=enricher, labels=labels,
+        journal_capture_dir=journal_capture_dir,
+    )
     server = uvicorn.Server(uvicorn.Config(
         app,
         host=args.host,
@@ -534,7 +567,10 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.warning("contract_hour.rebuild.error", exc=str(e))
             await asyncio.sleep(60)
 
-    collector = asyncio.create_task(_collector_loop(config, sink, state, enricher=enricher))
+    collector = asyncio.create_task(_collector_loop(
+        config, sink, state, enricher=enricher,
+        journal_capture_dir=journal_capture_dir,
+    ))
     http = asyncio.create_task(server.serve())
     probes = asyncio.create_task(probe_loop())
     reference = asyncio.create_task(reference_loop())

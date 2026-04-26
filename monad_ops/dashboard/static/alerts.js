@@ -66,6 +66,26 @@ function _parseReorgBlockNumber(detail) {
     return m ? parseInt(m[1], 10) : null;
 }
 
+// Set of block_numbers whose reorg has a captured journal artifact.
+// Populated once on page load via /api/reorgs and refreshed before
+// every fetchHistory render so a journal that lands while the page is
+// open eventually surfaces the 📥 journal button without a manual
+// reload.
+const _journalAvailable = new Set();
+async function refreshJournalIndex() {
+    try {
+        const r = await fetch("/api/reorgs?limit=500");
+        if (!r.ok) return;
+        const d = await r.json();
+        _journalAvailable.clear();
+        for (const row of (d.reorgs || [])) {
+            if (row.has_journal && row.block_number != null) {
+                _journalAvailable.add(row.block_number);
+            }
+        }
+    } catch (_e) { /* network blip — keep last known set */ }
+}
+
 async function fetchHistory() {
     const windowSec = parseInt(document.getElementById("alerts-window").value, 10);
     const severity = document.getElementById("alerts-severity").value;
@@ -79,6 +99,9 @@ async function fetchHistory() {
     const countPill = document.getElementById("alerts-count-pill").querySelector(".label");
 
     try {
+        // Refresh the journal-availability index alongside the alerts
+        // fetch so a fresh capture appears as soon as it's written.
+        await refreshJournalIndex();
         const r = await fetch(`/api/alerts/history?${qs}`);
         if (!r.ok) throw new Error(r.statusText);
         const d = await r.json();
@@ -105,7 +128,9 @@ async function fetchHistory() {
             const fullTs = a.ts_ms ? fmtFullTs(a.ts_ms) : "";
             // Reorg alerts get a trace-download link — /api/reorgs/{n}
             // returns the reorged block plus N neighbors as JSON, safe
-            // to save and share in operator discussions.
+            // to save and share in operator discussions. A second
+            // download exposes the sanitized monad-bft journal lines
+            // around the event when a capture artifact exists.
             let traceBtn = "";
             if (a.rule === "reorg") {
                 const bn = _parseReorgBlockNumber(a.detail);
@@ -115,6 +140,13 @@ async function fetchHistory() {
                              + `download="reorg-${bn}.json" `
                              + `title="download trace JSON (±30 blocks)">`
                              + `📥 trace</a>`;
+                    if (_journalAvailable.has(bn)) {
+                        const jhref = `/api/reorgs/${bn}/journal`;
+                        traceBtn += ` <a class="alert-trace-btn" href="${jhref}" `
+                                  + `download="reorg-${bn}.jsonl.gz" `
+                                  + `title="download sanitized monad-bft journal lines around the event">`
+                                  + `📥 journal</a>`;
+                    }
                 }
             }
             return `
