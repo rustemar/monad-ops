@@ -1,10 +1,10 @@
 # monad-ops
 
-A small dashboard + alerting tool that runs next to your
-[Monad](https://monad.xyz) validator or full node. It reads the node's
-own journals, keeps track of block-level execution metrics, catches
-reorgs and hardware issues, and pings you on Telegram before things go
-sideways.
+A live dashboard + alerting daemon for [Monad](https://monad.xyz)
+validators and full nodes. It reads the node's own journals, tracks
+block-level execution metrics, catches reorgs / retry-spikes /
+hardware issues in real time, and pings you on Telegram before things
+go sideways.
 
 ![dashboard](docs/dashboard.png)
 
