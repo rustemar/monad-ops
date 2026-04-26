@@ -55,46 +55,18 @@ cannot write back to the node.
 
 - A Monad validator or full node on the same host, running under
   systemd (monad-ops tails `journalctl -u monad-execution` and
-  `journalctl -u monad-bft`).
-- Either Docker + docker-compose v2 (recommended), or Python 3.12+
-  with SQLite ≥ 3.35 for the venv path.
+  `journalctl -u monad-bft`, and probes service state via `systemctl`).
+- Python 3.12+ with SQLite ≥ 3.35.
 - A Telegram bot for alerts — optional. Leave the token blank and the
   dashboard runs alert-free; you can wire Telegram later.
 
-## Quick start (Docker)
+monad-ops is intentionally a host process, not a container: every
+interface point with the node (journals, `systemctl is-active`,
+key-backup paths, host RPC) is shaped by host systemd. Wrapping it
+in Docker means re-mounting all of those, and `systemctl is-active`
+still won't see the host's units from inside the container.
 
-```bash
-git clone https://github.com/rustemar/monad-ops.git
-cd monad-ops
-cp config.example.toml config.toml
-# Edit config.toml: set [node].name, and replace 127.0.0.1 in rpc_url
-# with host.docker.internal so the container can reach your node's RPC.
-echo "SYSTEMD_JOURNAL_GID=$(getent group systemd-journal | cut -d: -f3)" > .env
-docker compose up -d
-# dashboard on the host: http://127.0.0.1:8873
-```
-
-Why each step is there:
-
-- The `.env` line wires the container's supplementary group to your
-  host's `systemd-journal` GID (Debian/Ubuntu = 101, RHEL/Fedora = 190).
-  Without it, the container can't read `/var/log/journal/`.
-- `host.docker.internal` is set up for you in the compose file via
-  `extra_hosts: - "host.docker.internal:host-gateway"`. It's how the
-  container reaches services bound to the host's `127.0.0.1`.
-- The dashboard binds to `127.0.0.1` on the host. To peek from your
-  laptop: `ssh -L 8873:127.0.0.1:8873 <node-host>`. Front it with your
-  own reverse proxy + auth before exposing publicly — the dashboard
-  shows operational telemetry that you probably don't want in search
-  results.
-
-To enable Telegram alerts, edit `[alerts.telegram]` in `config.toml`
-and `docker compose restart`.
-
-## Install (venv, advanced)
-
-For development on monad-ops itself, or when you'd rather not run
-Docker on the validator box:
+## Install
 
 ```bash
 git clone https://github.com/rustemar/monad-ops.git
@@ -113,6 +85,8 @@ Key sections of `config.toml`:
 - `[persistence]` — SQLite database path. Default is `data/state.db`.
 - `[enrichment]` — receipts-enrichment worker settings.
 
+The user running monad-ops must be in the `systemd-journal` group.
+
 ### Run (manual)
 
 ```bash
@@ -120,9 +94,7 @@ Key sections of `config.toml`:
 # dashboard: http://127.0.0.1:8873
 ```
 
-The user running monad-ops must be in the `systemd-journal` group.
-
-### Run (systemd)
+### Run (systemd, recommended)
 
 ```bash
 sudo cp systemd/monad-ops.service.example \
