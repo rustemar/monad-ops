@@ -66,6 +66,27 @@ function _parseReorgBlockNumber(detail) {
     return m ? parseInt(m[1], 10) : null;
 }
 
+// Wrap entity references inside an already-escaped detail string with
+// deep-links into the dashboard's popup. /alerts has no popup of its
+// own, so the hrefs navigate to "/" with the relevant ?reorg=N or
+// ?block=N param — _readPopupFromURL on app.js opens the popup on
+// arrival. Cross-page link, but visually consistent with main-page
+// rendering and zero JS handlers needed (browser handles navigation).
+function _linkifyBlockRefs(escapedDetail, rule) {
+    if (rule === "reorg") {
+        return escapedDetail.replace(
+            /Block #(\d+)/,
+            (m, n) => `<a class="reorg-link" href="/?reorg=${n}" `
+                    + `title="open reorg trace popup on dashboard">${m}</a>`
+        );
+    }
+    return escapedDetail.replace(
+        /block #(\d+)/gi,
+        (m, n) => `<a class="block-link" href="/?block=${n}" `
+                + `title="open block detail popup on dashboard">${m}</a>`
+    );
+}
+
 // Set of block_numbers whose reorg has a captured journal artifact.
 // Populated once on page load via /api/reorgs and refreshed before
 // every fetchHistory render so a journal that lands while the page is
@@ -156,7 +177,7 @@ async function fetchHistory() {
                     <td class="rule">${escapeHTML(a.rule || "")}</td>
                     <td class="detail-cell">
                         <div class="alert-title">${escapeHTML(a.title || "")}</div>
-                        ${a.detail ? `<div class="alert-detail">${escapeHTML(a.detail)}</div>` : ""}
+                        ${a.detail ? `<div class="alert-detail">${_linkifyBlockRefs(escapeHTML(a.detail), a.rule)}</div>` : ""}
                         ${traceBtn}
                     </td>
                 </tr>`;

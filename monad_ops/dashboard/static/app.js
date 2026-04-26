@@ -754,14 +754,26 @@ async function refreshJournalIndex() {
     } catch (_e) { /* network blip — keep last known set */ }
 }
 
-// Wrap "Block #N" inside an already-escaped detail string with a popup
-// link. Safe because escapeHTML runs first and the regex only sees ASCII
-// digits — no risk of injecting through user data.
-function _linkifyReorgBlock(escapedDetail) {
+// Wrap entity references inside an already-escaped detail string with
+// popup deep-links. Safe because escapeHTML runs first and the regex
+// only sees ASCII digits — no risk of injecting through user data.
+//
+// Reorg detail uses the dedicated reorg popup (richer view: trace +
+// neighbor sparkline). Other rules' "block #N" references open the
+// generic block popup. Old blocks past the retention window get a
+// friendly 404 message in the popup body, not a hard error.
+function _linkifyBlockRefs(escapedDetail, rule) {
+    if (rule === "reorg") {
+        return escapedDetail.replace(
+            /Block #(\d+)/,
+            (m, n) => `<a href="#" class="reorg-link" data-reorg-link="${n}" `
+                    + `title="open reorg trace popup">${m}</a>`
+        );
+    }
     return escapedDetail.replace(
-        /Block #(\d+)/,
-        (m, n) => `<a href="#" class="reorg-link" data-reorg-link="${n}" `
-                + `title="open reorg trace popup">${m}</a>`
+        /block #(\d+)/gi,
+        (m, n) => `<a href="#" class="block-link" data-block-link="${n}" `
+                + `title="open block detail popup">${m}</a>`
     );
 }
 
@@ -797,8 +809,7 @@ function renderAlerts(alerts) {
         const fullTs = a.ts_ms ? fmtFullTs(a.ts_ms) : "";
         const isReorg = a.rule === "reorg";
         const bn = isReorg ? _parseReorgBlockNumber(a.detail) : null;
-        let detailHtml = a.detail ? " — " + escapeHTML(a.detail) : "";
-        if (isReorg && bn != null && detailHtml) detailHtml = " — " + _linkifyReorgBlock(escapeHTML(a.detail));
+        const detailHtml = a.detail ? " — " + _linkifyBlockRefs(escapeHTML(a.detail), a.rule) : "";
         const traceBtn = isReorg ? _reorgTraceBtnHtml(bn) : "";
         return `
         <li>
@@ -1887,8 +1898,7 @@ function renderIncidents(alerts) {
             : "";
         const isReorg = a.rule === "reorg";
         const bn = isReorg ? _parseReorgBlockNumber(a.detail) : null;
-        let detailHtml = detailFragment ? " — " + escapeHTML(detailFragment) : "";
-        if (isReorg && bn != null && detailHtml) detailHtml = " — " + _linkifyReorgBlock(escapeHTML(detailFragment));
+        const detailHtml = detailFragment ? " — " + _linkifyBlockRefs(escapeHTML(detailFragment), a.rule) : "";
         const traceBtn = isReorg ? _reorgTraceBtnHtml(bn) : "";
         return `
             <li>
@@ -2261,17 +2271,22 @@ function _popupInit() {
         openPopup(p.kind, p.key, { skipPush: true });
     });
 
-    // Delegated handler for [data-reorg-link] anchors emitted inside the
-    // alerts/incidents lists (and elsewhere, e.g. inside the block popup).
-    // Skips events whose default was already handled by a closer-scoped
-    // listener (e.g. the per-element handler bound after _renderBlockPopup).
+    // Delegated handler for [data-reorg-link] / [data-block-link] anchors
+    // emitted inside alerts lists, incidents card, or any future surface
+    // that wants to deep-link into a popup. Skips events whose default
+    // was already handled by a closer-scoped listener (e.g. the
+    // per-element handler bound after _renderBlockPopup).
     document.addEventListener("click", (e) => {
         if (e.defaultPrevented) return;
-        const link = e.target.closest("[data-reorg-link]");
+        const link = e.target.closest("[data-reorg-link], [data-block-link]");
         if (!link) return;
+        const reorgN = link.dataset.reorgLink;
+        const blockN = link.dataset.blockLink;
+        const raw = reorgN || blockN;
+        const n = parseInt(raw, 10);
+        if (!Number.isFinite(n) || n <= 0) return;
         e.preventDefault();
-        const n = parseInt(link.dataset.reorgLink, 10);
-        if (Number.isFinite(n) && n > 0) openPopup("reorg", n);
+        openPopup(reorgN ? "reorg" : "block", n);
     });
 }
 

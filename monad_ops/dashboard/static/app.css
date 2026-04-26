@@ -703,16 +703,20 @@ table.contracts tbody tr.empty td {
 }
 .alert-trace-btn:hover { background: rgba(91,156,245,0.16); }
 
-/* Inline "Block #N" link inside reorg alert details. Same accent colour
-   as other deep-link references; underlined on hover so it reads as a
-   link without competing with the trace-download button next to it. */
-.reorg-link {
+/* Inline entity links inside alert details. Both reorg-link (Block #N
+   in reorg alerts → opens reorg trace popup) and block-link (block #N
+   in any other alert rule → opens block detail popup) share styling
+   so the dashboard reads consistently regardless of alert type. */
+.reorg-link, .block-link {
     color: var(--accent);
     text-decoration: none;
     border-bottom: 1px dotted rgba(91,156,245,0.45);
 }
-.reorg-link:hover { border-bottom-style: solid; }
-.reorg-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.reorg-link:hover, .block-link:hover { border-bottom-style: solid; }
+.reorg-link:focus-visible, .block-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
 
 /* History-table column widths. Set via classes rather than inline
    `style="width:…"` attributes because the site's CSP `style-src 'self'`
