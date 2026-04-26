@@ -118,6 +118,7 @@ def build_app(
     _ALERTS_TTL = 5.0         # in-memory recent-alerts tail
     _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
     _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
+    _STRESS_EVENTS_TTL = 10.0 # alerts table append-only; live envelope updates need fresh reads
     _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable
     # Short TTL applied when a reorg trace is missing post-event blocks
     # (the tailer hasn't caught up yet). Without this an unlucky first
@@ -593,6 +594,41 @@ def build_app(
 
     def _sanitize_block_for_public(row: dict) -> dict:
         return {k: row[k] for k in _REORG_TRACE_PUBLIC_FIELDS if k in row}
+
+    @app.api_route("/api/stress_events", methods=["GET", "HEAD"])
+    async def api_stress_events(
+        limit: int = Query(5, ge=1, le=50),
+        max_age_days: int = Query(30, ge=1, le=365),
+        merge_gap_sec: int = Query(1800, ge=60, le=86400),
+    ) -> JSONResponse:
+        """Quick-jump targets for past + ongoing stress events.
+
+        Walks the alerts table for retry_spike CRITICAL/RECOVERED runs,
+        groups consecutive criticals into envelopes, then merges
+        envelopes whose recovery-to-rearm gap is short enough that they
+        are semantically one event. Used by the dashboard's stress-event
+        button row to let an operator jump straight to the window of a
+        past or ongoing stress test without picking dates by hand.
+        Backed by ``Storage.list_stress_envelopes`` — see that method
+        for the merge-gap rationale (default 30 min covers within-batch
+        dips without merging real between-batch silence).
+        """
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        async def _load():
+            rows = await asyncio.to_thread(
+                state.storage.list_stress_envelopes,
+                limit=limit,
+                max_age_days=max_age_days,
+                merge_gap_sec=float(merge_gap_sec),
+            )
+            return {"count": len(rows), "events": rows}
+        payload = await _cached(
+            "stress_events", _STRESS_EVENTS_TTL,
+            (limit, max_age_days, merge_gap_sec),
+            _load,
+        )
+        return JSONResponse(payload)
 
     @app.api_route("/api/reorgs", methods=["GET", "HEAD"])
     async def api_reorgs(

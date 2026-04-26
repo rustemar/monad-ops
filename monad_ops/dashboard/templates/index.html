@@ -250,6 +250,14 @@
                 <button type="button" class="range-btn" id="custom-apply">apply</button>
                 <span class="charts-custom-msg" id="charts-custom-msg"></span>
             </div>
+            <!-- Stress-event quick-jump row. Auto-populated from
+                 retry_spike CRITICAL→RECOVERED envelopes via
+                 /api/stress_events. Hidden when there are no events to
+                 show — keeps the toolbar quiet on a fresh install. -->
+            <div class="charts-stress hidden" id="charts-stress" role="group" aria-label="recent stress events">
+                <span class="charts-toolbar-label">stress</span>
+                <div class="stress-list" id="stress-list"></div>
+            </div>
         </div>
 
         <section class="grid grid-2 tall">
