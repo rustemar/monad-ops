@@ -215,12 +215,19 @@
         <div class="charts-toolbar">
             <span class="charts-toolbar-label">period</span>
             <div class="charts-range" role="group" aria-label="chart time range">
+                <button type="button" class="range-btn pan-btn" id="pan-back"
+                        title="pan window back by 20% of its width (Shift+click = 40%)"
+                        aria-label="pan window back">◄</button>
                 <button type="button" class="range-btn" data-range="300">5min</button>
                 <button type="button" class="range-btn" data-range="900">15min</button>
                 <button type="button" class="range-btn" data-range="3600">1h</button>
                 <button type="button" class="range-btn" data-range="14400">4h</button>
                 <button type="button" class="range-btn" data-range="43200">12h</button>
                 <button type="button" class="range-btn" data-range="86400">24h</button>
+                <button type="button" class="range-btn" data-range="604800">7d</button>
+                <button type="button" class="range-btn pan-btn" id="pan-forward"
+                        title="pan window forward by 20% of its width (Shift+click = 40%)"
+                        aria-label="pan window forward">►</button>
                 <button type="button" class="range-btn" id="custom-toggle" aria-expanded="false">custom</button>
             </div>
             <span class="charts-toolbar-hint" id="charts-range-hint">—</span>

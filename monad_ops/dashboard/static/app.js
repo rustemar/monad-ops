@@ -1017,13 +1017,56 @@ function _setChartCustomLive(fromMs) {
 
 function _syncChartControlsUI() {
     for (const btn of document.querySelectorAll(".charts-range .range-btn")) {
-        if (btn.id === "custom-toggle") continue;
+        if (btn.id === "custom-toggle" || btn.classList.contains("pan-btn")) continue;
         btn.classList.toggle("is-active",
             _chartMode === "preset" && parseInt(btn.dataset.range, 10) === _chartRangeSec);
     }
     const customBtn = document.getElementById("custom-toggle");
     if (customBtn) customBtn.classList.toggle("is-active",
         _chartMode === "custom" || _chartMode === "custom_live");
+    // Forward-pan only makes sense when the right edge isn't already at
+    // wall-clock now: preset and custom_live both pin to=now every fetch
+    // (always at edge → forward disabled), custom is the only mode where
+    // toMs is frozen and can be < now.
+    const fwd = document.getElementById("pan-forward");
+    if (fwd) {
+        const atRight =
+            _chartMode !== "custom" ||
+            !_customToMs ||
+            (Date.now() - _customToMs) < 1000;
+        fwd.disabled = atRight;
+    }
+}
+
+// Shift the chart window by ±step% of its current span. Auto-switches
+// the chart into custom mode (preset/custom_live both anchor to=now;
+// panning would conflict with that contract). Forward pan clamps at
+// wall-clock now. Backward pan has no hard floor — the API returns
+// empty bins for ranges before data_start_ms, no crash. Multiplier
+// (Shift+click → ×2) makes hops bigger for power-users; touch devices
+// have no Shift, so they always get the base step — fine.
+const _PAN_STEP_PCT = 0.20;
+function _panChart(direction, mult = 1) {
+    const win = _chartWindow();
+    const span = win.toMs - win.fromMs;
+    if (!Number.isFinite(span) || span <= 0) return;
+    const step = Math.round(span * _PAN_STEP_PCT * mult);
+    const nowMs = Date.now();
+    let newTo, newFrom;
+    if (direction > 0) {
+        newTo = Math.min(win.toMs + step, nowMs);
+        if (newTo <= win.toMs) return;  // already at right edge — no-op
+        newFrom = newTo - span;
+    } else {
+        newFrom = win.fromMs - step;
+        newTo = newFrom + span;
+        // If somehow the back-pan would push us past 'now', clamp.
+        if (newTo > nowMs) {
+            newTo = nowMs;
+            newFrom = newTo - span;
+        }
+    }
+    _setChartCustomRange(newFrom, newTo);
 }
 
 function _fmtRangeLabel(sec) {
@@ -1958,12 +2001,25 @@ document.getElementById("contracts-min").addEventListener("change", fetchContrac
 // drives all three so they stay visually in sync.
 for (const btn of document.querySelectorAll(".charts-range .range-btn")) {
     if (btn.id === "custom-toggle" || btn.id === "custom-apply") continue;
+    if (btn.classList.contains("pan-btn")) continue;  // wired separately below
     btn.addEventListener("click", () => {
         const sec = parseInt(btn.dataset.range, 10);
         if (Number.isFinite(sec) && sec > 0) {
             _setChartRange(sec);
             _closeCustomPanel();
         }
+    });
+}
+
+// Pan buttons. Shift+click multiplies the step ×2 — keyboard power-user
+// shortcut, no harm on touch devices (no Shift event → mult stays 1).
+for (const btn of document.querySelectorAll(".charts-range .pan-btn")) {
+    btn.addEventListener("click", (e) => {
+        if (btn.disabled) return;
+        const direction = btn.id === "pan-forward" ? 1 : -1;
+        const mult = e.shiftKey ? 2 : 1;
+        _panChart(direction, mult);
+        _closeCustomPanel();
     });
 }
 
