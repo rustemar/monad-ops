@@ -52,7 +52,11 @@ log = structlog.stdlib.get_logger()
 
 def _build_sink(config: Config) -> AlertSink:
     tg_cfg = config.alerts.telegram
-    if tg_cfg is None:
+    # Treat both "no [alerts.telegram] section" and "section present but
+    # bot_token blank" as not-configured. Out-of-the-box config.toml ships
+    # with an empty token so a fresh operator gets a working dashboard
+    # without having to register a bot first.
+    if tg_cfg is None or not tg_cfg.bot_token:
         log.warning("telegram.not_configured", falling_back="stdout")
         inner: AlertSink = StdoutSink()
     else:
@@ -95,7 +99,10 @@ async def _collector_loop(
         min_window_tx_avg=config.rules.retry_spike.min_window_tx_avg,
     )
     assertion = AssertionRule()
-    reorg = ReorgRule()
+    reorg = ReorgRule(
+        cluster_window_sec=config.rules.reorg.cluster_window_sec,
+        cluster_threshold=config.rules.reorg.cluster_threshold,
+    )
     # Rule is observable from the API layer for the integrity panel
     # (reorg_count + last-reorg details) even when it has fired zero
     # events — "0 reorgs over N blocks" is itself the signal we want
@@ -105,7 +112,13 @@ async def _collector_loop(
     # under-report. See rules/reorg.py ReorgRule.bootstrap() docstring.
     if state.storage is not None:
         count, last = state.storage.load_reorg_history()
-        if count > 0:
+        # Rehydrate the cluster-detection window so a restart mid-cluster
+        # doesn't reset severity tiering back to WARN. Always loaded
+        # (even when count==0) so the rule sees the same view as the
+        # storage layer regardless of restart timing.
+        cutoff = time.time() - config.rules.reorg.cluster_window_sec
+        recent_ts = state.storage.list_reorg_timestamps_since(cutoff)
+        if count > 0 or recent_ts:
             # Alert detail format produced by _make_event is:
             #   "Block #NNN id changed: 0xAAAA…BBBB → 0xCCCC…DDDD. …"
             # We extract the short-form IDs — the full 64-hex pre-image
@@ -131,8 +144,10 @@ async def _collector_loop(
                 last_old_id=last_old,
                 last_new_id=last_new,
                 last_ts_ms=last_ts_ms,
+                recent_ts_seconds=recent_ts,
             )
-            log.info("reorg.bootstrap", count=count, last_block=bn)
+            log.info("reorg.bootstrap", count=count, last_block=bn,
+                     recent_in_cluster_window=len(recent_ts))
 
     async def tick_task() -> None:
         while True:

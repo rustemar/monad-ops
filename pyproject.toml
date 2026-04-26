@@ -45,6 +45,13 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["monad_ops*"]
 
+[tool.setuptools.package-data]
+monad_ops = [
+    "dashboard/templates/*.html",
+    "dashboard/static/**/*",
+    "dashboard/static/.well-known/*",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
