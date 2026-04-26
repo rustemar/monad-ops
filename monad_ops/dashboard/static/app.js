@@ -1088,6 +1088,93 @@ function _syncChartControlsUI() {
     }
 }
 
+// ---- stress-event quick-jump row ------------------------------------
+// Auto-populated from /api/stress_events. The endpoint groups recent
+// retry_spike CRITICAL→RECOVERED runs into envelopes (with adjacent
+// micro-flap merging) so each button corresponds to one operator-
+// meaningful event. Click opens a custom window from
+// (event.from_ts_ms - 15 min buffer) to (event.to_ts_ms || now).
+// The 15 min lead-in catches the WARN ramp + ranking shift before the
+// rule armed CRITICAL — context the operator typically wants to see.
+const STRESS_EVENT_LEAD_IN_MS = 15 * 60_000;
+
+async function fetchStressEvents() {
+    try {
+        const r = await pollFetch("stress-events", "/api/stress_events?limit=5");
+        if (!r.ok) return;
+        const d = await r.json();
+        renderStressEvents(d.events || []);
+    } catch (_e) { /* swallow — quiet failure for a non-critical row */ }
+}
+
+function _fmtStressDuration(ms) {
+    const m = Math.max(1, Math.round(ms / 60_000));
+    if (m < 60) return `${m}m`;
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return mm ? `${h}h${mm}m` : `${h}h`;
+}
+function _fmtStressDate(ms) {
+    return _fmtLocal(ms).slice(5, 16);  // "MM-DD HH:MM" in local tz
+}
+
+function renderStressEvents(events) {
+    const wrap = document.getElementById("charts-stress");
+    const list = document.getElementById("stress-list");
+    if (!wrap || !list) return;
+    if (!events.length) {
+        wrap.classList.add("hidden");
+        list.innerHTML = "";
+        return;
+    }
+    wrap.classList.remove("hidden");
+    const nowMs = Date.now();
+    list.innerHTML = events.map(e => {
+        const isLive = e.status === "live";
+        const fromMs = e.from_ts_ms;
+        const toMs = e.to_ts_ms != null ? e.to_ts_ms : nowMs;
+        const span = toMs - fromMs;
+        const label = isLive
+            ? `LIVE STRESS · ${_fmtStressDuration(span)}`
+            : `${_fmtStressDate(fromMs)} · ${_fmtStressDuration(span)}`;
+        const cls = isLive ? "stress-btn is-live" : "stress-btn";
+        return `<button type="button" class="${cls}" `
+             + `data-from="${fromMs}" data-to="${toMs}" `
+             + `title="${escapeHTML(fmtFullTs(fromMs))} → ${isLive ? "now" : escapeHTML(fmtFullTs(toMs))}">`
+             + `<span class="stress-dot"></span>${escapeHTML(label)}</button>`;
+    }).join("");
+}
+
+// Single delegated click handler — list re-renders on each poll, so a
+// per-button listener would leak. Stress click adds the lead-in
+// buffer and switches the chart into custom mode. Live events get a
+// to_ts of now at click time, so subsequent clicks track wall-clock
+// (not the toMs we last rendered).
+function _wireStressClicks() {
+    const list = document.getElementById("stress-list");
+    if (!list) return;
+    list.addEventListener("click", (e) => {
+        const btn = e.target.closest(".stress-btn");
+        if (!btn) return;
+        const fromRaw = parseInt(btn.dataset.from, 10);
+        const toRaw = parseInt(btn.dataset.to, 10);
+        if (!Number.isFinite(fromRaw) || !Number.isFinite(toRaw)) return;
+        const isLive = btn.classList.contains("is-live");
+        const toMs = isLive ? Date.now() : toRaw;
+        const fromMs = Math.max(1, fromRaw - STRESS_EVENT_LEAD_IN_MS);
+        const span = toMs - fromMs;
+        if (span > CHART_CUSTOM_MAX_SPAN_MS) {
+            // Defensive: clamp to 7d if a malformed-but-passing event
+            // would exceed the backend cap. Anchor to right edge.
+            _setChartCustomRange(toMs - CHART_CUSTOM_MAX_SPAN_MS, toMs);
+        } else {
+            _setChartCustomRange(fromMs, toMs);
+        }
+        _closeCustomPanel();
+    });
+}
+_wireStressClicks();
+
 // Shift the chart window by ±step% of its current span. Auto-switches
 // the chart into custom mode (preset/custom_live both anchor to=now;
 // panning would conflict with that contract). Forward pan clamps at
@@ -2189,6 +2276,7 @@ fetchBaseFeeSeries();
 fetchContracts();
 fetchIncidents();
 fetchProbes();
+fetchStressEvents();
 // Throttle polling when the tab is hidden to save battery and reduce
 // rate-limit pressure (B5). On refocus, immediately refresh and
 // restore the normal interval.
@@ -2208,6 +2296,7 @@ _schedule(fetchBaseFeeSeries, BLOCKS_INTERVAL);
 _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);
+_schedule(fetchStressEvents, INCIDENTS_INTERVAL);
 
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
 // on mobile orientation change (portrait↔landscape) the parent's
