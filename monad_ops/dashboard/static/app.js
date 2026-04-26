@@ -544,12 +544,51 @@ const SEV_COLOR = {
     "val-warn": "#ffb454",
     "val-crit": "#ff6b6b",
 };
+// Brief border-glow on the parent .card when a KPI value actually
+// changes. Skips no-ops (same value re-rendered every poll), skips
+// transitions to "—" (data dropped, not a real update), and respects
+// prefers-reduced-motion. Animation itself lives in app.css under
+// .card.tile-flash. The remove + offsetWidth read + re-add idiom
+// restarts the animation cleanly when consecutive updates land
+// within one animation cycle (e.g. last_block during fast-tip).
+const _PREFERS_REDUCED_MOTION = (() => {
+    try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+    catch (_) { return false; }
+})();
+function _flashTile(el) {
+    if (_PREFERS_REDUCED_MOTION || !el) return;
+    const card = el.closest(".card");
+    if (!card) return;
+    card.classList.remove("tile-flash");
+    void card.offsetWidth;
+    card.classList.add("tile-flash");
+    // Drop the class once the animation finishes so the DOM accurately
+    // reflects "currently flashing" rather than "flashed at least once".
+    // {once:true} cleans up its own listener.
+    card.addEventListener("animationend", function _onEnd(ev) {
+        if (ev.animationName === "tile-flash-anim") card.classList.remove("tile-flash");
+    }, { once: true });
+}
 function setKpi(id, text, sevClass) {
     const el = document.getElementById(id);
     if (!el) return;
-    el.textContent = text;
+    const newText = String(text);
+    const changed = el.textContent !== newText;
+    el.textContent = newText;
     el.classList.remove("val-ok", "val-mid", "val-warn", "val-crit");
     if (sevClass) el.classList.add(sevClass);
+    if (changed && newText !== "—") _flashTile(el);
+}
+// Bare-text variant for value tiles that don't carry a severity class
+// (k-last-block, k-tps-eff-peak, k-gas-eff-peak, k-epoch). Same flash
+// semantics as setKpi — change + non-"—" → highlight the parent card.
+function setKpiText(id, text) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const newText = String(text);
+    const changed = el.textContent !== newText;
+    el.textContent = newText;
+    if (changed && newText !== "—") _flashTile(el);
 }
 
 // ---- Foundation colour-code chip -----------------------------------
@@ -635,7 +674,7 @@ async function fetchState() {
         const d = await r.json();
         if (d.data_start_ms) _dataStartMs = d.data_start_ms;
         document.getElementById("node-name").textContent = d.node_name;
-        document.getElementById("k-last-block").textContent = fmtInt(d.last_block);
+        setKpiText("k-last-block", fmtInt(d.last_block));
         const sub = document.getElementById("k-last-block-sub");
         sub.textContent = d.last_block_seen_ms
             ? `seen ${fmtSince(d.last_block_seen_ms)}`
@@ -663,13 +702,13 @@ async function fetchState() {
         const tpsBlock = d.tps_eff_peak_block;
         const gasPeak = d.gas_per_sec_effective_peak_1m;
         const gasBlock = d.gas_eff_peak_block;
-        document.getElementById("k-tps-eff-peak").textContent = fmtCompact(tpsPeak);
+        setKpiText("k-tps-eff-peak", fmtCompact(tpsPeak));
         const tpsSubBase = tpsPeak != null
             ? `${fmtInt(tpsPeak)} tx/s · avg ${fmtInt(tpsAvg)} tx/s per block`
             : `avg ${fmtCompact(tpsAvg)} tx/s per block`;
         document.getElementById("k-tps-eff-avg").textContent =
             tpsBlock != null ? `${tpsSubBase} · block #${fmtInt(tpsBlock)}` : tpsSubBase;
-        document.getElementById("k-gas-eff-peak").textContent = fmtCompact(gasPeak);
+        setKpiText("k-gas-eff-peak", fmtCompact(gasPeak));
         const gasSubEl = document.getElementById("k-gas-eff-peak-sub");
         if (gasSubEl) {
             gasSubEl.textContent = gasPeak != null
@@ -1340,7 +1379,7 @@ function updateEpoch(ep) {
         if (progress) progress.setAttribute("aria-valuenow", "0");
         return;
     }
-    num.textContent = `#${fmtInt(ep.number)}`;
+    setKpiText("k-epoch", `#${fmtInt(ep.number)}`);
     const done = ep.blocks_in ?? 0;
     const typical = ep.typical_length;
     if (typical && typical > 0) {
