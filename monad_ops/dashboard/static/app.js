@@ -728,6 +728,58 @@ async function fetchState() {
     }
 }
 
+// Reorg alert detail is deterministic ("Block #<n> id changed: …"). Pull
+// the block_number so the row can deep-link into the reorg popup and offer
+// trace/journal downloads — same UX as the /alerts history page.
+function _parseReorgBlockNumber(detail) {
+    const m = /Block #(\d+) id changed/.exec(detail || "");
+    return m ? parseInt(m[1], 10) : null;
+}
+
+// Set of block_numbers whose reorg has a captured monad-bft journal artifact.
+// Refreshed alongside fetchIncidents() so the 📥 journal button appears
+// without a page reload once the capture lands.
+const _journalAvailable = new Set();
+async function refreshJournalIndex() {
+    try {
+        const r = await fetch("/api/reorgs?limit=500");
+        if (!r.ok) return;
+        const d = await r.json();
+        _journalAvailable.clear();
+        for (const row of (d.reorgs || [])) {
+            if (row.has_journal && row.block_number != null) {
+                _journalAvailable.add(row.block_number);
+            }
+        }
+    } catch (_e) { /* network blip — keep last known set */ }
+}
+
+// Wrap "Block #N" inside an already-escaped detail string with a popup
+// link. Safe because escapeHTML runs first and the regex only sees ASCII
+// digits — no risk of injecting through user data.
+function _linkifyReorgBlock(escapedDetail) {
+    return escapedDetail.replace(
+        /Block #(\d+)/,
+        (m, n) => `<a href="#" class="reorg-link" data-reorg-link="${n}" `
+                + `title="open reorg trace popup">${m}</a>`
+    );
+}
+
+// Trace + journal download buttons for a reorg row — same markup the
+// /alerts page uses (alerts.js), shared CSS class .alert-trace-btn.
+function _reorgTraceBtnHtml(blockNumber) {
+    if (blockNumber == null) return "";
+    let html = `<a class="alert-trace-btn" href="/api/reorgs/${blockNumber}?window=30" `
+             + `download="reorg-${blockNumber}.json" `
+             + `title="download trace JSON (±30 blocks)">📥 trace</a>`;
+    if (_journalAvailable.has(blockNumber)) {
+        html += ` <a class="alert-trace-btn" href="/api/reorgs/${blockNumber}/journal" `
+              + `download="reorg-${blockNumber}.jsonl.gz" `
+              + `title="download sanitized monad-bft journal lines around the event">📥 journal</a>`;
+    }
+    return html;
+}
+
 function renderAlerts(alerts) {
     const list = document.getElementById("alerts-list");
     document.getElementById("alerts-count").textContent = `${alerts.length}`;
@@ -743,12 +795,17 @@ function renderAlerts(alerts) {
         const timeAttr = a.ts_ms ? new Date(a.ts_ms).toISOString() : "";
         const timeStr = a.ts_ms ? fmtAlertTime(a.ts_ms) : "";
         const fullTs = a.ts_ms ? fmtFullTs(a.ts_ms) : "";
+        const isReorg = a.rule === "reorg";
+        const bn = isReorg ? _parseReorgBlockNumber(a.detail) : null;
+        let detailHtml = a.detail ? " — " + escapeHTML(a.detail) : "";
+        if (isReorg && bn != null && detailHtml) detailHtml = " — " + _linkifyReorgBlock(escapeHTML(a.detail));
+        const traceBtn = isReorg ? _reorgTraceBtnHtml(bn) : "";
         return `
         <li>
             <time class="alert-ts" datetime="${timeAttr}" title="${escapeHTML(fullTs)}">${escapeHTML(timeStr)}</time>
             <span class="sev-cc"><span class="sev ${sevClass}">${escapeHTML(sev)}</span>${codeColorChip(a)}</span>
             <span class="rule">${escapeHTML(a.rule || "")}</span>
-            <span class="detail">${escapeHTML(a.title || "")}${a.detail ? " — " + escapeHTML(a.detail) : ""}</span>
+            <span class="detail">${escapeHTML(a.title || "")}${detailHtml}${traceBtn ? " " + traceBtn : ""}</span>
         </li>`;
     }).join("");
 }
@@ -1745,7 +1802,12 @@ function renderProbes(probes, ranAt) {
 
 async function fetchIncidents() {
     try {
-        const r = await pollFetch("alerts-50", "/api/alerts?limit=50");
+        // Refresh journal-availability alongside alerts so the 📥 journal
+        // button surfaces as soon as a new capture is written.
+        const [r, _] = await Promise.all([
+            pollFetch("alerts-50", "/api/alerts?limit=50"),
+            refreshJournalIndex(),
+        ]);
         if (!r.ok) throw new Error(r.statusText);
         const alerts = await r.json();
         renderIncidents(alerts);
@@ -1815,13 +1877,18 @@ function renderIncidents(alerts) {
         const timeBlock = a.ts_ms
             ? `<time class="alert-ts" datetime="${new Date(a.ts_ms).toISOString()}" title="${fmtFullTs(a.ts_ms)}">${escapeHTML(fmtAlertTime(a.ts_ms))}</time>`
             : "";
+        const isReorg = a.rule === "reorg";
+        const bn = isReorg ? _parseReorgBlockNumber(a.detail) : null;
+        let detailHtml = detailFragment ? " — " + escapeHTML(detailFragment) : "";
+        if (isReorg && bn != null && detailHtml) detailHtml = " — " + _linkifyReorgBlock(escapeHTML(detailFragment));
+        const traceBtn = isReorg ? _reorgTraceBtnHtml(bn) : "";
         return `
             <li>
                 <span class="kind-cc"><span class="kind ${sev}">${escapeHTML(sev)}</span>${codeColorChip(a)}</span>
                 <span class="detail">${escapeHTML(kindLabel)}${recurrenceTag}</span>
-                <span class="detail">${escapeHTML(a.title || "")}${
-                    detailFragment ? " — " + escapeHTML(detailFragment) : ""
-                }${locationFragment ? ` <span class="location">${escapeHTML(locationFragment)}</span>` : ""}</span>
+                <span class="detail">${escapeHTML(a.title || "")}${detailHtml}${
+                    locationFragment ? ` <span class="location">${escapeHTML(locationFragment)}</span>` : ""
+                }${traceBtn ? " " + traceBtn : ""}</span>
                 <span class="ago">${timeBlock}</span>
             </li>`;
     }).join("");
@@ -2184,6 +2251,19 @@ function _popupInit() {
         const p = _readPopupFromURL();
         if (!p) { if (!_popup.root.classList.contains("hidden")) _closePopupDOM(); return; }
         openPopup(p.kind, p.key, { skipPush: true });
+    });
+
+    // Delegated handler for [data-reorg-link] anchors emitted inside the
+    // alerts/incidents lists (and elsewhere, e.g. inside the block popup).
+    // Skips events whose default was already handled by a closer-scoped
+    // listener (e.g. the per-element handler bound after _renderBlockPopup).
+    document.addEventListener("click", (e) => {
+        if (e.defaultPrevented) return;
+        const link = e.target.closest("[data-reorg-link]");
+        if (!link) return;
+        e.preventDefault();
+        const n = parseInt(link.dataset.reorgLink, 10);
+        if (Number.isFinite(n) && n > 0) openPopup("reorg", n);
     });
 }
 
