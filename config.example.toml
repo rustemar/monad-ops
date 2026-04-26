@@ -6,12 +6,17 @@
 # Pick something meaningful for your operator — it does NOT have to
 # match the node_name in monad-bft's node.toml.
 name = "monad-testnet"
+# Host RPC. If you run monad-ops in Docker via the supplied compose,
+# replace 127.0.0.1 with host.docker.internal — the compose file wires
+# the host-gateway alias for you.
 rpc_url = "http://127.0.0.1:8080"
 services = ["monad-bft", "monad-execution", "monad-rpc"]
 
 [alerts.telegram]
-bot_token = "123456:AAAA...REPLACE_ME"
-chat_id = -1001234567890
+# Optional. Leave bot_token empty to send alerts to stdout only — handy
+# for first-time setup before you decide whether you want push alerts.
+bot_token = ""
+chat_id = 0
 topic_id = 0  # 0 or omit if the group has no topics
 source_tag = "monad-ops"
 
