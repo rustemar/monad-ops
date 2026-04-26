@@ -112,6 +112,10 @@
                         <td>Forensic trace around a specific reorg — the reorged block plus <code>±window</code> neighbors (default 30, max 500). Returns chain-derived fields (block_number, block_id, timestamp_ms, tx_count, retried, retry_pct, gas_used). Add <code>&amp;level=full</code> to include per-block execution phase timings in microseconds (tx_exec_us, commit_us, chunks). 404 if no reorg alert exists for this block.</td>
                     </tr>
                     <tr>
+                        <td><code>GET /api/reorgs/{block_number}/journal</code></td>
+                        <td>Sanitized <code>monad-bft</code> journal lines around a reorg event — gzipped JSONL covering ~10 s before and after the block's wall-clock timestamp. Peer IPs and the local OTLP loopback are scrubbed at write time; validator pubkeys, block ids, rounds, votes and base fees pass through unchanged. 404 when the reorg pre-dates the capture feature or the journal had already rotated past the event window when the snapshot ran.</td>
+                    </tr>
+                    <tr>
                         <td><code>GET /api/blocks/range?from_block=&amp;to_block=&amp;from_ts_ms=&amp;to_ts_ms=&amp;limit=</code></td>
                         <td>Historical block query backed by persistent storage. Use for post-event analysis (e.g. querying a stress-test window by block_number or ms timestamp).</td>
                     </tr>
@@ -222,6 +226,12 @@ curl -s "<span class="u">{{ base_url }}</span>/api/contracts/top_retried?since_t
                 <div class="example-label">Forensic trace around a specific reorg (±30 blocks)</div>
                 <pre class="example-code"><code>curl -s "<span class="u">{{ base_url }}</span>/api/reorgs/26543283?window=30" \
   | jq '{before: .block_id_before, after: .block_id_after, neighbors: (.blocks|length)}'</code></pre>
+            </div>
+
+            <div class="example">
+                <div class="example-label">Sanitized monad-bft journal lines around a reorg</div>
+                <pre class="example-code"><code>curl -s -o reorg-27868954.jsonl.gz "<span class="u">{{ base_url }}</span>/api/reorgs/27868954/journal"
+zcat reorg-27868954.jsonl.gz | head -3</code></pre>
             </div>
         </section>
 

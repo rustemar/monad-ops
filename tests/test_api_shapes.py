@@ -262,6 +262,188 @@ async def test_api_reorgs_returns_dict(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_reorg_journal_404_without_artifact(
+    state_with_storage: State, tmp_path: Path,
+) -> None:
+    """Endpoint returns 404 when no artifact has been captured yet."""
+    journal_dir = tmp_path / "reorgs"
+    app = build_app(
+        state_with_storage, _minimal_config(),
+        enricher=None, labels=None, journal_capture_dir=journal_dir,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/api/reorgs/12345/journal")
+        assert r.status_code == 404
+        assert "error" in r.json()
+
+
+@pytest.mark.asyncio
+async def test_api_reorg_journal_serves_gzipped_artifact(
+    state_with_storage: State, tmp_path: Path,
+) -> None:
+    """Endpoint serves the gzipped JSONL with an attachment filename."""
+    import gzip
+    journal_dir = tmp_path / "reorgs"
+    journal_dir.mkdir(parents=True)
+    payload = b'{"hello":"world"}\n'
+    artifact = journal_dir / "12345-1700000000.jsonl.gz"
+    with gzip.open(artifact, "wb") as fh:
+        fh.write(payload)
+
+    app = build_app(
+        state_with_storage, _minimal_config(),
+        enricher=None, labels=None, journal_capture_dir=journal_dir,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/api/reorgs/12345/journal")
+        assert r.status_code == 200
+        # FileResponse adds a Content-Disposition with the filename hint.
+        cd = r.headers.get("content-disposition", "")
+        assert "reorg-12345.jsonl.gz" in cd
+        assert gzip.decompress(r.content) == payload
+
+
+@pytest.mark.asyncio
+async def test_api_reorg_trace_partial_post_window_uses_short_ttl(
+    state_with_storage: State,
+) -> None:
+    """When the post-event window is truncated (tailer hasn't caught up
+    to ``block_number + window`` yet), the cache slot must use the
+    short TTL so the next call returns the full trace, not a five-minute
+    stale partial."""
+    from monad_ops.parser import ExecBlock
+    from monad_ops.rules.events import AlertEvent, Severity
+
+    storage = state_with_storage.storage
+    # Seed blocks 95..102 — leaves the post-side of a window=5 trace
+    # truncated for reorg block 100 (only 100..102 ingested, missing
+    # 103..105).
+    def mk(n: int) -> ExecBlock:
+        return ExecBlock(
+            block_number=n, block_id=f"0x{n:064x}",
+            timestamp_ms=1_700_000_000_000 + n * 400,
+            tx_count=1, retried=0, retry_pct=0.0,
+            state_reset_us=0, tx_exec_us=0, commit_us=0, total_us=0,
+            tps_effective=0, tps_avg=0, gas_used=0,
+            gas_per_sec_effective=0, gas_per_sec_avg=0,
+            active_chunks=0, slow_chunks=0,
+        )
+    for n in range(95, 103):
+        storage.write_block(mk(n))
+    storage.write_alert(AlertEvent(
+        rule="reorg",
+        severity=Severity.CRITICAL,
+        key=f"reorg:100:{'0x' + 'a' * 64}",
+        title="Chain reorg detected",
+        detail="Block #100 id changed: 0xaaaa…aaaa → 0xbbbb…bbbb. "
+               "Total reorgs observed: 1.",
+    ))
+
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/api/reorgs/100", params={"window": 5, "level": "full"})
+        assert r.status_code == 200
+
+    # Cache shape is {bucket: {key: (stored_at, ttl, value)}}.
+    bucket_store = app.state.cache_store["reorg_trace"]
+    assert bucket_store, "expected at least one cached reorg trace"
+    (_stored_at, ttl_sec, value) = next(iter(bucket_store.values()))
+    # Partial TTL is 5 s by definition (see _REORG_TRACE_PARTIAL_TTL).
+    assert ttl_sec == pytest.approx(5.0)
+    # Sanity: only 8 blocks were ingested (95..102), so the post side is
+    # truly truncated for window=5 (would need 95..105).
+    assert len(value["blocks"]) == 8
+
+
+@pytest.mark.asyncio
+async def test_api_reorg_trace_complete_window_uses_long_ttl(
+    state_with_storage: State,
+) -> None:
+    """A trace whose post-event window is fully populated stays cached
+    at the full 5-minute TTL — historical reorgs are immutable."""
+    from monad_ops.parser import ExecBlock
+    from monad_ops.rules.events import AlertEvent, Severity
+
+    storage = state_with_storage.storage
+    def mk(n: int) -> ExecBlock:
+        return ExecBlock(
+            block_number=n, block_id=f"0x{n:064x}",
+            timestamp_ms=1_700_000_000_000 + n * 400,
+            tx_count=1, retried=0, retry_pct=0.0,
+            state_reset_us=0, tx_exec_us=0, commit_us=0, total_us=0,
+            tps_effective=0, tps_avg=0, gas_used=0,
+            gas_per_sec_effective=0, gas_per_sec_avg=0,
+            active_chunks=0, slow_chunks=0,
+        )
+    # Fully ingested 95..105 — covers ±5 around block 100.
+    for n in range(95, 106):
+        storage.write_block(mk(n))
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.CRITICAL,
+        key=f"reorg:100:{'0x' + 'a' * 64}",
+        title="Chain reorg detected",
+        detail="Block #100 id changed: …",
+    ))
+
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/api/reorgs/100", params={"window": 5, "level": "full"})
+        assert r.status_code == 200
+
+    bucket_store = app.state.cache_store["reorg_trace"]
+    (_stored_at, ttl_sec, value) = next(iter(bucket_store.values()))
+    assert ttl_sec == pytest.approx(300.0)
+    assert len(value["blocks"]) == 11  # 95..105 inclusive
+
+
+@pytest.mark.asyncio
+async def test_api_reorgs_marks_has_journal(
+    state_with_storage: State, tmp_path: Path,
+) -> None:
+    """`/api/reorgs` annotates each row with has_journal based on which
+    artifacts exist on disk."""
+    import gzip
+    from monad_ops.rules.events import AlertEvent, Severity
+
+    # Two reorgs in storage; one has an artifact, one doesn't.
+    # Use the storage write_alert path so the row has the canonical
+    # `reorg:<n>:<id>` key shape that list_reorgs parses.
+    storage = state_with_storage.storage
+    for bn, bid in ((100, "0x" + "a" * 64), (200, "0x" + "b" * 64)):
+        storage.write_alert(AlertEvent(
+            rule="reorg",
+            severity=Severity.CRITICAL,
+            key=f"reorg:{bn}:{bid}",
+            title="Chain reorg detected",
+            detail=f"Block #{bn} id changed: 0xaaaa…aaaa → 0xbbbb…bbbb. "
+                   "Total reorgs observed: 1.",
+        ))
+
+    journal_dir = tmp_path / "reorgs"
+    journal_dir.mkdir(parents=True)
+    # Only block 100 has a captured artifact.
+    with gzip.open(journal_dir / "100-1700000000.jsonl.gz", "wb") as fh:
+        fh.write(b'{"x":1}\n')
+
+    app = build_app(
+        state_with_storage, _minimal_config(),
+        enricher=None, labels=None, journal_capture_dir=journal_dir,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/api/reorgs")
+        assert r.status_code == 200
+        body = r.json()
+        by_block = {row["block_number"]: row for row in body["reorgs"]}
+        assert by_block[100]["has_journal"] is True
+        assert by_block[200]["has_journal"] is False
+
+
+@pytest.mark.asyncio
 async def test_api_probes_public_shape(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/probes/public")
     assert r.status_code == 200

@@ -28,6 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
+from monad_ops.reorg_capture import find_artifact
 from monad_ops.rules.events import code_color_for
 from monad_ops.state import State
 
@@ -74,6 +75,7 @@ def build_app(
     config: Config,
     enricher: EnrichmentWorker | None = None,
     labels: ContractLabels | None = None,
+    journal_capture_dir: Path | None = None,
 ) -> FastAPI:
     labels = labels or ContractLabels({})
     app = FastAPI(title="monad-ops", docs_url=None, redoc_url=None, openapi_url=None)
@@ -117,6 +119,12 @@ def build_app(
     _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
     _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
     _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable
+    # Short TTL applied when a reorg trace is missing post-event blocks
+    # (the tailer hasn't caught up yet). Without this an unlucky first
+    # viewer's truncated result would stick in cache for 5 minutes; the
+    # underlying SQL is sub-millisecond so refreshing every few seconds
+    # is cheap.
+    _REORG_TRACE_PARTIAL_TTL = 5.0
     _WINDOW_SUMMARY_TTL = 15.0  # heavy SQL aggregate over arbitrary window
 
     # Generic TTL cache + in-flight dedup. Used for the two heavy
@@ -130,19 +138,45 @@ def build_app(
     # thousands of stale entries even though each is individually small.
     # A 128-entry cap + FIFO eviction keeps memory predictable; hot keys
     # are refreshed in-place so they never age out.
-    _cache_store: dict[str, OrderedDict[tuple, tuple[float, object]]] = {}
+    # Cache entries are (stored_at, ttl_sec, value). The per-entry TTL
+    # (rather than a single per-bucket value) lets a loader downgrade a
+    # specific result's freshness — e.g. mark a reorg trace as
+    # "incomplete, refresh soon" when the tailer hasn't caught up to
+    # the post-event window yet.
+    _cache_store: dict[str, OrderedDict[tuple, tuple[float, float, object]]] = {}
     _cache_inflight: dict[str, dict[tuple, asyncio.Future]] = {}
     _CACHE_MAX_ENTRIES = 128
+    # Test-only seam: lets a caller inspect the per-entry TTL applied to
+    # a cached value (e.g. asserting that a truncated reorg trace was
+    # given the partial-TTL not the long one). app.state is the
+    # idiomatic mount point for app-scoped objects in Starlette/FastAPI;
+    # the production code path never reads from it.
+    app.state.cache_store = _cache_store
 
-    async def _cached(bucket: str, ttl_sec: float, cache_key: tuple, loader):
+    async def _cached(
+        bucket: str,
+        ttl_sec: float,
+        cache_key: tuple,
+        loader,
+        *,
+        ttl_for_value=None,
+    ):
+        """Read-through cache with per-entry TTL + in-flight dedup.
+
+        ``ttl_for_value(value)`` is an optional callable that returns
+        an override TTL for a freshly-loaded value. Use it when some
+        results should be cached for less time than others (e.g. a
+        partially-populated reorg trace whose post-window hasn't been
+        ingested yet).
+        """
         store = _cache_store.setdefault(bucket, OrderedDict())
         inflight = _cache_inflight.setdefault(bucket, {})
         now = time.monotonic()
         entry = store.get(cache_key)
-        if entry and (now - entry[0]) < ttl_sec:
+        if entry and (now - entry[0]) < entry[1]:
             # Move-to-end marks this key recently used (LRU-ish).
             store.move_to_end(cache_key)
-            return entry[1]
+            return entry[2]
         pending = inflight.get(cache_key)
         if pending is not None:
             return await pending
@@ -150,7 +184,8 @@ def build_app(
         inflight[cache_key] = fut
         try:
             value = await loader()
-            store[cache_key] = (time.monotonic(), value)
+            eff_ttl = ttl_for_value(value) if ttl_for_value is not None else ttl_sec
+            store[cache_key] = (time.monotonic(), eff_ttl, value)
             store.move_to_end(cache_key)
             # Evict oldest entries once over the cap. Bounded to a handful
             # of pops even in pathological traffic, so the eviction loop
@@ -567,16 +602,63 @@ def build_app(
 
         Each row reconstructs both block_ids (``before`` from the
         persisted blocks row, ``after`` from the alert key) and a
-        compact block-metrics summary. For the full per-block
-        neighbor trace, call ``/api/reorgs/{block_number}``.
+        compact block-metrics summary. ``has_journal`` is true when a
+        sanitized journal-trace artifact has been captured for the
+        event (only reorgs that fired after the capture feature shipped
+        — historical reorgs return false). For the full per-block
+        neighbor trace, call ``/api/reorgs/{block_number}``; for the
+        gzipped journal artifact, call
+        ``/api/reorgs/{block_number}/journal``.
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
         async def _load():
             rows = await asyncio.to_thread(state.storage.list_reorgs, limit=limit)
+            if journal_capture_dir is not None:
+                for row in rows:
+                    bn = row.get("block_number")
+                    row["has_journal"] = (
+                        bn is not None
+                        and find_artifact(journal_capture_dir, int(bn)) is not None
+                    )
+            else:
+                for row in rows:
+                    row["has_journal"] = False
             return {"count": len(rows), "reorgs": rows}
         payload = await _cached("reorgs", _REORGS_LIST_TTL, (limit,), _load)
         return JSONResponse(payload)
+
+    @app.api_route("/api/reorgs/{block_number}/journal", methods=["GET", "HEAD"])
+    async def api_reorg_journal(block_number: int) -> FileResponse:
+        """Sanitized journal trace around a reorg event.
+
+        Returns the gzipped JSONL artifact captured at fire time,
+        covering the ``monad-bft`` consensus stream from a few seconds
+        before the reorged block's wall-clock timestamp through a few
+        seconds after. Peer IPs from the wire-auth keepalive stream
+        and the local OTLP loopback are scrubbed at write time; the
+        rest of the consensus trace (validator pubkeys, block ids,
+        rounds, votes, base fees) is public chain data and stays
+        intact.
+
+        404 when no artifact exists — either the reorg pre-dates the
+        capture feature, or the journal had already rotated past the
+        event's window when the deferred snapshot ran.
+        """
+        if journal_capture_dir is None:
+            return JSONResponse(
+                {"error": "journal capture disabled"}, status_code=503
+            )
+        path = find_artifact(journal_capture_dir, block_number)
+        if path is None:
+            return JSONResponse(
+                {"error": "journal artifact not found"}, status_code=404
+            )
+        return FileResponse(
+            path,
+            media_type="application/gzip",
+            filename=f"reorg-{block_number}.jsonl.gz",
+        )
 
     @app.api_route("/api/reorgs/{block_number}", methods=["GET", "HEAD"])
     async def api_reorg_trace(
@@ -614,8 +696,26 @@ def build_app(
                     "blocks": [_sanitize_block_for_public(b) for b in trace["blocks"]],
                 }
             return trace
+
+        def _ttl(trace) -> float:
+            # An unknown block_number caches its 404 long — those don't
+            # spontaneously become reorgs.
+            if trace is None:
+                return _REORG_TRACE_TTL
+            # Truncated post-window means the tailer is still catching
+            # up to the reorged block's neighbours. Cache only briefly
+            # so a viewer who hits the endpoint at fire-time + 0.1s
+            # doesn't get stuck with a partial trace for 5 minutes.
+            blocks = trace.get("blocks") or []
+            highest_seen = blocks[-1]["block_number"] if blocks else None
+            post_complete = (
+                highest_seen is not None and highest_seen >= block_number + window
+            )
+            return _REORG_TRACE_TTL if post_complete else _REORG_TRACE_PARTIAL_TTL
+
         trace = await _cached(
-            "reorg_trace", _REORG_TRACE_TTL, (block_number, window, level), _load
+            "reorg_trace", _REORG_TRACE_TTL, (block_number, window, level), _load,
+            ttl_for_value=_ttl,
         )
         if trace is None:
             return JSONResponse(
