@@ -1603,11 +1603,37 @@ function updateIntegrity(d) {
     const count = document.getElementById("integrity-count");
     const label = document.getElementById("integrity-label");
     const detail = document.getElementById("integrity-detail");
+    const recent = document.getElementById("integrity-recent");
     const n = d.reorg_count ?? 0;
+    const recent24h = d.recent_reorgs_24h ?? 0;
     count.textContent = String(n);
     // Pluralize "reorg"/"reorgs" so n=1 reads cleanly ("1 reorg" not
     // "1 reorgs"). iter-5 audit §A3 polish item.
     label.textContent = `${n === 1 ? "reorg" : "reorgs"} observed since process start`;
+
+    // Recent-24h chip. Operationally more interesting than lifetime —
+    // single reorgs are background noise, recent activity is what an
+    // operator actually wants to see at a glance.
+    //
+    // Card colouring is driven by recent (not lifetime) for the same
+    // reason: a healthy node accumulates lifetime reorgs over time;
+    // colouring the card by lifetime would mean it stays coloured
+    // forever and loses signal value. Threshold for crit (3) matches
+    // the rule's default cluster threshold.
+    card.classList.remove("has-recent-reorg-warn", "has-recent-reorg-crit");
+    if (recent24h > 0) {
+        recent.hidden = false;
+        recent.textContent = `${recent24h} in last 24h`;
+        if (recent24h >= 3) {
+            card.classList.add("has-recent-reorg-crit");
+        } else {
+            card.classList.add("has-recent-reorg-warn");
+        }
+    } else {
+        recent.hidden = true;
+        recent.textContent = "";
+    }
+
     if (n === 0) {
         card.classList.remove("has-reorg");
         detail.textContent = d.blocks_seen
@@ -1994,15 +2020,29 @@ function isCriticalIncident(a) {
 // enough to still matter". Events older than this age stop pinning
 // the header health pill red and stop appearing in the incidents card.
 //
-// Why 24h: captures a full operator shift incl. an overnight incident
-// seen next morning; anything older belongs in the history view.
-// Why needed: point events (reorg, assertion) have no RECOVERED by
-// design, so without a time bound their last state = CRITICAL forever.
-const INCIDENT_FRESH_WINDOW_MS = 24 * 3600 * 1000;
+// Default 24h captures a full operator shift incl. an overnight
+// incident seen next morning; anything older belongs in the history
+// view. Per-rule overrides exist because some rules emit point events
+// (no RECOVERED by design) where 24h overstates how long the event
+// should colour the dashboard:
+//   * reorg — testnet sees a steady background rate of single-block
+//     reorgs (23 over multi-day window in 2026-04-19 retrospective);
+//     a 24h window means the pill is essentially always coloured.
+//     2h is enough for an operator coming back to the desk to see a
+//     recent cluster, but doesn't hold colour against background noise.
+const DEFAULT_INCIDENT_FRESH_WINDOW_MS = 24 * 3600 * 1000;
+const INCIDENT_FRESH_WINDOW_MS_BY_RULE = {
+    reorg: 2 * 3600 * 1000,
+};
+
+function freshWindowMsFor(rule) {
+    return INCIDENT_FRESH_WINDOW_MS_BY_RULE[rule || ""] ?? DEFAULT_INCIDENT_FRESH_WINDOW_MS;
+}
 
 function isFreshIncident(a, nowMs) {
     const ts = a.ts_ms || 0;
-    return ts > 0 && (nowMs - ts) <= INCIDENT_FRESH_WINDOW_MS;
+    if (ts <= 0) return false;
+    return (nowMs - ts) <= freshWindowMsFor(a.rule);
 }
 
 async function fetchProbes() {

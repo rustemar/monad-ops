@@ -62,6 +62,12 @@ class Snapshot:
     # so the dashboard can show "0 reorgs over N blocks" as a clear
     # green signal, not just the absence of data.
     reorg_count: int
+    # Reorgs observed in the last 24h (rolling). Distinct from the
+    # lifetime ``reorg_count`` so the dashboard can show a "recent (24h)"
+    # badge alongside the all-time number — single reorgs are background
+    # noise on testnet, the 24h count is the operationally interesting
+    # number for "should I be looking at this right now".
+    recent_reorgs_24h: int
     last_reorg_number: int | None
     last_reorg_old_id: str | None
     last_reorg_new_id: str | None
@@ -546,6 +552,14 @@ class State:
         last_reorg_old_id = reorg.last_reorg_old_id if reorg else None
         last_reorg_new_id = reorg.last_reorg_new_id if reorg else None
         last_reorg_ts_ms = reorg.last_reorg_ts_ms if reorg else None
+        # 24h rolling reorg count. Sourced from storage so it's correct
+        # across restarts; falls back to 0 when persistence is disabled.
+        if self._storage is not None:
+            recent_reorgs_24h = self._storage.count_reorgs_since(
+                time.time() - 24 * 3600
+            )
+        else:
+            recent_reorgs_24h = 0
 
         ref = self._reference
         reference_block = ref.block_number if ref else None
@@ -588,6 +602,7 @@ class State:
             gas_per_sec_effective_peak_1m=int(gas_eff_peak),
             gas_eff_peak_block=gas_eff_peak_block.block_number if gas_eff_peak_block else None,
             reorg_count=reorg_count,
+            recent_reorgs_24h=recent_reorgs_24h,
             last_reorg_number=last_reorg_number,
             last_reorg_old_id=last_reorg_old_id,
             last_reorg_new_id=last_reorg_new_id,

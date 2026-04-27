@@ -470,20 +470,71 @@ class TestReorgRule:
         assert rule.on_block(b) is None
         assert rule.reorg_count == 0
 
-    def test_different_id_at_same_number_fires_critical(self):
+    def test_single_reorg_defaults_to_warn(self):
+        """An isolated reorg is WARN, not CRITICAL — single-block reorgs
+        on testnet are background noise (23 over multi-day window in the
+        2026-04-19 retrospective). CRITICAL is reserved for clusters."""
         rule = ReorgRule()
         first = _block(100, block_id="0x" + "a" * 64)
         second = _block(100, block_id="0x" + "b" * 64)
         assert rule.on_block(first) is None
         ev = rule.on_block(second)
         assert ev is not None
-        assert ev.severity == Severity.CRITICAL
+        assert ev.severity == Severity.WARN
         assert ev.rule == "reorg"
         assert "100" in ev.detail
+        assert "Cluster" not in ev.detail
         assert rule.reorg_count == 1
         assert rule.last_reorg_number == 100
         assert rule.last_reorg_old_id == first.block_id
         assert rule.last_reorg_new_id == second.block_id
+
+    def test_cluster_threshold_escalates_to_critical(self):
+        """Once cluster_threshold reorgs land inside cluster_window_sec,
+        the next reorg is promoted to CRITICAL with a cluster note."""
+        # Tight window so the 4 events fall comfortably inside it.
+        rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
+        # block timestamps are 1ms apart in _block fixture; spread them
+        # to seconds so the cluster window arithmetic is clear.
+        import dataclasses
+        def at(n, sec, bid):
+            b = _block(n, block_id=bid)
+            return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
+        # 3 reorgs at 0, 60, 120 seconds — first two WARN, third CRITICAL.
+        rule.on_block(at(100, 0, "0xa"))
+        ev1 = rule.on_block(at(100, 10, "0xb"))
+        rule.on_block(at(200, 20, "0xc"))
+        ev2 = rule.on_block(at(200, 30, "0xd"))
+        rule.on_block(at(300, 40, "0xe"))
+        ev3 = rule.on_block(at(300, 50, "0xf"))
+        assert ev1.severity == Severity.WARN
+        assert ev2.severity == Severity.WARN
+        assert ev3.severity == Severity.CRITICAL
+        assert "Cluster" in ev3.detail
+        assert "3 reorgs" in ev3.detail
+
+    def test_cluster_window_eviction_drops_back_to_warn(self):
+        """Once old reorgs fall outside cluster_window_sec, the rule
+        de-escalates back to WARN — a cluster from yesterday should not
+        keep painting today's isolated reorg as CRITICAL."""
+        import dataclasses
+        rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
+        def at(n, sec, bid):
+            b = _block(n, block_id=bid)
+            return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
+        # 3 reorgs inside the window → CRITICAL on the 3rd.
+        rule.on_block(at(100, 0, "0xa"))
+        rule.on_block(at(100, 1, "0xb"))
+        rule.on_block(at(200, 2, "0xc"))
+        rule.on_block(at(200, 3, "0xd"))
+        rule.on_block(at(300, 4, "0xe"))
+        ev_crit = rule.on_block(at(300, 5, "0xf"))
+        assert ev_crit.severity == Severity.CRITICAL
+        # Now jump well past the cluster window — next reorg is alone.
+        rule.on_block(at(900, 10000, "0xg"))
+        ev_warn = rule.on_block(at(900, 10001, "0xh"))
+        assert ev_warn.severity == Severity.WARN
+        assert "Cluster" not in ev_warn.detail
 
     def test_counters_accumulate_across_multiple_reorgs(self):
         rule = ReorgRule()
@@ -501,9 +552,10 @@ class TestReorgRule:
         rule = ReorgRule(track_window=3)
         for n in [1, 2, 3]:
             rule.on_block(_block(n, block_id=f"0x{n:x}"))
-        # #3 is still in the window; a diverging id at #3 fires normally.
+        # #3 is still in the window; a diverging id at #3 fires normally
+        # — at WARN since this is a single, isolated reorg.
         ev = rule.on_block(_block(3, block_id="0xff3"))
-        assert ev is not None and ev.severity == Severity.CRITICAL
+        assert ev is not None and ev.severity == Severity.WARN
         assert rule.reorg_count == 1
 
         # Advance past #1's eviction. After blocks 4 and 5, _seen = {3,4,5}
@@ -557,6 +609,26 @@ class TestReorgRule:
         assert rule.reorg_count == 5
         assert rule.last_reorg_number is None
         assert rule.last_reorg_old_id is None
+
+    def test_bootstrap_recent_ts_preserves_cluster_state(self):
+        """Restart in the middle of a cluster must not drop severity back
+        to WARN — bootstrap rehydrates the cluster-window deque."""
+        import dataclasses
+        rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
+        rule.bootstrap(
+            count=2,
+            recent_ts_seconds=[1000.0, 1100.0],  # 2 reorgs already in window
+        )
+        # The third reorg inside the window should now escalate.
+        b1 = _block(500, block_id="0xpre")
+        b2 = _block(500, block_id="0xpost")
+        b1 = dataclasses.replace(b1, timestamp_ms=1_200_000)
+        b2 = dataclasses.replace(b2, timestamp_ms=1_201_000)
+        assert rule.on_block(b1) is None
+        ev = rule.on_block(b2)
+        assert ev is not None
+        assert ev.severity == Severity.CRITICAL
+        assert "Cluster" in ev.detail
 
 
 class TestReferenceLagRule:

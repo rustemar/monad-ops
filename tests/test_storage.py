@@ -339,6 +339,55 @@ def test_load_reorg_history_returns_count_and_last(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_count_reorgs_since_filters_by_ts_and_rule(tmp_path: Path) -> None:
+    """count_reorgs_since must include only rule='reorg' rows with
+    ts >= cutoff. Used by the dashboard's "recent (24h)" badge."""
+    storage = Storage(tmp_path / "state.db")
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.WARN, key="reorg:1:0xa",
+        title="x", detail="y",
+    ), ts=1000.0)
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.WARN, key="reorg:2:0xb",
+        title="x", detail="y",
+    ), ts=2000.0)
+    # Non-reorg alert at the same ts must not count.
+    storage.write_alert(AlertEvent(
+        rule="retry_spike", severity=Severity.WARN, key="rs:warn",
+        title="x", detail="y",
+    ), ts=2000.0)
+
+    assert storage.count_reorgs_since(0) == 2
+    assert storage.count_reorgs_since(1500.0) == 1
+    assert storage.count_reorgs_since(3000.0) == 0
+    storage.close()
+
+
+def test_list_reorg_timestamps_since_returns_sorted_seconds(tmp_path: Path) -> None:
+    """Used by ReorgRule bootstrap to rehydrate the cluster window. Must
+    return floats in ascending order so the rule's deque is internally
+    consistent with live event ordering."""
+    storage = Storage(tmp_path / "state.db")
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.WARN, key="reorg:1:0xa",
+        title="x", detail="y",
+    ), ts=1100.0)
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.WARN, key="reorg:2:0xb",
+        title="x", detail="y",
+    ), ts=1050.0)
+    storage.write_alert(AlertEvent(
+        rule="retry_spike", severity=Severity.WARN, key="rs:warn",
+        title="x", detail="y",
+    ), ts=1075.0)
+
+    out = storage.list_reorg_timestamps_since(1000.0)
+    assert out == [1050.0, 1100.0]
+    out = storage.list_reorg_timestamps_since(1090.0)
+    assert out == [1100.0]
+    storage.close()
+
+
 def test_state_bootstrap_alerts_from_storage(tmp_path: Path) -> None:
     """State.bootstrap_alerts_from_storage() rehydrates the in-memory
     alerts deque after a restart, so the dashboard "recent alerts"
