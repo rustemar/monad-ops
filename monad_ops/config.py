@@ -62,6 +62,22 @@ class ReferenceLagRuleConfig(BaseModel):
     window: int = 2
 
 
+class ReorgRuleConfig(BaseModel):
+    """Cluster-based severity for the reorg detector.
+
+    Default behaviour: a single reorg is WARN. Three reorgs inside a
+    30-minute window escalate to CRITICAL. Tuned against the 23-reorg
+    multi-day window from 2026-04-19, where five clusters carried the
+    operationally-interesting signal and isolated events were noise.
+    """
+    cluster_window_sec: int = 30 * 60
+    cluster_threshold: int = 3
+    # Window used by the dashboard to count "recent reorgs" alongside the
+    # lifetime counter. Decoupled from cluster_window_sec on purpose: the
+    # operator wants a 24h overview even when no cluster is active.
+    recent_window_sec: int = 24 * 3600
+
+
 class DedupConfig(BaseModel):
     cooldown_sec: int = 300
 
@@ -70,6 +86,7 @@ class RulesConfig(BaseModel):
     stall: StallRuleConfig = StallRuleConfig()
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
     reference_lag: ReferenceLagRuleConfig = ReferenceLagRuleConfig()
+    reorg: ReorgRuleConfig = ReorgRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

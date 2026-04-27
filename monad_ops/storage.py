@@ -521,6 +521,36 @@ class Storage:
             for r in rows
         ]
 
+    def count_reorgs_since(self, since_ts: float) -> int:
+        """Count reorg alerts with ``ts >= since_ts``.
+
+        Used by the dashboard's "recent reorgs" badge — it asks "how many
+        reorgs in the last 24h?" without scanning the full alert history.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM alerts "
+                "WHERE rule = 'reorg' AND ts >= ?",
+                (float(since_ts),),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def list_reorg_timestamps_since(self, since_ts: float) -> list[float]:
+        """Return ``ts`` (unix seconds) of reorg alerts since ``since_ts``.
+
+        Used by ReorgRule to rehydrate its cluster-detection window after
+        a process restart — without it, the next reorg post-restart would
+        always be classified as a single (WARN) event even when several
+        already fired inside the cluster window.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts FROM alerts "
+                "WHERE rule = 'reorg' AND ts >= ? ORDER BY ts ASC",
+                (float(since_ts),),
+            ).fetchall()
+        return [float(r["ts"]) for r in rows]
+
     def load_reorg_history(self) -> tuple[int, "StoredAlert | None"]:
         """Return (total reorg count, latest reorg alert) for ReorgRule bootstrap.
 
