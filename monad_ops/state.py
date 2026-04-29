@@ -17,6 +17,7 @@ from threading import Lock
 
 from monad_ops.collector.probes import ProbeResult
 from monad_ops.collector.reference_rpc import ReferenceSample
+from monad_ops.collector.version import VersionStatus
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
@@ -115,6 +116,10 @@ class State:
         self._alert_ts: deque[float] = deque(maxlen=_ALERT_BUFFER)
         self._probes: dict[str, ProbeResult] = {}
         self._probes_ran_at: float | None = None
+        # Version-watch snapshot. Populated by version_loop in cli.py;
+        # surfaced via /api/version for the dashboard tile.
+        self._version: VersionStatus | None = None
+        self._version_checked_at: float | None = None
         self._started_at = time.time()
         self._blocks_seen_total = 0
         self._storage = storage
@@ -461,6 +466,15 @@ class State:
     def probes(self) -> tuple[list[ProbeResult], float | None]:
         with self._lock:
             return list(self._probes.values()), self._probes_ran_at
+
+    def set_version(self, status: VersionStatus) -> None:
+        with self._lock:
+            self._version = status
+            self._version_checked_at = time.time()
+
+    def version(self) -> tuple[VersionStatus | None, float | None]:
+        with self._lock:
+            return self._version, self._version_checked_at
 
     # -- reads (from API) --------------------------------------------------
     def recent_blocks(self, limit: int = 500) -> list[ExecBlock]:

@@ -24,6 +24,7 @@ from monad_ops.collector.journal import TailError, tail_execution_blocks
 from monad_ops.collector.probes import run_all_probes
 from monad_ops.collector.epoch_probe import probe_epoch, scan_epoch_history
 from monad_ops.collector.reference_rpc import fetch_reference_block
+from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
@@ -42,6 +43,7 @@ from monad_ops.rules import (
     RetrySpikeRule,
     Severity,
     StallRule,
+    VersionRule,
 )
 from monad_ops.state import State
 from monad_ops.storage import Storage
@@ -536,6 +538,52 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             # viewer requests; cold hits on wide windows are rare enough.
             await asyncio.sleep(60)
 
+    async def version_loop():
+        """Hourly check that the local monad package matches what apt
+        repo offers. INFO/GREEN alert on first sight + daily reminder
+        while outstanding + RECOVERED when the operator upgrades.
+
+        Independent of `probe_loop` because the standard probe path
+        re-fires WARN/CRITICAL on every tick while a probe is non-ok.
+        Version availability is a transition signal, not a sustained
+        condition — it wants exactly one alert per release plus a
+        capped reminder cadence.
+
+        ``enabled=false`` disables the loop entirely (no fetch, no
+        alerts, no /api/version data) — useful where monad isn't
+        installed via apt.
+        """
+        cfg = config.version_watch
+        if not cfg.enabled:
+            log.info("version_watch.disabled")
+            return
+        rule = VersionRule(reminder_interval_sec=cfg.reminder_interval_sec)
+        # Stagger startup so the first fetch doesn't compete with
+        # bootstrap reads + the reference-RPC probe.
+        await asyncio.sleep(20)
+        while True:
+            try:
+                status = await fetch_version_status(
+                    package=cfg.package,
+                    packages_url=cfg.packages_url,
+                    skip_substrings=tuple(cfg.skip_substrings),
+                    timeout_sec=cfg.timeout_sec,
+                )
+                state.set_version(status)
+                ev = rule.on_status(status)
+                if ev is not None:
+                    await sink.deliver(ev)
+                log.debug(
+                    "version_watch.tick",
+                    installed=status.installed,
+                    latest=status.latest,
+                    status=status.status,
+                    error=status.error,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.error("version_watch.error", exc=str(e))
+            await asyncio.sleep(max(60, int(cfg.poll_interval_sec)))
+
     async def contract_hour_loop():
         """Keep the `contract_hour` rollup current.
 
@@ -592,7 +640,11 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     epoch = asyncio.create_task(epoch_loop(), name="epoch_probe")
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
     bft_flush = asyncio.create_task(bft_flush_loop(), name="bft_flush")
-    tasks: set[asyncio.Task] = {collector, http, probes, reference, epoch, consensus, bft_flush}
+    version_task = asyncio.create_task(version_loop(), name="version_watch")
+    tasks: set[asyncio.Task] = {
+        collector, http, probes, reference, epoch, consensus, bft_flush,
+        version_task,
+    }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
         tasks.add(

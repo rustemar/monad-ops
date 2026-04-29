@@ -17,6 +17,10 @@ const BLOCKS_INTERVAL = 5000;
 const CONTRACTS_INTERVAL = 15000;
 const INCIDENTS_INTERVAL = 5000;
 const PROBES_INTERVAL = 15000;
+// version_watch loop runs hourly server-side; tile re-fetches every 60s
+// so a fresh apt-repo publication is picked up within a minute of the
+// next hourly probe tick instead of waiting for a tab reload.
+const VERSION_INTERVAL = 60000;
 
 // Inflight-dedup per endpoint: when setInterval fires while a previous
 // request is still in flight (slow network, backgrounded tab releasing
@@ -2078,6 +2082,72 @@ function renderProbes(probes, ranAt) {
     }).join("");
 }
 
+async function fetchVersion() {
+    try {
+        const r = await pollFetch("version", "/api/version");
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        renderVersion(d);
+        _versionLatest = d;
+    } catch (e) { /* swallow */ }
+}
+
+// Cached so openPopup("version") can render immediately from the same
+// payload the tile last saw, without re-fetching. Refreshed by every
+// fetchVersion tick.
+let _versionLatest = null;
+
+function renderVersion(d) {
+    const row = document.getElementById("version-row");
+    const statusEl = document.getElementById("version-status");
+    const lineEl = document.getElementById("version-line");
+    const extrasEl = document.getElementById("version-extras");
+    if (!row || !statusEl || !lineEl) return;
+
+    if (!d || !d.enabled) {
+        statusEl.className = "status unknown";
+        statusEl.textContent = "off";
+        lineEl.className = "version-line";
+        lineEl.textContent = "version_watch disabled in config";
+        extrasEl.textContent = "";
+        return;
+    }
+
+    if (d.status === "up_to_date") {
+        statusEl.className = "status ok";
+        statusEl.textContent = "current";
+        lineEl.className = "version-line";
+        lineEl.innerHTML = `<span class="v-installed">${escapeHTML(d.installed || "?")}</span>`;
+        extrasEl.textContent = d.checked_at
+            ? `checked ${fmtSince(d.checked_at * 1000)}`
+            : "";
+        return;
+    }
+
+    if (d.status === "update_available") {
+        statusEl.className = "status update";
+        statusEl.textContent = "update";
+        lineEl.className = "version-line update";
+        lineEl.innerHTML = (
+            `<span class="v-installed">${escapeHTML(d.installed || "?")}</span>`
+            + `<span class="sep">→</span>`
+            + `<span class="v-latest">${escapeHTML(d.latest || "?")}</span>`
+        );
+        const extrasCount = (d.extras_newer || []).length;
+        extrasEl.textContent = extrasCount > 1
+            ? `${extrasCount} versions ahead`
+            : "click for details";
+        return;
+    }
+
+    // unknown / not yet observed
+    statusEl.className = "status unknown";
+    statusEl.textContent = "unknown";
+    lineEl.className = "version-line";
+    lineEl.textContent = d.error || "checking apt repo…";
+    extrasEl.textContent = "";
+}
+
 async function fetchIncidents() {
     try {
         // Refresh journal-availability alongside alerts so the 📥 journal
@@ -2316,6 +2386,7 @@ fetchBaseFeeSeries();
 fetchContracts();
 fetchIncidents();
 fetchProbes();
+fetchVersion();
 fetchStressEvents();
 // Throttle polling when the tab is hidden to save battery and reduce
 // rate-limit pressure (B5). On refocus, immediately refresh and
@@ -2336,6 +2407,7 @@ _schedule(fetchBaseFeeSeries, BLOCKS_INTERVAL);
 _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);
+_schedule(fetchVersion, VERSION_INTERVAL);
 _schedule(fetchStressEvents, INCIDENTS_INTERVAL);
 
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
@@ -2510,6 +2582,18 @@ function _popupInit() {
         if (e.key === "Escape") { e.stopPropagation(); closePopup(); }
     });
 
+    // Version tile is global (no key) — open the popup with a sentinel.
+    const versionRow = document.getElementById("version-row");
+    if (versionRow) {
+        versionRow.addEventListener("click", () => openPopup("version", "node"));
+        versionRow.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openPopup("version", "node");
+            }
+        });
+    }
+
     // Copy-address. Only visible on contract popups; hidden in the default
     // openPopup() reset and re-shown by _renderContractPopup once we know
     // the address. navigator.clipboard requires HTTPS or localhost — ops.
@@ -2607,7 +2691,9 @@ async function openPopup(kind, key, opts = {}) {
     _popup.sub.textContent = "";
     _popup.title.textContent = kind === "block" ? "Block detail"
                              : kind === "contract" ? "Contract detail"
-                             : kind === "reorg" ? "Reorg trace" : "Detail";
+                             : kind === "reorg" ? "Reorg trace"
+                             : kind === "version" ? "Node version"
+                             : "Detail";
     // Hide + reset the copy button on every open; the contract-popup
     // renderer re-enables it once the address is known.
     if (_popup.copyBtn) {
@@ -2639,6 +2725,13 @@ async function openPopup(kind, key, opts = {}) {
             if (r.status === 404) { _popupError(`no reorg alert for block #${key}`); return; }
             if (!r.ok) throw new Error(r.statusText);
             _renderReorgPopup(await r.json());
+        } else if (kind === "version") {
+            // The tile already has the data from the last fetchVersion
+            // tick. Re-fetch on open so a viewer who lands directly on
+            // ?popup=version (deep link) gets a fresh payload too.
+            const r = await fetch("/api/version", { signal });
+            if (!r.ok) throw new Error(r.statusText);
+            _renderVersionPopup(await r.json());
         } else {
             _popupError("unknown popup kind");
         }
@@ -2994,6 +3087,63 @@ function _renderReorgPopup(d) {
         <a href="${MONADSCAN_BASE}/block/${d.block_number}" target="_blank" rel="noopener noreferrer">MonadScan block →</a>
         <a href="/alerts?severity=critical" class="footlink">alerts history →</a>
         <span class="foot-note">point event · no RECOVERED by design</span>
+    `;
+}
+
+// ---- popup render: version -------------------------------------------
+function _renderVersionPopup(d) {
+    _popup.body.className = "popup-body";
+    _popup.title.textContent = "Node version";
+    const checkedLabel = d.checked_at
+        ? `${_fmtLocal(d.checked_at * 1000)} ${_tzShort} · ${fmtSince(d.checked_at * 1000)}`
+        : "not checked yet";
+    _popup.sub.textContent = `${escapeHTML(d.package || "?")} package · ${checkedLabel}`;
+
+    let summaryBody;
+    if (!d.enabled) {
+        summaryBody = `<div class="pk-sub">version_watch is disabled in config.toml.</div>`;
+    } else if (d.status === "up_to_date") {
+        summaryBody = `
+            <div class="pk-grid">
+                <div class="pk-cell"><div class="pk-label">installed</div>
+                    <div class="pk-val">${escapeHTML(d.installed || "?")}</div>
+                    <div class="pk-sub">matches latest stable in repo</div></div>
+                <div class="pk-cell"><div class="pk-label">status</div>
+                    <div class="pk-val ok">up to date</div></div>
+            </div>`;
+    } else if (d.status === "update_available") {
+        summaryBody = `
+            <div class="pk-grid">
+                <div class="pk-cell"><div class="pk-label">installed</div>
+                    <div class="pk-val">${escapeHTML(d.installed || "?")}</div></div>
+                <div class="pk-cell"><div class="pk-label">latest</div>
+                    <div class="pk-val">${escapeHTML(d.latest || "?")}</div></div>
+                <div class="pk-cell"><div class="pk-label">status</div>
+                    <div class="pk-val">update available</div>
+                    <div class="pk-sub">apt repo is ahead of the local node</div></div>
+            </div>`;
+    } else {
+        summaryBody = `<div class="pk-sub">${escapeHTML(d.error || "version probe has not produced a result yet")}</div>`;
+    }
+
+    const extras = (d.extras_newer || []).slice(0, 12);
+    const extrasBlock = extras.length
+        ? `
+            <div class="pk-section">all newer versions in repo</div>
+            <ul class="pk-version-list">
+                ${extras.map(v => `<li><code>${escapeHTML(v)}</code></li>`).join("")}
+            </ul>`
+        : "";
+
+    _popup.body.innerHTML = `
+        ${summaryBody}
+        ${extrasBlock}
+        <div class="pk-section">repo</div>
+        <div class="pk-sub"><code>${escapeHTML(d.packages_url || "")}</code></div>
+    `;
+
+    _popup.foot.innerHTML = `
+        <span class="foot-note">read release notes + back up keys before upgrading · if <code>apt-mark hold monad</code> is set, run <code>apt-mark unhold monad</code> first</span>
     `;
 }
 
