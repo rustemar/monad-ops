@@ -124,6 +124,31 @@ class LabelsConfig(BaseModel):
     path: str = "labels.json"
 
 
+class VersionWatchConfig(BaseModel):
+    """Hourly check that the locally installed monad package is current.
+
+    Polls the configured apt repo's ``Packages.gz`` (no apt-get update
+    or sudo required), compares against ``dpkg-query``, and emits an
+    INFO/GREEN alert when a newer stable version appears. A daily
+    reminder fires while the upgrade is outstanding; a RECOVERED fires
+    when the operator picks it up.
+
+    ``enabled=false`` disables the loop entirely — useful on a host
+    where the package wasn't installed via apt.
+    """
+    enabled: bool = True
+    package: str = "monad"
+    packages_url: str = (
+        "https://pkg.category.xyz/dists/noble/main/binary-amd64/Packages.gz"
+    )
+    poll_interval_sec: int = 3600
+    reminder_interval_sec: int = 24 * 3600
+    skip_substrings: list[str] = Field(
+        default_factory=lambda: ["-debug", "-preview", "~preview", "~rc", "-rc"]
+    )
+    timeout_sec: float = 20.0
+
+
 class RetentionConfig(BaseModel):
     """Background pruning of historical rows.
 
@@ -154,6 +179,7 @@ class Config(BaseModel):
     enrichment: EnrichmentConfig = EnrichmentConfig()
     labels: LabelsConfig = LabelsConfig()
     retention: RetentionConfig = RetentionConfig()
+    version_watch: VersionWatchConfig = VersionWatchConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:

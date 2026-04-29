@@ -4,6 +4,7 @@ from monad_ops.rules.reference_lag import ReferenceLagRule
 from monad_ops.rules.reorg import ReorgRule
 from monad_ops.rules.retry_spike import RetrySpikeRule
 from monad_ops.rules.stall import StallRule
+from monad_ops.rules.version import VersionRule
 
 __all__ = [
     "AlertEvent",
@@ -14,5 +15,6 @@ __all__ = [
     "RetrySpikeRule",
     "Severity",
     "StallRule",
+    "VersionRule",
     "code_color_for",
 ]

@@ -337,6 +337,21 @@
         </section>
 
         <section class="grid grid-1">
+            <div class="card" id="version-card">
+                <div class="card-header">
+                    <span class="card-title">node version</span>
+                    <span class="card-hint" id="version-hint">installed monad package vs. apt repo · hourly</span>
+                </div>
+                <div class="version-row" id="version-row" tabindex="0" role="button"
+                     aria-label="open node version detail">
+                    <span class="version-status" id="version-status">…</span>
+                    <span class="version-line" id="version-line">checking apt repo…</span>
+                    <span class="version-extras" id="version-extras"></span>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
             <div class="card" id="integrity-card">
                 <div class="card-header">
                     <span class="card-title">chain integrity</span>

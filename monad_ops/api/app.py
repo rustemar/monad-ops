@@ -117,6 +117,7 @@ def build_app(
     _BLOCKS_TTL = 2.0         # in-memory recent-blocks tail
     _ALERTS_TTL = 5.0         # in-memory recent-alerts tail
     _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
+    _VERSION_TTL = 30.0       # version_watch loop runs hourly; cache short so a fresh upgrade clears fast
     _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
     _STRESS_EVENTS_TTL = 10.0 # alerts table append-only; live envelope updates need fresh reads
     _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable
@@ -824,6 +825,47 @@ def build_app(
                 ],
             }
         payload = await _cached("probes_public", _PROBES_TTL, (), _load)
+        return JSONResponse(payload)
+
+    @app.api_route("/api/version", methods=["GET", "HEAD"])
+    async def api_version() -> JSONResponse:
+        """Locally-installed monad package vs. apt repo.
+
+        Powers the "node version" tile on the dashboard. Returns the
+        same shape whether the operator is up to date, has an upgrade
+        pending, or the probe could not run — the UI special-cases
+        each ``status`` value.
+
+        Public-safe: contains only package name + version strings + the
+        configured repo URL — no host paths, no PIDs, no metadata about
+        the host OS.
+        """
+        async def _load():
+            status, checked_at = state.version()
+            if status is None:
+                return {
+                    "package": config.version_watch.package,
+                    "installed": None,
+                    "latest": None,
+                    "extras_newer": [],
+                    "status": "unknown",
+                    "error": "version_watch has not run yet",
+                    "checked_at": None,
+                    "packages_url": config.version_watch.packages_url,
+                    "enabled": config.version_watch.enabled,
+                }
+            return {
+                "package": status.package,
+                "installed": status.installed,
+                "latest": status.latest,
+                "extras_newer": list(status.extras_newer),
+                "status": status.status,
+                "error": status.error,
+                "checked_at": checked_at,
+                "packages_url": config.version_watch.packages_url,
+                "enabled": config.version_watch.enabled,
+            }
+        payload = await _cached("version", _VERSION_TTL, (), _load)
         return JSONResponse(payload)
 
     @app.api_route("/api/contracts/top_retried", methods=["GET", "HEAD"])
