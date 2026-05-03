@@ -262,6 +262,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         bft_loaded = state.bootstrap_bft_from_storage(limit=360)
         if bft_loaded:
             log.info("bootstrap.bft_loaded", minutes=bft_loaded)
+        # Carry forward the previous run's empirically-learned epoch
+        # length so the progress bar isn't blank for the ~minute it
+        # takes the journal backfill to seed `_epochs`. The fresh
+        # bracketed observation (when it arrives) overrides the carried
+        # value silently.
+        state.bootstrap_carried_epoch_length()
     base_sink = _build_sink(config)
     sink: AlertSink = _RecordingSink(base_sink, state)
 

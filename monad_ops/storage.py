@@ -182,6 +182,18 @@ CREATE TABLE IF NOT EXISTS bft_base_fee (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bft_base_fee_ts ON bft_base_fee (ts_ms);
+
+-- Lightweight key/value table for small operator-state values that
+-- would be wasteful to persist into a dedicated table. Currently used
+-- to carry the empirically-learned epoch_typical_length across
+-- restarts so the dashboard isn't blank for the ~minute it takes the
+-- backfill task to seed `_epochs` after a service restart that
+-- happened to land at an epoch boundary.
+CREATE TABLE IF NOT EXISTS meta (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_ts INTEGER NOT NULL
+);
 """
 
 _HOUR_MS = 3_600_000
@@ -845,6 +857,24 @@ class Storage:
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM blocks").fetchone()
         return int(row["n"])
+
+    def get_meta(self, key: str) -> str | None:
+        """Read a meta-table value, or None if the key isn't set."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (key,)
+            ).fetchone()
+        return None if row is None else str(row["value"])
+
+    def put_meta(self, key: str, value: str) -> None:
+        """Upsert a meta-table value with current wall-clock ts."""
+        ts = int(time.time())
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO meta(key, value, updated_ts) VALUES (?,?,?)",
+                (key, value, ts),
+            )
+            self._conn.commit()
 
     def sampled_blocks(
         self,
