@@ -62,6 +62,24 @@ class ReferenceLagRuleConfig(BaseModel):
     window: int = 2
 
 
+class BlockProcessingSlowdownRuleConfig(BaseModel):
+    """Predictive rule on rolling median ``total_us``.
+
+    Fires before a stall: while the node still produces blocks, but
+    per-block processing time has shifted into stress territory.
+    Defaults calibrated against the 2026-04-20 stress test (median
+    1.2 ms quiet → 24.6 ms mid-stress → 81.3 ms peak):
+
+      ``warn_us`` 10 ms  : ~5× quiet baseline, catches load shift early
+      ``critical_us`` 50 ms : ~25× baseline, deep into stress territory
+                              but well below 400 ms inter-block budget
+      ``window`` 120     : ~48 s at 2.5 blk/s, robust to single outliers
+    """
+    window: int = 120
+    warn_us: int = 10_000
+    critical_us: int = 50_000
+
+
 class ReorgRuleConfig(BaseModel):
     """Cluster-based severity for the reorg detector.
 
@@ -87,6 +105,7 @@ class RulesConfig(BaseModel):
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
     reference_lag: ReferenceLagRuleConfig = ReferenceLagRuleConfig()
     reorg: ReorgRuleConfig = ReorgRuleConfig()
+    block_processing_slowdown: BlockProcessingSlowdownRuleConfig = BlockProcessingSlowdownRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

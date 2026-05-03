@@ -1,4 +1,5 @@
 from monad_ops.rules.assertion import AssertionRule
+from monad_ops.rules.block_processing_slowdown import BlockProcessingSlowdownRule
 from monad_ops.rules.events import AlertEvent, CodeColor, Severity, code_color_for
 from monad_ops.rules.reference_lag import ReferenceLagRule
 from monad_ops.rules.reorg import ReorgRule
@@ -9,6 +10,7 @@ from monad_ops.rules.version import VersionRule
 __all__ = [
     "AlertEvent",
     "AssertionRule",
+    "BlockProcessingSlowdownRule",
     "CodeColor",
     "ReferenceLagRule",
     "ReorgRule",

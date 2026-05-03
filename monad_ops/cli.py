@@ -38,6 +38,7 @@ from monad_ops.replay_export import assemble_window_data, render_static_html
 from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
+    BlockProcessingSlowdownRule,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
@@ -100,6 +101,11 @@ async def _collector_loop(
         critical_pct=config.rules.retry_spike.critical_pct,
         min_window_tx_avg=config.rules.retry_spike.min_window_tx_avg,
     )
+    bps = BlockProcessingSlowdownRule(
+        window=config.rules.block_processing_slowdown.window,
+        warn_us=config.rules.block_processing_slowdown.warn_us,
+        critical_us=config.rules.block_processing_slowdown.critical_us,
+    )
     assertion = AssertionRule()
     reorg = ReorgRule(
         cluster_window_sec=config.rules.reorg.cluster_window_sec,
@@ -132,7 +138,9 @@ async def _collector_loop(
             if last is not None:
                 import re as _re
                 m = _re.match(
-                    r"Block #(\d+) id changed: (\S+) → (\S+)\.",
+                    # Tolerates both pre-2026-05-03 alerts ("id changed")
+                    # and the post-reframe format ("exec-layer id changed").
+                    r"Block #(\d+) (?:exec-layer )?id changed: (\S+) → (\S+)\.",
                     last.detail,
                 )
                 if m:
@@ -199,7 +207,8 @@ async def _collector_loop(
             stall_ev = stall.on_block(block)
             retry_ev = retry.on_block(block)
             reorg_ev = reorg.on_block(block)
-            for ev in _filter_none([stall_ev, retry_ev, reorg_ev]):
+            bps_ev = bps.on_block(block)
+            for ev in _filter_none([stall_ev, retry_ev, reorg_ev, bps_ev]):
                 await sink.deliver(ev)
             # Schedule a deferred journal snapshot whenever the reorg
             # rule fires. Fire-and-forget: the capture coroutine sleeps
