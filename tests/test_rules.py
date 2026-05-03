@@ -1,8 +1,10 @@
+from monad_ops.collector.process_restart import InvocationSnapshot
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules import (
     BlockProcessingSlowdownRule,
     CodeColor,
     NetworkLayerSignalRule,
+    ProcessRestartRule,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
@@ -1015,6 +1017,106 @@ class TestNetworkLayerSignalRule:
         ev = rule.on_tick(now_sec=401.5)
         assert ev is not None
         assert ev.severity == Severity.RECOVERED
+
+
+class TestProcessRestartRule:
+    """systemd-InvocationID change detector. First sight silent;
+    subsequent change fires WARN. Probe error soft-ignored."""
+
+    def _snap(
+        self,
+        service: str,
+        invocation_id: str | None = "abc",
+        sub_state: str = "running",
+        active_state: str = "active",
+        error: str | None = None,
+    ) -> InvocationSnapshot:
+        return InvocationSnapshot(
+            service=service,
+            invocation_id=invocation_id,
+            sub_state=sub_state,
+            active_state=active_state,
+            error=error,
+        )
+
+    def test_first_sight_is_silent(self):
+        """Bootstrap on monad-ops's own startup must not page —
+        first observation is always silent."""
+        rule = ProcessRestartRule()
+        ev = rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        assert ev is None
+        assert rule._last["monad-bft"] == "aaa1"
+
+    def test_unchanged_invocation_is_silent(self):
+        """Stable InvocationID across polls = no event."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        for _ in range(5):
+            assert rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1")) is None
+
+    def test_changed_invocation_fires_warn(self):
+        """A different InvocationID on a subsequent poll = restart event."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        ev = rule.on_snapshot(self._snap("monad-bft", invocation_id="bbb2"))
+        assert ev is not None
+        assert ev.severity == Severity.WARN
+        assert ev.rule == "process_restart"
+        assert ev.key == "process_restart:monad-bft"
+        assert "monad-bft" in ev.detail
+        assert "active/running" in ev.detail
+
+    def test_probe_error_does_not_change_state(self):
+        """systemctl timeout / non-zero rc must not corrupt the rule's
+        last-seen map. Reusable lesson from the 2026-04-20 event-loop
+        freeze that produced phantom probe-services criticals."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        ev = rule.on_snapshot(self._snap(
+            "monad-bft", invocation_id=None, error="timeout",
+        ))
+        assert ev is None
+        # Original ID still recorded — the next real sample with the
+        # SAME id should stay silent (not fire as if it had changed).
+        ev = rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        assert ev is None
+
+    def test_missing_invocation_field_treated_as_error(self):
+        """Some systemctl edge cases (unit not loaded, very old systemd)
+        return zero rc but no InvocationID line. Treat that the same
+        as a probe error — no state change, no event."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="aaa1"))
+        ev = rule.on_snapshot(self._snap(
+            "monad-bft", invocation_id=None, error=None,
+        ))
+        assert ev is None
+
+    def test_multiple_services_tracked_independently(self):
+        """A restart on monad-rpc must not affect monad-bft state and
+        vice versa. Per-service alert keys also keep the deduping sink
+        from collapsing concurrent restarts."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="bft-1"))
+        rule.on_snapshot(self._snap("monad-rpc", invocation_id="rpc-1"))
+        # Restart only RPC.
+        ev_bft = rule.on_snapshot(self._snap("monad-bft", invocation_id="bft-1"))
+        ev_rpc = rule.on_snapshot(self._snap("monad-rpc", invocation_id="rpc-2"))
+        assert ev_bft is None
+        assert ev_rpc is not None
+        assert ev_rpc.severity == Severity.WARN
+        assert ev_rpc.key == "process_restart:monad-rpc"
+
+    def test_consecutive_restarts_each_fire(self):
+        """Each distinct restart in sequence must fire — flap detection
+        is a downstream concern (deduping sink + cooldown), not the
+        rule's job."""
+        rule = ProcessRestartRule()
+        rule.on_snapshot(self._snap("monad-bft", invocation_id="a"))
+        ev1 = rule.on_snapshot(self._snap("monad-bft", invocation_id="b"))
+        ev2 = rule.on_snapshot(self._snap("monad-bft", invocation_id="c"))
+        assert ev1 is not None and ev1.severity == Severity.WARN
+        assert ev2 is not None and ev2.severity == Severity.WARN
 
 
 class TestCodeColor:

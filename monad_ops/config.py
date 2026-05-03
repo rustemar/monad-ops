@@ -62,6 +62,15 @@ class ReferenceLagRuleConfig(BaseModel):
     window: int = 2
 
 
+class ProcessRestartRuleConfig(BaseModel):
+    """Service-restart detector via systemd InvocationID polling.
+
+    Per-service tracking — fires WARN on any change between polls. Uses
+    the same service list as ``probe_services`` (config.node.services).
+    """
+    poll_interval_sec: int = 60
+
+
 class NetworkLayerSignalRuleConfig(BaseModel):
     """Aggregate rate of monad-bft network-layer error events.
 
@@ -122,6 +131,7 @@ class RulesConfig(BaseModel):
     reorg: ReorgRuleConfig = ReorgRuleConfig()
     block_processing_slowdown: BlockProcessingSlowdownRuleConfig = BlockProcessingSlowdownRuleConfig()
     network_layer_signal: NetworkLayerSignalRuleConfig = NetworkLayerSignalRuleConfig()
+    process_restart: ProcessRestartRuleConfig = ProcessRestartRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 
