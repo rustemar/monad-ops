@@ -250,6 +250,7 @@ def build_app(
                 "gas_eff_peak_block": snap.gas_eff_peak_block,
                 "reorg_count": snap.reorg_count,
                 "recent_reorgs_24h": snap.recent_reorgs_24h,
+                "cluster_reorgs_24h": snap.cluster_reorgs_24h,
                 "last_reorg_number": snap.last_reorg_number,
                 "last_reorg_old_id": snap.last_reorg_old_id,
                 "last_reorg_new_id": snap.last_reorg_new_id,

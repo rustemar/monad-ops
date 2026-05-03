@@ -1811,13 +1811,20 @@ function updateIntegrity(d) {
     // (matches `cluster_threshold` default of 3) so the card severity
     // tracks the rule severity rather than a separate scale.
     card.classList.remove("has-recent-reorg-warn", "has-recent-reorg-crit");
+    const cluster24h = d.cluster_reorgs_24h ?? 0;
     if (recent24h > 0) {
         recent.hidden = false;
-        recent.textContent = `${recent24h} in last 24h`;
-        if (recent24h >= 3) {
+        // Show cluster breakdown alongside total — operator can tell at a
+        // glance whether the day's count is single-event noise vs actual
+        // cluster activity. cluster_reorgs_24h counts WARN-tier events only.
+        recent.textContent = cluster24h > 0
+            ? `${recent24h} in last 24h · ${cluster24h} in clusters`
+            : `${recent24h} in last 24h`;
+        if (cluster24h >= 1) {
+            // Any cluster event → orange tint; single divergences alone
+            // stay neutral. Card severity tracks rule severity directly.
             card.classList.add("has-recent-reorg-warn");
         }
-        // 1–2 events = single INFO divergences; chip stays neutral.
     } else {
         recent.hidden = true;
         recent.textContent = "";
