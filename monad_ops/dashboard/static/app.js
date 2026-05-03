@@ -281,6 +281,81 @@ const rtpZonesPlugin = {
     },
 };
 
+
+// VTP zone plugin — same shape as rtpZonesPlugin, applied to the
+// validator-timeouts % chart. The previous implementation used Chart.js
+// `segment.borderColor` which colored each segment by the next point's
+// value — with per-minute granularity and rapid value swings (0% one
+// minute, 5% the next) this rendered as a barcode of vertical stripes
+// rather than a single readable line. Same clip-and-stroke pattern used
+// for retry_pct keeps the line single-colored per height-band, with the
+// boundary lining up exactly with the threshold values.
+const VTP_OK_HI    = 1;   // matches classifyValidatorTimeoutPct
+const VTP_MID_HI   = 3;   // Foundation target <3% boundary
+const VTP_WARN_HI  = 5;
+const VTP_OK_COLOR    = "#6bcf76";
+const VTP_MID_COLOR   = "#7eb6ff";  // cool blue — informational, not warning
+const VTP_WARN_COLOR  = "#ffb454";
+const VTP_CRIT_COLOR  = "#ff6b6b";
+const vtpZonesPlugin = {
+    id: "vtpZones",
+    beforeDatasetsDraw(chart) {
+        const { ctx, chartArea: { top, bottom, left, right },
+                scales: { y } } = chart;
+        if (!y) return;
+        const clamp = v => Math.max(top, Math.min(bottom, v));
+        ctx.save();
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        // Thin guide at 3 % — Foundation's <3% framing — so the eye
+        // anchors against the documented target without requiring the
+        // legend to translate amber/red bands.
+        const py = clamp(y.getPixelForValue(VTP_MID_HI));
+        ctx.strokeStyle = "rgba(126,182,255,0.30)";
+        ctx.beginPath();
+        ctx.moveTo(left, py);
+        ctx.lineTo(right, py);
+        ctx.stroke();
+        ctx.restore();
+    },
+    afterDatasetsDraw(chart) {
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data || !meta.data.length) return;
+        const { ctx, chartArea: { top, bottom, left, right },
+                scales: { y } } = chart;
+        if (!y) return;
+        const pts = meta.data.filter(
+            p => p && Number.isFinite(p.x) && Number.isFinite(p.y));
+        if (pts.length < 2) return;
+        const clamp = v => Math.max(top, Math.min(bottom, v));
+        const drawBand = (vLo, vHi, color) => {
+            const yTop = clamp(y.getPixelForValue(vHi));
+            const yBot = clamp(y.getPixelForValue(vLo));
+            ctx.save();
+            ctx.beginPath();
+            ctx.rect(left, yTop, right - left, yBot - yTop);
+            ctx.clip();
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) {
+                ctx.lineTo(pts[i].x, pts[i].y);
+            }
+            ctx.lineWidth = 1.75;
+            ctx.strokeStyle = color;
+            ctx.lineJoin = "round";
+            ctx.stroke();
+            ctx.restore();
+        };
+        drawBand(0,           VTP_OK_HI,    VTP_OK_COLOR);
+        drawBand(VTP_OK_HI,   VTP_MID_HI,   VTP_MID_COLOR);
+        drawBand(VTP_MID_HI,  VTP_WARN_HI,  VTP_WARN_COLOR);
+        // Cap at 100 to match the y suggestedMax / chartCommon scales —
+        // VTP rarely exceeds 6 % in practice but we don't want the
+        // top band to disappear if a freak event lands.
+        drawBand(VTP_WARN_HI, 100,          VTP_CRIT_COLOR);
+    },
+};
+
 // Short timezone abbreviation for the user's local tz (e.g. "MSK", "UTC+3").
 const _tzShort = (() => {
     const s = new Intl.DateTimeFormat(undefined, { timeZoneName: "short" })
@@ -1451,29 +1526,27 @@ function drawValTimeout(bins) {
         vtpChart.update("none");
         return;
     }
-    const colorAt = v =>
-        v == null ? "#7a7f86"
-        : v < 1 ? "#6bcf76"
-        : v < 3 ? "#5b9cf5"
-        : v < 5 ? "#ffb454"
-        : "#ff6b6b";
     vtpChart = new Chart(document.getElementById("chart-vtp"), {
         type: "line",
         data: {
             labels,
             datasets: [{
                 data,
-                borderColor: "rgba(150,180,210,0.9)",
-                segment: {
-                    borderColor: ctx => colorAt(ctx.p1.parsed.y),
-                },
+                // Native line stroke is hidden — vtpZonesPlugin draws
+                // the visible line clipped per height-band, same shape
+                // as the retry_pct chart. The previous segment-coloring
+                // approach broke down at per-minute granularity
+                // (rapid value swings made each adjacent segment land
+                // in a different zone, rendering as a barcode rather
+                // than a readable trend line).
+                borderColor: "rgba(0,0,0,0)",
                 fill: false,
                 borderWidth: 1.75,
                 tension: 0.2,
                 pointRadius: 0,
             }],
         },
-        plugins: [crosshairPlugin],
+        plugins: [vtpZonesPlugin, crosshairPlugin],
         options: {
             ...chartCommon,
             layout: { padding: { top: 36 } },
