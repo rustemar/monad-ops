@@ -2056,12 +2056,10 @@ function isFreshIncident(a, nowMs) {
 async function fetchProbes() {
     try {
         // /api/probes returns sanitized host-probe status (no host paths,
-        // no ulimit values, no exact percentages). Pre-2026-05-03 there
-        // was a two-tier split with `/public` as the sanitized variant;
-        // we keep calling the alias here only because the public nginx
-        // template still 404s `/api/probes` itself — once that block
-        // lifts, switch to `/api/probes` directly.
-        const r = await pollFetch("probes", "/api/probes/public");
+        // no ulimit values, no exact percentages). The pre-2026-05-03
+        // two-tier split with `/public` as the sanitized variant was
+        // retired same-day; the alias is kept only for legacy callers.
+        const r = await pollFetch("probes", "/api/probes");
         if (!r.ok) throw new Error(r.statusText);
         const d = await r.json();
         renderProbes(d.probes || [], d.ran_at);
