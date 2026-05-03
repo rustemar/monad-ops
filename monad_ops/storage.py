@@ -1443,15 +1443,14 @@ class Storage:
         from_ts_ms: int,
         to_ts_ms: int,
         *,
-        limit: int = 2000,
+        limit: int = 10_500,
     ) -> list[dict]:
         """Per-minute rows in [from_ts_ms, to_ts_ms] for the chart.
 
         Returns dicts (not BftMinute) with ``timeout_pct`` precomputed
         so the dashboard doesn't have to repeat the division per point.
-        Hard limit caps the response at 2000 rows (~33h of 1-min data) —
-        enough for any reasonable visible range; the API endpoint should
-        also bound from/to span before this is called.
+        Default limit holds the chart toolbar's 7d max (10080 buckets +
+        slack); the API endpoint also bounds from/to span before calling.
         """
         with self._lock:
             rows = self._conn.execute(
