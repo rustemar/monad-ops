@@ -120,46 +120,112 @@ def test_live_bracketed_overrides_carried() -> None:
 def test_observe_epoch_persists_typical_to_meta() -> None:
     """When a fresh bracketed observation produces a new typical, it
     must be written to the storage meta table so the next service
-    restart can carry it forward."""
+    restart can carry it forward. Current-epoch + first_seq are also
+    persisted on every new (epoch, first_seq) pair — they don't depend
+    on bracketing."""
     from unittest.mock import MagicMock
 
     storage = MagicMock()
     storage.get_meta.return_value = None
     s = State(storage=storage)
-    # Single epoch — no bracketing, no persist.
+    # Single epoch — no bracketing, but current_epoch + first_seq are
+    # still persisted (they're independent of typical_length).
     s.observe_epoch(epoch=556, seq_num=27_800_000)
-    s.observe_epoch(epoch=556, seq_num=27_849_876)
-    storage.put_meta.assert_not_called()
+    written_so_far = {c.args[0] for c in storage.put_meta.call_args_list}
+    assert "epoch_typical_length" not in written_so_far  # no bracketing yet
+    assert "epoch_current" in written_so_far
+    assert "epoch_current_first_seq" in written_so_far
     # Add bracketing context.
+    s.observe_epoch(epoch=556, seq_num=27_849_876)
     s.observe_epoch(epoch=557, seq_num=27_849_877)
     s.observe_epoch(epoch=557, seq_num=27_900_000)
     s.observe_epoch(epoch=558, seq_num=27_900_001)
     # On the 558 observation, 557 became bracketed — typical=50,124
     # should have been persisted.
-    storage.put_meta.assert_called_with("epoch_typical_length", "50124")
+    written = [
+        (c.args[0], c.args[1]) for c in storage.put_meta.call_args_list
+    ]
+    assert ("epoch_typical_length", "50124") in written
 
 
 def test_bootstrap_carried_epoch_length_loads_from_meta() -> None:
-    """bootstrap_carried_epoch_length reads the meta value and primes
-    `_carried_typical_length` so the first snapshot after restart
-    already has an estimate to render against."""
+    """bootstrap_carried_epoch_length reads the meta values and primes
+    the carry fields so the first snapshot after restart already has
+    an estimate to render against."""
     from unittest.mock import MagicMock
 
     storage = MagicMock()
-    storage.get_meta.return_value = "50042"
+    # Keyed lookup so each meta key returns its own value.
+    storage.get_meta.side_effect = lambda k: {
+        "epoch_typical_length": "50042",
+        "epoch_current": "589",
+        "epoch_current_first_seq": "29404927",
+    }.get(k)
     s = State(storage=storage)
     assert s._carried_typical_length is None
     s.bootstrap_carried_epoch_length()
     assert s._carried_typical_length == 50_042
+    assert s._carried_current_epoch == 589
+    assert s._carried_current_first_seq == 29_404_927
 
-    # Missing meta key → no-op.
-    storage.get_meta.return_value = None
+    # All meta missing → no-op on each field.
+    storage.get_meta.side_effect = lambda k: None
     s2 = State(storage=storage)
     s2.bootstrap_carried_epoch_length()
     assert s2._carried_typical_length is None
+    assert s2._carried_current_epoch is None
+    assert s2._carried_current_first_seq is None
 
-    # Garbage value → no-op (don't crash).
-    storage.get_meta.return_value = "not-an-int"
+    # Garbage values → no-op (don't crash, don't poison).
+    storage.get_meta.side_effect = lambda k: "not-an-int"
     s3 = State(storage=storage)
     s3.bootstrap_carried_epoch_length()
     assert s3._carried_typical_length is None
+    assert s3._carried_current_epoch is None
+
+
+def test_carried_first_seq_used_on_first_observation() -> None:
+    """After restart, when the live probe's first sample matches the
+    carried current_epoch, blocks_in is computed against the carried
+    first_seq — not the just-sampled seq. Without this, the dashboard
+    reads as ~1 block_in for the duration of the journal backfill."""
+    s = State()
+    s._carried_current_epoch = 589
+    s._carried_current_first_seq = 29_404_927
+    # Live probe returns the current latest seq.
+    s.observe_epoch(epoch=589, seq_num=29_452_500)
+    cur, blocks_in, _, _ = s._epoch_progress()
+    assert cur == 589
+    assert blocks_in == 29_452_500 - 29_404_927 + 1
+
+
+def test_carried_first_seq_ignored_when_epoch_differs() -> None:
+    """If we restarted across an epoch boundary, the carried
+    (epoch=588, first_seq=...) shouldn't apply to the new epoch=589.
+    Live probe must drive _epochs[589] from the just-sampled seq."""
+    s = State()
+    s._carried_current_epoch = 588  # stale
+    s._carried_current_first_seq = 27_900_000
+    s.observe_epoch(epoch=589, seq_num=29_452_500)
+    cur, blocks_in, _, _ = s._epoch_progress()
+    assert cur == 589
+    assert blocks_in == 1  # fresh, ignoring stale carry
+
+
+def test_observe_epoch_persists_current_epoch_and_first_seq() -> None:
+    """In addition to typical_length, observe_epoch must persist the
+    current epoch number and its first_seq so the next restart can
+    carry them forward."""
+    from unittest.mock import MagicMock
+
+    storage = MagicMock()
+    storage.get_meta.return_value = None
+    s = State(storage=storage)
+    s.observe_epoch(epoch=589, seq_num=29_404_927)
+    s.observe_epoch(epoch=589, seq_num=29_452_500)
+    # Both keys must have been written.
+    written = {
+        c.args[0]: c.args[1] for c in storage.put_meta.call_args_list
+    }
+    assert written.get("epoch_current") == "589"
+    assert written.get("epoch_current_first_seq") == "29404927"
