@@ -83,3 +83,83 @@ def test_multiple_bracketed_uses_median() -> None:
     assert cur == 558
     # Bracketed: 556 (49,877) and 557 (50,124). Median index = 1 (sorted).
     assert typical == 50_124
+
+
+def test_carried_typical_length_used_when_no_bracketed_yet() -> None:
+    """Just after a service restart that crossed an epoch boundary: only
+    the brand-new epoch is observed, no bracketing possible. Live
+    typical would be None — fall back to the carried value persisted by
+    the previous run, so the dashboard's progress bar isn't blank for
+    the duration of the journal backfill."""
+    s = State()
+    s._carried_typical_length = 50_042  # set by bootstrap_carried_epoch_length()
+    s.observe_epoch(epoch=589, seq_num=29_445_000)
+    s.observe_epoch(epoch=589, seq_num=29_445_185)
+    cur, blocks_in, typical, _ = s._epoch_progress()
+    assert cur == 589
+    assert blocks_in == 186
+    assert typical == 50_042  # carried, not None
+
+
+def test_live_bracketed_overrides_carried() -> None:
+    """Once a fresh bracketed observation arrives (e.g. after the
+    journal backfill or a live rollover), it takes precedence over the
+    carried value silently — operators always see the most accurate
+    current estimate."""
+    s = State()
+    s._carried_typical_length = 49_000  # stale-ish from previous run
+    # Fresh map with a bracketed epoch.
+    s.observe_epoch(epoch=556, seq_num=27_800_000)
+    s.observe_epoch(epoch=557, seq_num=27_849_877)
+    s.observe_epoch(epoch=557, seq_num=27_900_000)  # 50,124 blocks
+    s.observe_epoch(epoch=558, seq_num=27_900_001)
+    cur, blocks_in, typical, _ = s._epoch_progress()
+    assert typical == 50_124  # live, not carried
+
+
+def test_observe_epoch_persists_typical_to_meta() -> None:
+    """When a fresh bracketed observation produces a new typical, it
+    must be written to the storage meta table so the next service
+    restart can carry it forward."""
+    from unittest.mock import MagicMock
+
+    storage = MagicMock()
+    storage.get_meta.return_value = None
+    s = State(storage=storage)
+    # Single epoch — no bracketing, no persist.
+    s.observe_epoch(epoch=556, seq_num=27_800_000)
+    s.observe_epoch(epoch=556, seq_num=27_849_876)
+    storage.put_meta.assert_not_called()
+    # Add bracketing context.
+    s.observe_epoch(epoch=557, seq_num=27_849_877)
+    s.observe_epoch(epoch=557, seq_num=27_900_000)
+    s.observe_epoch(epoch=558, seq_num=27_900_001)
+    # On the 558 observation, 557 became bracketed — typical=50,124
+    # should have been persisted.
+    storage.put_meta.assert_called_with("epoch_typical_length", "50124")
+
+
+def test_bootstrap_carried_epoch_length_loads_from_meta() -> None:
+    """bootstrap_carried_epoch_length reads the meta value and primes
+    `_carried_typical_length` so the first snapshot after restart
+    already has an estimate to render against."""
+    from unittest.mock import MagicMock
+
+    storage = MagicMock()
+    storage.get_meta.return_value = "50042"
+    s = State(storage=storage)
+    assert s._carried_typical_length is None
+    s.bootstrap_carried_epoch_length()
+    assert s._carried_typical_length == 50_042
+
+    # Missing meta key → no-op.
+    storage.get_meta.return_value = None
+    s2 = State(storage=storage)
+    s2.bootstrap_carried_epoch_length()
+    assert s2._carried_typical_length is None
+
+    # Garbage value → no-op (don't crash).
+    storage.get_meta.return_value = "not-an-int"
+    s3 = State(storage=storage)
+    s3.bootstrap_carried_epoch_length()
+    assert s3._carried_typical_length is None

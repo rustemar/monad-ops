@@ -132,6 +132,14 @@ class State:
         # the epoch probe. We learn typical epoch length empirically so
         # no magic constant has to track upstream chain config changes.
         self._epochs: dict[int, tuple[int, int]] = {}
+        # Carried-forward typical epoch length from a previous run,
+        # loaded from the `meta` table on bootstrap. Used as the fallback
+        # estimate during the ~minute after restart when the journal
+        # backfill hasn't completed yet — without this, a service
+        # restart that lands at an epoch boundary leaves the progress
+        # bar empty until the backfill finishes. Once a fresh bracketed
+        # observation is available, the live computation overrides.
+        self._carried_typical_length: int | None = None
         # bft consensus accumulator. Closed minutes live in the deque;
         # the in-progress minute lives in `_bft_current` and gets flushed
         # to both the deque and storage on every minute roll.
@@ -172,10 +180,14 @@ class State:
         Expands the known range for this epoch; the typical-length
         calculation below uses any epoch that is already bracketed by
         a newer epoch — i.e. fully-closed epochs — as a sample for
-        the median.
+        the median. Whenever the live-computed typical length changes,
+        we persist it to ``meta`` so the next service restart can carry
+        the value forward (otherwise a restart on an epoch boundary
+        empties the progress bar until backfill finishes).
         """
         if epoch <= 0 or seq_num <= 0:
             return
+        live_typical: int | None = None
         with self._lock:
             prev = self._epochs.get(epoch)
             if prev is None:
@@ -188,6 +200,58 @@ class State:
             if len(self._epochs) > 500:
                 oldest = min(self._epochs)
                 self._epochs.pop(oldest, None)
+            # Recompute live typical length under the same lock so the
+            # carried value never drifts from what _epoch_progress would
+            # report given the same map state.
+            epochs_set = set(self._epochs)
+            bracketed = [
+                (l - f + 1)
+                for ep, (f, l) in self._epochs.items()
+                if (ep - 1) in epochs_set and (ep + 1) in epochs_set
+            ]
+            if bracketed:
+                bracketed.sort()
+                live_typical = bracketed[len(bracketed) // 2]
+                # Promote into `_carried_typical_length` so subsequent
+                # snapshots see the live value first; survives across
+                # restart only after the storage write below completes.
+                self._carried_typical_length = live_typical
+        # Persist outside the State lock — Storage has its own lock.
+        # Skip when nothing changed to avoid hot-loop sqlite writes
+        # during steady state.
+        if (
+            live_typical is not None
+            and self._storage is not None
+        ):
+            try:
+                if self._storage.get_meta("epoch_typical_length") != str(live_typical):
+                    self._storage.put_meta("epoch_typical_length", str(live_typical))
+            except Exception:
+                # Persistence is best-effort; in-memory state is the
+                # source of truth for the live dashboard.
+                pass
+
+    def bootstrap_carried_epoch_length(self) -> None:
+        """Populate `_carried_typical_length` from the meta table.
+
+        Called once at startup. If the previous run learned an epoch
+        length, the dashboard renders against that estimate immediately
+        instead of showing the "epoch length unknown" placeholder for
+        the duration of the journal backfill (~30–90 s on a fresh
+        restart, longer if monad-bft journal retention is short).
+        """
+        if self._storage is None:
+            return
+        raw = self._storage.get_meta("epoch_typical_length")
+        if raw is None:
+            return
+        try:
+            value = int(raw)
+        except ValueError:
+            return
+        if value > 0:
+            with self._lock:
+                self._carried_typical_length = value
 
     def _bft_window_summary(self, window_sec: int) -> tuple[float, float, int, int]:
         """Aggregate bft counters across the last ``window_sec`` seconds.
@@ -240,6 +304,9 @@ class State:
         """
         with self._lock:
             if not self._epochs:
+                # Cold map (live probe hasn't returned yet) — no current
+                # epoch to display. Carried length only matters once we
+                # know which epoch we're in.
                 return None, None, None, None
             current_epoch = max(self._epochs)
             first, last = self._epochs[current_epoch]
@@ -250,10 +317,17 @@ class State:
                 for ep, (f, l) in self._epochs.items()
                 if (ep - 1) in epochs_set and (ep + 1) in epochs_set
             ]
+            carried = self._carried_typical_length
         typical = None
         if bracketed_sizes:
             bracketed_sizes.sort()
             typical = bracketed_sizes[len(bracketed_sizes) // 2]
+        elif carried is not None:
+            # Fallback: previous run learned a typical length and we
+            # persisted it. Use it until a fresh bracketed observation
+            # arrives. Avoids the empty progress bar after a restart
+            # that crossed an epoch boundary.
+            typical = carried
         return current_epoch, blocks_in, typical, None  # eta filled at snapshot time
 
     @property
