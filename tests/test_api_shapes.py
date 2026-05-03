@@ -445,12 +445,29 @@ async def test_api_reorgs_marks_has_journal(
 
 
 @pytest.mark.asyncio
-async def test_api_probes_public_shape(client: httpx.AsyncClient) -> None:
-    r = await client.get("/api/probes/public")
+async def test_api_probes_shape(client: httpx.AsyncClient) -> None:
+    """Sanitized payload at /api/probes — name/status/summary, no
+    operator-sensitive `details` field. The two-tier split (separate
+    /public alias) was retired 2026-05-03."""
+    r = await client.get("/api/probes")
     assert r.status_code == 200
     body = r.json()
     assert "probes" in body
     assert isinstance(body["probes"], list)
+    assert all("details" not in p for p in body["probes"])
+
+
+@pytest.mark.asyncio
+async def test_api_probes_public_alias_returns_same_payload(
+    client: httpx.AsyncClient,
+) -> None:
+    """/api/probes/public is kept as a backwards-compat alias for
+    pre-2026-05-03 callers (README + bookmarks). Returns the same
+    sanitized shape as /api/probes."""
+    r1 = await client.get("/api/probes")
+    r2 = await client.get("/api/probes/public")
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert r1.json() == r2.json()
 
 
 @pytest.mark.asyncio
@@ -473,6 +490,7 @@ _HEAD_ENDPOINTS = [
     "/api/alerts",
     "/api/alerts/history",
     "/api/reorgs",
+    "/api/probes",
     "/api/probes/public",
     "/api/contracts/labels",
     "/api/enrichment/status",
@@ -818,13 +836,13 @@ async def test_api_alerts_cache_isolates_by_limit(
 
 
 @pytest.mark.asyncio
-async def test_api_probes_public_cached(
+async def test_api_probes_shares_cache_with_alias(
     state_with_storage: State,
 ) -> None:
-    """/api/probes and /api/probes/public have independent cache slots
-    so the sanitized public payload never bleeds into the internal one
-    (or vice versa) just because both wrap state.probes().
-    """
+    """/api/probes and /api/probes/public share one cache slot — the
+    alias is just a renamed entry-point to the same payload, so we
+    recompute state.probes() once per TTL window regardless of which
+    URL the caller used."""
     counter = {"calls": 0}
     original = state_with_storage.probes
     def _wrapped():
@@ -835,16 +853,16 @@ async def test_api_probes_public_cached(
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
         r1 = await c.get("/api/probes")
-        r2 = await c.get("/api/probes")          # public cache hit
-        r3 = await c.get("/api/probes/public")   # separate bucket
-        r4 = await c.get("/api/probes/public")   # public cache hit
-    assert r1.json() == r2.json()
-    assert r3.json() == r4.json()
-    # /api/probes carries `details` (operator-sensitive); public must not.
-    assert "details" in r1.json()["probes"][0] if r1.json()["probes"] else True
-    assert all("details" not in p for p in r3.json()["probes"])
-    # Two buckets, each computed once.
-    assert counter["calls"] == 2
+        r2 = await c.get("/api/probes/public")  # alias, same cache key
+        r3 = await c.get("/api/probes")
+        r4 = await c.get("/api/probes/public")
+    assert r1.json() == r2.json() == r3.json() == r4.json()
+    # No `details` field on either route — the operator-sensitive variant
+    # was retired alongside the /public alias-only split.
+    for r in (r1, r2):
+        assert all("details" not in p for p in r.json()["probes"])
+    # Single cache bucket: state.probes() called once.
+    assert counter["calls"] == 1
 
 
 if __name__ == "__main__":

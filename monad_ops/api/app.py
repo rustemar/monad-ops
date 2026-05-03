@@ -762,32 +762,13 @@ def build_app(
             )
         return JSONResponse(trace)
 
-    @app.api_route("/api/probes", methods=["GET", "HEAD"])
-    async def api_probes() -> JSONResponse:
-        async def _load():
-            probes, ran_at = state.probes()
-            return {
-                "ran_at": ran_at,
-                "probes": [
-                    {
-                        "name": p.name,
-                        "status": p.status,
-                        "summary": p.summary,
-                        "details": p.details,
-                    }
-                    for p in probes
-                ],
-            }
-        payload = await _cached("probes", _PROBES_TTL, (), _load)
-        return JSONResponse(payload)
-
     def _sanitize_probe_summary(name: str, summary: str) -> str:
         """Strip exact port numbers, ulimit values and percentages from
-        public probe summaries (A15). Keeps the status signal without
-        leaking host-configuration detail."""
+        probe summaries. Keeps the status signal without leaking
+        host-configuration detail."""
         if name == "udp_config":
-            # Public view: we never want the port number or the
-            # "config not readable" caveat — just health.
+            # We never want the port number or the "config not readable"
+            # caveat — just health.
             if "authenticated UDP" in summary:
                 return "authenticated UDP listener healthy"
             return summary
@@ -797,34 +778,44 @@ def build_app(
             return re.sub(r"\(peak [\d.]+%?\)", "(peak <20%)", summary)
         return summary
 
+    async def _api_probes_payload() -> dict:
+        """Sanitized host-probe payload — name, status, summary only.
+
+        The earlier two-tier architecture (`/api/probes` with `details` +
+        `/api/probes/public` sanitized) was retired 2026-05-03: the
+        `/public` suffix implied a `/private` counterpart that no longer
+        exists, and the operator-sensitive `details` field (key-backup
+        paths, `/dev/nvme<N>p<N>`, ulimit values) is information the
+        operator already has via shell access. The single endpoint here
+        is what the dashboard renders and what external clients see.
+        """
+        probes, ran_at = state.probes()
+        return {
+            "ran_at": ran_at,
+            "probes": [
+                {
+                    "name": p.name,
+                    "status": p.status,
+                    "summary": _sanitize_probe_summary(p.name, p.summary),
+                }
+                for p in probes
+            ],
+        }
+
+    @app.api_route("/api/probes", methods=["GET", "HEAD"])
+    async def api_probes() -> JSONResponse:
+        payload = await _cached("probes", _PROBES_TTL, (), _api_probes_payload)
+        return JSONResponse(payload)
+
     @app.api_route("/api/probes/public", methods=["GET", "HEAD"])
     async def api_probes_public() -> JSONResponse:
-        """Public-safe subset of /api/probes.
+        """Backwards-compat alias of /api/probes.
 
-        `/api/probes` carries `details` with operator-sensitive paths —
-        key-backup directories, `/dev/nvme<N>p<N>`, mount points, device
-        metadata. An iteration-2 audit flagged that as host-path leakage,
-        so deployments behind nginx should 404 `/api/probes` on the
-        public virtual host (the shipped nginx template does this).
-
-        This endpoint exposes only `name`/`status`/`summary` — enough
-        for the dashboard's host-probes panel to show green/amber/red
-        rows, with no path or hardware identifier in the payload.
+        Pre-2026-05-03 callers (README + bookmarks) hit /public. Returns
+        the same payload as /api/probes so nothing breaks during the
+        transition; can be removed once external references migrate.
         """
-        async def _load():
-            probes, ran_at = state.probes()
-            return {
-                "ran_at": ran_at,
-                "probes": [
-                    {
-                        "name": p.name,
-                        "status": p.status,
-                        "summary": _sanitize_probe_summary(p.name, p.summary),
-                    }
-                    for p in probes
-                ],
-            }
-        payload = await _cached("probes_public", _PROBES_TTL, (), _load)
+        payload = await _cached("probes", _PROBES_TTL, (), _api_probes_payload)
         return JSONResponse(payload)
 
     @app.api_route("/api/version", methods=["GET", "HEAD"])

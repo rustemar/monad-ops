@@ -124,9 +124,8 @@ sudo systemctl enable --now monad-ops-watchdog.timer
 A ready nginx template lives in
 `systemd/nginx-ops-dashboard.conf.example`. It expects a TLS cert, a
 `<dashboard-domain>` substitution, and an upstream on `127.0.0.1:8873`.
-It blocks `/api/probes` at the nginx layer (that endpoint carries
-host-sensitive paths) and sets CSP / HSTS / X-Frame-Options /
-Permissions-Policy on every response.
+It sets CSP / HSTS / X-Frame-Options / Permissions-Policy on every
+response.
 
 ## API
 
@@ -146,7 +145,7 @@ instance. In brief:
   by re-execution.
 - `GET /api/window_summary?from_ts_ms=&to_ts_ms=&include_blocks=`
   — single-call post-event report.
-- `GET /api/probes/public` — sanitized host-probe status.
+- `GET /api/probes` — sanitized host-probe status.
 
 All JSON routes ship `Access-Control-Allow-Origin: *` so external
 dashboards can pull from the browser. The HTML dashboard itself stays
