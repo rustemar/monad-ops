@@ -129,6 +129,34 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now monad-ops-watchdog.timer
 ```
 
+### Update
+
+`monad-ops` is editable-installed (`pip install -e .`), so a code
+upgrade is just a fast-forward pull plus a service restart:
+
+```bash
+cd /opt/monad-ops          # or wherever you cloned it
+git pull --ff-only origin main
+sudo systemctl restart monad-ops.service
+```
+
+Schema migrations are applied automatically on service start —
+idempotent `ALTER TABLE … ADD COLUMN` is run for any new columns
+introduced upstream. No manual SQL is required, and the migration is a
+no-op once the column exists.
+
+Two cases that need an extra step (rare):
+
+- `pyproject.toml` dependencies changed — also run
+  `.venv/bin/pip install -e .` after the pull. Release notes will call
+  this out when needed.
+- `config.toml` schema changed (a new required field, a renamed key) —
+  diff your `config.toml` against `config.example.toml` and copy the
+  delta over. Optional fields keep working as-is.
+
+To see what changed before pulling: `git fetch origin main && git log
+--oneline HEAD..origin/main`.
+
 ### Public dashboard (optional)
 
 A ready nginx template lives in
