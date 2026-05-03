@@ -1859,6 +1859,7 @@ const xAxisTimes = {
         color: xTickColor,
         font: { family: "JetBrains Mono", size: 10 },
         autoSkip: true,
+        autoSkipPadding: 16,
         maxRotation: 0,
         maxTicksLimit: 8,
     },
@@ -1884,11 +1885,21 @@ const chartCommon = {
 
 // Build both the label array (time strings, stored on labels) and two
 // parallel metadata arrays (block numbers + raw ms) that the tooltip
-// plugins read from chart._binBlocks / chart._binTimes. Smart variant
-// adds MM-DD on multi-day windows so 7d ticks aren't ambiguous wrap-
-// around HH:MM:SS that all look like the same day.
+// plugins read from chart._binBlocks / chart._binTimes. Multi-day
+// windows prefix MM-DD and drop seconds — a tick on a 7d axis is hours
+// apart, so :SS is noise that just makes labels collide on mobile.
+function _fmtBinAxisLabel(ms) {
+    const d = new Date(ms);
+    const p = (n) => String(n).padStart(2, "0");
+    let span = 0;
+    try { const w = _chartWindow(); span = w.toMs - w.fromMs; } catch (_) {}
+    if (span > 24 * 3600 * 1000) {
+        return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    }
+    return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
 function _labelsFromBins(bins) {
-    return bins.map(b => _fmtBinClockSmart(b.t));
+    return bins.map(b => _fmtBinAxisLabel(b.t));
 }
 function _attachBinMeta(chart, bins) {
     chart._binBlocks = bins.map(b => b.n_last);
