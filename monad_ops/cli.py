@@ -35,11 +35,13 @@ from monad_ops.reorg_capture import (
     journal_dir_for,
 )
 from monad_ops.replay_export import assemble_window_data, render_static_html
+from monad_ops.collector.process_restart import poll_invocations
 from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
     BlockProcessingSlowdownRule,
     NetworkLayerSignalRule,
+    ProcessRestartRule,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
@@ -420,6 +422,31 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         warn_count=config.rules.network_layer_signal.warn_count,
         critical_count=config.rules.network_layer_signal.critical_count,
     )
+    process_restart_rule = ProcessRestartRule()
+
+    async def process_restart_loop():
+        """Periodic poll of systemd InvocationID for tracked services.
+
+        Bootstrap is silent: the very first sample populates the rule's
+        last-seen map without firing — otherwise our own startup would
+        page on every service. Subsequent restarts emit WARN once each.
+        Service list shared with ``probe_services``.
+        """
+        services = config.node.services
+        interval = max(15, int(config.rules.process_restart.poll_interval_sec))
+        while True:
+            try:
+                snapshots = await poll_invocations(services)
+                for snap in snapshots:
+                    ev = process_restart_rule.on_snapshot(snap)
+                    if ev is not None:
+                        await sink.deliver(ev)
+            except Exception as e:  # noqa: BLE001
+                # Belt-and-suspenders. The collector swallows its own
+                # subprocess errors; anything reaching here is a bug.
+                # Log and keep polling — never let this loop die.
+                log.error("process_restart_loop.error", exc=str(e))
+            await asyncio.sleep(interval)
 
     async def consensus_loop():
         """Tail monad-bft for round advances + local timeouts.
@@ -673,9 +700,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     network_signal_tick = asyncio.create_task(
         network_signal_tick_loop(), name="network_signal_tick",
     )
+    process_restart_task = asyncio.create_task(
+        process_restart_loop(), name="process_restart",
+    )
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
-        version_task, network_signal_tick,
+        version_task, network_signal_tick, process_restart_task,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
