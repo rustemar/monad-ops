@@ -47,6 +47,7 @@ async function pollFetch(key, url, init = {}) {
 
 let rtpChart = null;
 let vtpChart = null;
+let networkSignalChart = null;
 let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
@@ -1355,6 +1356,7 @@ async function fetchBftSeries() {
     const { fromMs, toMs } = _chartWindow();
     if ((toMs - fromMs) > _MAX_BFT_SPAN_MS) {
         drawValTimeout([]);
+        drawNetworkSignal([]);
         return;
     }
     try {
@@ -1364,6 +1366,7 @@ async function fetchBftSeries() {
         if (!r.ok) throw new Error(r.statusText);
         const d = await r.json();
         drawValTimeout(d.bins || []);
+        drawNetworkSignal(d.bins || []);
     } catch (e) {
         if (e && e.name === "AbortError") return;
     }
@@ -1570,6 +1573,111 @@ function drawValTimeout(bins) {
     vtpChart._tooltipValueFormatter =
         (v) => v == null ? "—" : `${Number(v).toFixed(2)}%`;
 }
+
+// Per-minute stacked-bar chart of monad-bft network-layer events.
+// Same /api/bft_series payload as the validator-timeouts chart, just
+// reading the three network-class fields instead of timeout_pct.
+// Stacked bars rather than line(s): events are integer counts mostly
+// near zero with occasional spikes — bars convey "X events this
+// minute" honestly without smoothing artifacts.
+const NETSIG_DECRYPT_COLOR = "#ff6b6b";  // most operationally interesting
+const NETSIG_SESSION_COLOR = "#ffb454";
+const NETSIG_TS_COLOR      = "#7eb6ff";
+function drawNetworkSignal(bins) {
+    const labels = _labelsFromBins(bins);
+    const decrypt = bins.map(b => b.decrypt_fails ?? 0);
+    const session = bins.map(b => b.session_timeouts ?? 0);
+    const tsInv   = bins.map(b => b.timestamp_invalids ?? 0);
+    if (networkSignalChart) {
+        networkSignalChart.data.labels = labels;
+        networkSignalChart.data.datasets[0].data = decrypt;
+        networkSignalChart.data.datasets[1].data = session;
+        networkSignalChart.data.datasets[2].data = tsInv;
+        _attachBinMeta(networkSignalChart, bins);
+        networkSignalChart.update("none");
+        return;
+    }
+    networkSignalChart = new Chart(
+        document.getElementById("chart-network-signal"),
+        {
+            type: "bar",
+            data: {
+                labels,
+                // categoryPercentage / barPercentage at 1.0 so each minute
+                // fills its slot entirely. Without this a sparse 1-event
+                // bar at one minute in a 12h window is ~1 px tall and
+                // <0.5 px wide — invisible in practice. Full-width stripes
+                // remain readable down to per-minute resolution.
+                datasets: [
+                    {
+                        label: "decrypt-fail",
+                        data: decrypt,
+                        backgroundColor: NETSIG_DECRYPT_COLOR,
+                        borderWidth: 0,
+                        stack: "netsig",
+                        categoryPercentage: 1.0,
+                        barPercentage: 1.0,
+                    },
+                    {
+                        label: "session-timeout",
+                        data: session,
+                        backgroundColor: NETSIG_SESSION_COLOR,
+                        borderWidth: 0,
+                        stack: "netsig",
+                        categoryPercentage: 1.0,
+                        barPercentage: 1.0,
+                    },
+                    {
+                        label: "timestamp-invalid",
+                        data: tsInv,
+                        backgroundColor: NETSIG_TS_COLOR,
+                        borderWidth: 0,
+                        stack: "netsig",
+                        categoryPercentage: 1.0,
+                        barPercentage: 1.0,
+                    },
+                ],
+            },
+            plugins: [crosshairPlugin],
+            options: {
+                ...chartCommon,
+                layout: { padding: { top: 36 } },
+                scales: {
+                    ...chartCommon.scales,
+                    x: { ...chartCommon.scales.x, stacked: true },
+                    y: {
+                        ...chartCommon.scales.y,
+                        stacked: true,
+                        min: 0,
+                        suggestedMax: 5,
+                        ticks: {
+                            ...chartCommon.scales.y.ticks,
+                            precision: 0,  // integers
+                        },
+                    },
+                },
+                plugins: {
+                    ...(chartCommon.plugins || {}),
+                    legend: {
+                        display: true,
+                        position: "top",
+                        align: "end",
+                        labels: {
+                            color: "rgba(215,218,224,0.7)",
+                            boxWidth: 10, boxHeight: 10,
+                            padding: 12,
+                            font: { size: 11 },
+                        },
+                    },
+                },
+            },
+        }
+    );
+    _attachBinMeta(networkSignalChart, bins);
+    networkSignalChart._tooltipValueFormatter =
+        (v) => v == null ? "—" : `${v}`;
+}
+
 
 function setLagVal(id, text, sevClass) {
     const el = document.getElementById(id);

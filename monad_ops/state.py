@@ -168,6 +168,12 @@ class State:
         self._bft_current_total = 0
         self._bft_current_tc = 0
         self._bft_current_local = 0
+        # Per-minute counters for the three network-layer event classes —
+        # mirror shape of the consensus counters above. Sparse at
+        # baseline, surge during pair-state desync events.
+        self._bft_current_decrypt = 0
+        self._bft_current_session_to = 0
+        self._bft_current_ts_invalid = 0
         # Pending writes accumulator. Drained by the cli.py
         # bft_flush_loop on a 1s cadence so storage cost scales with
         # flush interval, not event rate. Closed minutes land here on
@@ -572,6 +578,9 @@ class State:
                     rounds_total=self._bft_current_total,
                     rounds_tc=self._bft_current_tc,
                     local_timeouts=self._bft_current_local,
+                    decrypt_fails=self._bft_current_decrypt,
+                    session_timeouts=self._bft_current_session_to,
+                    timestamp_invalids=self._bft_current_ts_invalid,
                 )
                 self._bft_minutes.append(closed)
                 self._bft_pending_minutes.append(closed)
@@ -579,6 +588,9 @@ class State:
                 self._bft_current_total = 0
                 self._bft_current_tc = 0
                 self._bft_current_local = 0
+                self._bft_current_decrypt = 0
+                self._bft_current_session_to = 0
+                self._bft_current_ts_invalid = 0
             if event.kind is ConsensusEventKind.ROUND_ADVANCE_QC:
                 self._bft_current_total += 1
             elif event.kind is ConsensusEventKind.ROUND_ADVANCE_TC:
@@ -586,6 +598,12 @@ class State:
                 self._bft_current_tc += 1
             elif event.kind is ConsensusEventKind.LOCAL_TIMEOUT:
                 self._bft_current_local += 1
+            elif event.kind is ConsensusEventKind.NETWORK_DECRYPT_FAIL:
+                self._bft_current_decrypt += 1
+            elif event.kind is ConsensusEventKind.NETWORK_SESSION_TIMEOUT:
+                self._bft_current_session_to += 1
+            elif event.kind is ConsensusEventKind.NETWORK_TIMESTAMP_INVALID:
+                self._bft_current_ts_invalid += 1
 
     async def add_consensus_event_async(self, event: ConsensusEvent) -> None:
         """Async wrapper. Sync now — no I/O — kept for shape symmetry
@@ -622,6 +640,9 @@ class State:
                     rounds_total=self._bft_current_total,
                     rounds_tc=self._bft_current_tc,
                     local_timeouts=self._bft_current_local,
+                    decrypt_fails=self._bft_current_decrypt,
+                    session_timeouts=self._bft_current_session_to,
+                    timestamp_invalids=self._bft_current_ts_invalid,
                 )
         return closed, base_fees, in_progress
 

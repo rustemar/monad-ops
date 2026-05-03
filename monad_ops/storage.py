@@ -158,11 +158,21 @@ CREATE INDEX IF NOT EXISTS idx_contract_hour_to ON contract_hour (to_addr);
 --                     pacemaker (operator-side signal, separate from
 --                     the chain-wide TC count).
 CREATE TABLE IF NOT EXISTS bft_minute (
-    ts_minute      INTEGER PRIMARY KEY,
-    rounds_total   INTEGER NOT NULL,
-    rounds_tc      INTEGER NOT NULL,
-    local_timeouts INTEGER NOT NULL
+    ts_minute          INTEGER PRIMARY KEY,
+    rounds_total       INTEGER NOT NULL,
+    rounds_tc          INTEGER NOT NULL,
+    local_timeouts     INTEGER NOT NULL,
+    -- Network-layer event counts within the same minute bucket.
+    -- DEFAULT 0 so existing rows pre-2026-05-03 read sensibly without
+    -- a backfill — they predate the network_layer_signal rule and we
+    -- never had counts for them. New rows write live values.
+    decrypt_fails      INTEGER NOT NULL DEFAULT 0,
+    session_timeouts   INTEGER NOT NULL DEFAULT 0,
+    timestamp_invalids INTEGER NOT NULL DEFAULT 0
 );
+-- ADD-COLUMN migrations for hosts that ran pre-2026-05-03 schema.
+-- IF NOT EXISTS isn't supported on ALTER TABLE in sqlite, but the
+-- migration helper below catches "duplicate column" as a no-op.
 
 -- Per-block base-fee samples from monad-bft proposal messages.
 -- One row per block_seq via INSERT OR IGNORE — proposals are
@@ -258,10 +268,16 @@ class ContractRetryStat:
 @dataclass(frozen=True, slots=True)
 class BftMinute:
     """One minute-bucket of consensus-event counters from bft_minute."""
-    ts_minute: int       # Unix-ms floored to minute boundary
-    rounds_total: int    # advancing round count (QC + TC)
-    rounds_tc: int       # subset closed by TimeoutCertificate
-    local_timeouts: int  # local pacemaker fires
+    ts_minute: int          # Unix-ms floored to minute boundary
+    rounds_total: int       # advancing round count (QC + TC)
+    rounds_tc: int          # subset closed by TimeoutCertificate
+    local_timeouts: int     # local pacemaker fires
+    # Network-layer event counts (added 2026-05-03 alongside the
+    # NetworkLayerSignalRule). All three are sparse at baseline (~0/h)
+    # so the per-minute resolution is fine.
+    decrypt_fails: int = 0      # RaptorCast UDP-auth `failed to decrypt`
+    session_timeouts: int = 0   # wireauth `session timeout expired`
+    timestamp_invalids: int = 0 # consensus_state `Timestamp validation failed`
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +387,24 @@ class Storage:
             # would have anyway.
             self._conn.executescript("PRAGMA busy_timeout = 5000;")
             self._conn.executescript(_SCHEMA)
+            # Forward-migration: older DBs (pre-2026-05-03) have a
+            # bft_minute table without the network-layer columns. Try
+            # to add them and ignore the duplicate-column error if the
+            # column is already present.
+            for col in (
+                "decrypt_fails",
+                "session_timeouts",
+                "timestamp_invalids",
+            ):
+                try:
+                    self._conn.execute(
+                        f"ALTER TABLE bft_minute ADD COLUMN {col} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
+            self._conn.commit()
 
     # -- writes ------------------------------------------------------------
     def write_block(self, b: ExecBlock) -> None:
@@ -1183,10 +1217,13 @@ class Storage:
         with self._lock:
             self._conn.execute(
                 """INSERT OR REPLACE INTO bft_minute
-                   (ts_minute, rounds_total, rounds_tc, local_timeouts)
-                   VALUES (?, ?, ?, ?)""",
+                   (ts_minute, rounds_total, rounds_tc, local_timeouts,
+                    decrypt_fails, session_timeouts, timestamp_invalids)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (int(m.ts_minute), int(m.rounds_total),
-                 int(m.rounds_tc), int(m.local_timeouts)),
+                 int(m.rounds_tc), int(m.local_timeouts),
+                 int(m.decrypt_fails), int(m.session_timeouts),
+                 int(m.timestamp_invalids)),
             )
 
     def load_recent_bft_minutes(self, limit: int) -> list[BftMinute]:
@@ -1198,7 +1235,8 @@ class Storage:
         """
         with self._lock:
             rows = self._conn.execute(
-                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts
+                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts,
+                          decrypt_fails, session_timeouts, timestamp_invalids
                    FROM bft_minute
                    ORDER BY ts_minute DESC
                    LIMIT ?""",
@@ -1211,6 +1249,9 @@ class Storage:
                 rounds_total=int(r["rounds_total"]),
                 rounds_tc=int(r["rounds_tc"]),
                 local_timeouts=int(r["local_timeouts"]),
+                decrypt_fails=int(r["decrypt_fails"]),
+                session_timeouts=int(r["session_timeouts"]),
+                timestamp_invalids=int(r["timestamp_invalids"]),
             )
             for r in rows
         ]
@@ -1248,11 +1289,14 @@ class Storage:
                 if minutes:
                     self._conn.executemany(
                         """INSERT OR REPLACE INTO bft_minute
-                           (ts_minute, rounds_total, rounds_tc, local_timeouts)
-                           VALUES (?, ?, ?, ?)""",
+                           (ts_minute, rounds_total, rounds_tc, local_timeouts,
+                            decrypt_fails, session_timeouts, timestamp_invalids)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
                         [
                             (int(m.ts_minute), int(m.rounds_total),
-                             int(m.rounds_tc), int(m.local_timeouts))
+                             int(m.rounds_tc), int(m.local_timeouts),
+                             int(m.decrypt_fails), int(m.session_timeouts),
+                             int(m.timestamp_invalids))
                             for m in minutes
                         ],
                     )
@@ -1394,7 +1438,8 @@ class Storage:
         """
         with self._lock:
             rows = self._conn.execute(
-                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts
+                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts,
+                          decrypt_fails, session_timeouts, timestamp_invalids
                    FROM bft_minute
                    WHERE ts_minute >= ? AND ts_minute <= ?
                    ORDER BY ts_minute ASC
@@ -1411,6 +1456,9 @@ class Storage:
                 "rounds_tc": tc,
                 "local_timeouts": int(r["local_timeouts"]),
                 "timeout_pct": round(tc / total * 100, 2) if total else 0.0,
+                "decrypt_fails": int(r["decrypt_fails"]),
+                "session_timeouts": int(r["session_timeouts"]),
+                "timestamp_invalids": int(r["timestamp_invalids"]),
             })
         return out
 
