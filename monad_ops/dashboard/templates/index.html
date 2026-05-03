@@ -307,6 +307,19 @@
         </section>
 
         <section class="grid grid-1">
+            <div class="card chart" id="chart-network-signal-card">
+                <div class="card-header">
+                    <span class="card-title">network-layer signal events</span>
+                    <span class="card-hint" id="chart-network-signal-hint">monad-bft RaptorCast / wireauth / consensus-state signals · per-minute · stacked</span>
+                </div>
+                <div class="chart-box">
+                    <canvas id="chart-network-signal" role="img"
+                            aria-label="stacked per-minute counts of three monad-bft network-layer event classes — failed-to-decrypt, session-timeout-expired, and timestamp-validation-failed"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
             <div class="card chart" id="chart-exec-card">
                 <div class="card-header">
                     <span class="card-title">block execution time breakdown</span>
