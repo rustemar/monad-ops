@@ -1349,9 +1349,9 @@ async function fetchBlocks() {
 // Per-minute validator-timeout series for the bft chart. Cached
 // alongside fetchBlocks so a range change refreshes both — but on its
 // own poll-id so a stalled bft query doesn't block the throughput
-// charts (and vice versa). 33h cap matches the API endpoint; longer
-// ranges silently return empty rather than 400-spamming the console.
-const _MAX_BFT_SPAN_MS = 33 * 3600 * 1000;
+// charts (and vice versa). 7d cap matches CHART_CUSTOM_MAX_SPAN_MS and
+// the API endpoint; outside that the API would 400.
+const _MAX_BFT_SPAN_MS = CHART_CUSTOM_MAX_SPAN_MS;
 async function fetchBftSeries() {
     const { fromMs, toMs } = _chartWindow();
     if ((toMs - fromMs) > _MAX_BFT_SPAN_MS) {
@@ -1884,11 +1884,11 @@ const chartCommon = {
 
 // Build both the label array (time strings, stored on labels) and two
 // parallel metadata arrays (block numbers + raw ms) that the tooltip
-// plugins read from chart._binBlocks / chart._binTimes. Keeping them
-// separate means the x-axis stays clean (just "HH:MM") while tooltips
-// still get the full context.
+// plugins read from chart._binBlocks / chart._binTimes. Smart variant
+// adds MM-DD on multi-day windows so 7d ticks aren't ambiguous wrap-
+// around HH:MM:SS that all look like the same day.
 function _labelsFromBins(bins) {
-    return bins.map(b => _fmtBinClock(b.t));
+    return bins.map(b => _fmtBinClockSmart(b.t));
 }
 function _attachBinMeta(chart, bins) {
     chart._binBlocks = bins.map(b => b.n_last);
