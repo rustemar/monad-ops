@@ -22,7 +22,11 @@ from monad_ops.api import build_app
 from monad_ops.collector.bft_journal import tail_consensus_events
 from monad_ops.collector.journal import TailError, tail_execution_blocks
 from monad_ops.collector.probes import run_all_probes
-from monad_ops.collector.epoch_probe import probe_epoch, scan_epoch_history
+from monad_ops.collector.epoch_probe import (
+    find_current_epoch_first_seq,
+    probe_epoch,
+    scan_epoch_history,
+)
 from monad_ops.collector.reference_rpc import fetch_reference_block
 from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
@@ -556,16 +560,43 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # start filling in the current-epoch number immediately.
         asyncio.create_task(epoch_backfill_task(), name="epoch_backfill")
         await asyncio.sleep(2)
+        # On restart the carried (epoch, first_seq) might be stale (we
+        # crossed an epoch boundary while monad-ops was down). Detect
+        # that on the first successful probe and trigger a fast targeted
+        # scan so blocks_in jumps to the correct value within seconds
+        # instead of waiting on the slow 24h backfill — without this the
+        # progress bar reads as "epoch just started" until backfill
+        # catches up to the current-epoch range, ~minute on a busy host.
+        first_probe_resolved = False
         while True:
             try:
                 sample = await probe_epoch()
                 if sample.error is None:
                     state.observe_epoch(sample.epoch, sample.seq_num)
+                    if not first_probe_resolved:
+                        first_probe_resolved = True
+                        if state._carried_current_epoch != sample.epoch:
+                            asyncio.create_task(
+                                _fast_first_seq_seed(sample.epoch),
+                                name="epoch_fast_seed",
+                            )
                 else:
                     log.debug("epoch_probe.skip", err=sample.error)
             except Exception as e:  # noqa: BLE001
                 log.error("epoch_loop.error", exc=str(e))
             await asyncio.sleep(15)
+
+    async def _fast_first_seq_seed(target_epoch: int) -> None:
+        try:
+            seq = await find_current_epoch_first_seq(target_epoch)
+        except Exception as e:  # noqa: BLE001
+            log.warning("epoch.fast_seed_failed", exc=str(e))
+            return
+        if seq is None:
+            log.info("epoch.fast_seed_no_match", target_epoch=target_epoch)
+            return
+        state.observe_epoch(target_epoch, seq)
+        log.info("epoch.fast_seed", target_epoch=target_epoch, first_seq=seq)
 
     async def warm_sampled_windows():
         # Background pre-warm for the chart endpoint. Visitors who land
