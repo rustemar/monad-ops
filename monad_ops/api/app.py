@@ -380,11 +380,10 @@ def build_app(
         """Per-minute consensus series for the validator-timeout chart.
 
         1-min resolution is the storage cadence — no client-side bucketing
-        and no server-side downsampling. At the storage cap of 2000 rows
-        the longest visible range is ~33 hours; the dashboard's 24h
-        preset is comfortably inside that. For replay queries beyond
-        that horizon, callers should use the aggregated
-        ``/api/window_summary.consensus`` shape instead.
+        and no server-side downsampling. 7d window is the chart toolbar's
+        max preset; at 1-min resolution that's 10080 buckets (~2 MB JSON),
+        small enough to ship raw without losing single-bucket spikes that
+        downsampling would smooth away.
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
@@ -392,14 +391,11 @@ def build_app(
             return JSONResponse(
                 {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
             )
-        # 33h hard cap (2000 minute-buckets) so a misconfigured client
-        # can't pull the whole table; matches Storage.list_bft_minutes
-        # default limit.
-        MAX_SPAN_MS = 33 * 3600 * 1000
+        MAX_SPAN_MS = 7 * 86400 * 1000
         span_ms = to_ts_ms - from_ts_ms
         if span_ms > MAX_SPAN_MS:
             return JSONResponse(
-                {"error": "span too large (max 33 hours)"}, status_code=400
+                {"error": "span too large (max 7 days)"}, status_code=400
             )
         # Cache TTL = 5s, matched quantization. Series doesn't move fast
         # (one new bucket per minute) so 5s is plenty fresh for chart UX
@@ -415,6 +411,7 @@ def build_app(
                 state.storage.list_bft_minutes,
                 from_ts_ms,
                 to_ts_ms,
+                limit=10_500,
             )
             return {
                 "from_ts_ms": from_ts_ms,
