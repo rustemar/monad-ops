@@ -771,11 +771,13 @@ async function fetchState() {
     }
 }
 
-// Reorg alert detail is deterministic ("Block #<n> id changed: …"). Pull
-// the block_number so the row can deep-link into the reorg popup and offer
-// trace/journal downloads — same UX as the /alerts history page.
+// Reorg alert detail starts with "Block #<n> id changed: …" (pre-2026-05-03)
+// or "Block #<n> exec-layer id changed: …" (post-reframe). Tolerant on both
+// so existing alert history keeps its trace/journal buttons after the
+// rename. Pull block_number so the row can deep-link into the reorg popup
+// and offer trace/journal downloads — same UX as the /alerts history page.
 function _parseReorgBlockNumber(detail) {
-    const m = /Block #(\d+) id changed/.exec(detail || "");
+    const m = /Block #(\d+) (?:exec-layer )?id changed/.exec(detail || "");
     return m ? parseInt(m[1], 10) : null;
 }
 

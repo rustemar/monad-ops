@@ -57,12 +57,13 @@ function codeColorChip(alert) {
     return `<span class="cc cc-${c}">CODE ${c.toUpperCase()}</span>`;
 }
 
-// Reorg alert detail is deterministic: "Block #<n> id changed: …".
-// Pull the block_number so we can link to the trace endpoint. Returns
-// null if the detail doesn't match (future-proofs the rendering —
-// caller just won't emit a button).
+// Reorg alert detail starts with "Block #<n> id changed: …" (pre-2026-05-03)
+// or "Block #<n> exec-layer id changed: …" (post-reframe). Tolerant on both
+// so existing alert history keeps its trace link after the rename. Returns
+// null if neither matches (future-proofs the rendering — caller just won't
+// emit a button).
 function _parseReorgBlockNumber(detail) {
-    const m = /Block #(\d+) id changed/.exec(detail || "");
+    const m = /Block #(\d+) (?:exec-layer )?id changed/.exec(detail || "");
     return m ? parseInt(m[1], 10) : null;
 }
 
