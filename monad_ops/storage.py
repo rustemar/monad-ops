@@ -581,6 +581,23 @@ class Storage:
             ).fetchone()
         return int(row["n"]) if row else 0
 
+    def count_cluster_reorgs_since(self, since_ts: float) -> int:
+        """Count cluster-grade reorgs (WARN severity) since ``since_ts``.
+
+        Post-2026-05-03 reframe, the WARN tier on reorgs is reserved for
+        cluster events (≥3 within 30 min) — single divergences are INFO.
+        Surfacing the cluster count alongside the total lets the
+        dashboard distinguish "noisy day" from "actual instability
+        burst" without a second SQL pass per render.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM alerts "
+                "WHERE rule = 'reorg' AND severity = 'warn' AND ts >= ?",
+                (float(since_ts),),
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
     def list_reorg_timestamps_since(self, since_ts: float) -> list[float]:
         """Return ``ts`` (unix seconds) of reorg alerts since ``since_ts``.
 

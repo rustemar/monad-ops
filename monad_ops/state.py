@@ -69,6 +69,9 @@ class Snapshot:
     # noise on testnet, the 24h count is the operationally interesting
     # number for "should I be looking at this right now".
     recent_reorgs_24h: int
+    # Subset of recent_reorgs_24h that fired at WARN severity (cluster
+    # threshold reached). Single divergences are INFO and don't count.
+    cluster_reorgs_24h: int
     last_reorg_number: int | None
     last_reorg_old_id: str | None
     last_reorg_new_id: str | None
@@ -757,11 +760,12 @@ class State:
         # 24h rolling reorg count. Sourced from storage so it's correct
         # across restarts; falls back to 0 when persistence is disabled.
         if self._storage is not None:
-            recent_reorgs_24h = self._storage.count_reorgs_since(
-                time.time() - 24 * 3600
-            )
+            since = time.time() - 24 * 3600
+            recent_reorgs_24h = self._storage.count_reorgs_since(since)
+            cluster_reorgs_24h = self._storage.count_cluster_reorgs_since(since)
         else:
             recent_reorgs_24h = 0
+            cluster_reorgs_24h = 0
 
         ref = self._reference
         reference_block = ref.block_number if ref else None
@@ -805,6 +809,7 @@ class State:
             gas_eff_peak_block=gas_eff_peak_block.block_number if gas_eff_peak_block else None,
             reorg_count=reorg_count,
             recent_reorgs_24h=recent_reorgs_24h,
+            cluster_reorgs_24h=cluster_reorgs_24h,
             last_reorg_number=last_reorg_number,
             last_reorg_old_id=last_reorg_old_id,
             last_reorg_new_id=last_reorg_new_id,
