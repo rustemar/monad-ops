@@ -1,5 +1,6 @@
 from monad_ops.parser import ExecBlock
 from monad_ops.rules import (
+    BlockProcessingSlowdownRule,
     CodeColor,
     ReferenceLagRule,
     ReorgRule,
@@ -10,7 +11,14 @@ from monad_ops.rules import (
 )
 
 
-def _block(n: int, tx: int = 2, rt: int = 0, rtp: float = 0.0, block_id: str | None = None) -> ExecBlock:
+def _block(
+    n: int,
+    tx: int = 2,
+    rt: int = 0,
+    rtp: float = 0.0,
+    block_id: str | None = None,
+    total_us: int = 500,
+) -> ExecBlock:
     return ExecBlock(
         block_number=n,
         block_id=block_id if block_id is not None else f"0x{n:064x}",
@@ -21,7 +29,7 @@ def _block(n: int, tx: int = 2, rt: int = 0, rtp: float = 0.0, block_id: str | N
         state_reset_us=50,
         tx_exec_us=100,
         commit_us=200,
-        total_us=500,
+        total_us=total_us,
         tps_effective=1000,
         tps_avg=1000,
         gas_used=100_000,
@@ -470,28 +478,37 @@ class TestReorgRule:
         assert rule.on_block(b) is None
         assert rule.reorg_count == 0
 
-    def test_single_reorg_defaults_to_warn(self):
-        """An isolated reorg is WARN, not CRITICAL — single-block reorgs
-        on testnet are background noise (23 over multi-day window in the
-        2026-04-19 retrospective). CRITICAL is reserved for clusters."""
+    def test_single_reorg_defaults_to_info(self):
+        """An isolated divergence is INFO, not WARN — pre-finalization
+        block-id changes are HotStuff-2 expected behaviour (re-execution
+        at the same height before finalization). The 2026-05-03 reframe
+        moved the default down a tier so the dashboard doesn't paint
+        ORANGE on background protocol behaviour. WARN is reserved for
+        clusters; CRITICAL is reserved for actual node-failure rules."""
         rule = ReorgRule()
         first = _block(100, block_id="0x" + "a" * 64)
         second = _block(100, block_id="0x" + "b" * 64)
         assert rule.on_block(first) is None
         ev = rule.on_block(second)
         assert ev is not None
-        assert ev.severity == Severity.WARN
+        assert ev.severity == Severity.INFO
         assert ev.rule == "reorg"
         assert "100" in ev.detail
         assert "Cluster" not in ev.detail
+        assert "finality violation" in ev.detail
         assert rule.reorg_count == 1
         assert rule.last_reorg_number == 100
         assert rule.last_reorg_old_id == first.block_id
         assert rule.last_reorg_new_id == second.block_id
 
-    def test_cluster_threshold_escalates_to_critical(self):
-        """Once cluster_threshold reorgs land inside cluster_window_sec,
-        the next reorg is promoted to CRITICAL with a cluster note."""
+    def test_cluster_threshold_escalates_to_warn(self):
+        """Once cluster_threshold divergences land inside
+        cluster_window_sec, the next event is promoted to WARN with a
+        cluster note. Post-2026-05-03 reframe: the previous CRITICAL
+        tier was retired because the canonical chain finalizes
+        regardless of pre-finalization divergence — clusters are
+        operationally interesting (network-layer correlation) but not
+        a node/chain emergency."""
         # Tight window so the 4 events fall comfortably inside it.
         rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
         # block timestamps are 1ms apart in _block fixture; spread them
@@ -500,41 +517,41 @@ class TestReorgRule:
         def at(n, sec, bid):
             b = _block(n, block_id=bid)
             return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
-        # 3 reorgs at 0, 60, 120 seconds — first two WARN, third CRITICAL.
+        # 3 divergences at 0, 60, 120 seconds — first two INFO, third WARN.
         rule.on_block(at(100, 0, "0xa"))
         ev1 = rule.on_block(at(100, 10, "0xb"))
         rule.on_block(at(200, 20, "0xc"))
         ev2 = rule.on_block(at(200, 30, "0xd"))
         rule.on_block(at(300, 40, "0xe"))
         ev3 = rule.on_block(at(300, 50, "0xf"))
-        assert ev1.severity == Severity.WARN
-        assert ev2.severity == Severity.WARN
-        assert ev3.severity == Severity.CRITICAL
+        assert ev1.severity == Severity.INFO
+        assert ev2.severity == Severity.INFO
+        assert ev3.severity == Severity.WARN
         assert "Cluster" in ev3.detail
-        assert "3 reorgs" in ev3.detail
+        assert "3 divergences" in ev3.detail
 
-    def test_cluster_window_eviction_drops_back_to_warn(self):
-        """Once old reorgs fall outside cluster_window_sec, the rule
-        de-escalates back to WARN — a cluster from yesterday should not
-        keep painting today's isolated reorg as CRITICAL."""
+    def test_cluster_window_eviction_drops_back_to_info(self):
+        """Once old divergences fall outside cluster_window_sec, the
+        rule de-escalates back to INFO — a cluster from yesterday
+        should not keep painting today's isolated event as WARN."""
         import dataclasses
         rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
         def at(n, sec, bid):
             b = _block(n, block_id=bid)
             return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
-        # 3 reorgs inside the window → CRITICAL on the 3rd.
+        # 3 divergences inside the window → WARN on the 3rd.
         rule.on_block(at(100, 0, "0xa"))
         rule.on_block(at(100, 1, "0xb"))
         rule.on_block(at(200, 2, "0xc"))
         rule.on_block(at(200, 3, "0xd"))
         rule.on_block(at(300, 4, "0xe"))
-        ev_crit = rule.on_block(at(300, 5, "0xf"))
-        assert ev_crit.severity == Severity.CRITICAL
-        # Now jump well past the cluster window — next reorg is alone.
+        ev_warn_cluster = rule.on_block(at(300, 5, "0xf"))
+        assert ev_warn_cluster.severity == Severity.WARN
+        # Now jump well past the cluster window — next event is alone.
         rule.on_block(at(900, 10000, "0xg"))
-        ev_warn = rule.on_block(at(900, 10001, "0xh"))
-        assert ev_warn.severity == Severity.WARN
-        assert "Cluster" not in ev_warn.detail
+        ev_info = rule.on_block(at(900, 10001, "0xh"))
+        assert ev_info.severity == Severity.INFO
+        assert "Cluster" not in ev_info.detail
 
     def test_counters_accumulate_across_multiple_reorgs(self):
         rule = ReorgRule()
@@ -553,9 +570,9 @@ class TestReorgRule:
         for n in [1, 2, 3]:
             rule.on_block(_block(n, block_id=f"0x{n:x}"))
         # #3 is still in the window; a diverging id at #3 fires normally
-        # — at WARN since this is a single, isolated reorg.
+        # — at INFO since this is a single, isolated divergence.
         ev = rule.on_block(_block(3, block_id="0xff3"))
-        assert ev is not None and ev.severity == Severity.WARN
+        assert ev is not None and ev.severity == Severity.INFO
         assert rule.reorg_count == 1
 
         # Advance past #1's eviction. After blocks 4 and 5, _seen = {3,4,5}
@@ -578,7 +595,8 @@ class TestReorgRule:
 
     def test_bootstrap_seeds_counter_and_last_reorg_fields(self):
         """Counters restored from storage must populate the rule so the
-        next live reorg emits "Total reorgs observed: N+1", not 1."""
+        next live divergence emits "Total divergences observed: N+1",
+        not 1."""
         rule = ReorgRule()
         rule.bootstrap(
             count=2,
@@ -593,13 +611,13 @@ class TestReorgRule:
         assert rule.last_reorg_new_id == "0x4e18d392…ab61d4"
         assert rule.last_reorg_ts_ms == 1_776_638_584_137
 
-        # A real reorg now increments *from* the bootstrapped count.
+        # A real divergence now increments *from* the bootstrapped count.
         ev = rule.on_block(_block(9999, block_id="0xfirst"))
-        assert ev is None  # first sighting; no reorg
+        assert ev is None  # first sighting; no divergence
         ev = rule.on_block(_block(9999, block_id="0xsecond"))
         assert ev is not None
         assert rule.reorg_count == 3
-        assert "Total reorgs observed: 3" in ev.detail
+        assert "Total divergences observed: 3" in ev.detail
 
     def test_bootstrap_accepts_minimal_count_only(self):
         """When we have a count but no detail parse succeeded, the rule
@@ -611,15 +629,15 @@ class TestReorgRule:
         assert rule.last_reorg_old_id is None
 
     def test_bootstrap_recent_ts_preserves_cluster_state(self):
-        """Restart in the middle of a cluster must not drop severity back
-        to WARN — bootstrap rehydrates the cluster-window deque."""
+        """Restart in the middle of a cluster must not drop severity
+        back to INFO — bootstrap rehydrates the cluster-window deque."""
         import dataclasses
         rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
         rule.bootstrap(
             count=2,
-            recent_ts_seconds=[1000.0, 1100.0],  # 2 reorgs already in window
+            recent_ts_seconds=[1000.0, 1100.0],  # 2 divergences already in window
         )
-        # The third reorg inside the window should now escalate.
+        # The third divergence inside the window should now escalate.
         b1 = _block(500, block_id="0xpre")
         b2 = _block(500, block_id="0xpost")
         b1 = dataclasses.replace(b1, timestamp_ms=1_200_000)
@@ -627,8 +645,144 @@ class TestReorgRule:
         assert rule.on_block(b1) is None
         ev = rule.on_block(b2)
         assert ev is not None
-        assert ev.severity == Severity.CRITICAL
+        assert ev.severity == Severity.WARN
         assert "Cluster" in ev.detail
+
+
+class TestBlockProcessingSlowdownRule:
+    """Predictive precursor for ``StallRule``. Fires while the node is
+    still keeping up but per-block ``total_us`` has shifted into a
+    danger zone — gives operators time to react before cadence drops."""
+
+    def _rule(self, window: int = 5, warn_us: int = 10_000, critical_us: int = 50_000) -> BlockProcessingSlowdownRule:
+        # Tiny window so the tests don't have to feed 120 blocks each.
+        return BlockProcessingSlowdownRule(
+            window=window, warn_us=warn_us, critical_us=critical_us
+        )
+
+    def test_silent_until_window_full(self):
+        """Don't fire on partial windows — one anomalous block at
+        startup must not trigger the alarm."""
+        rule = self._rule(window=5)
+        # 4 blocks, all over WARN threshold — but window not full.
+        for n in range(4):
+            assert rule.on_block(_block(n, total_us=20_000)) is None
+
+    def test_quiet_baseline_stays_clear(self):
+        """Median 500 µs (the test-fixture default) is well below
+        warn_us = 10 ms; rule must stay CLEAR."""
+        rule = self._rule(window=5)
+        events = []
+        for n in range(20):
+            ev = rule.on_block(_block(n))  # total_us=500
+            if ev is not None:
+                events.append(ev)
+        assert events == []
+
+    def test_warn_arms_when_median_crosses_warn_threshold(self):
+        """Sustained median at ~12 ms (above warn_us = 10 ms but below
+        critical_us = 50 ms) should arm WARN."""
+        rule = self._rule(window=5)
+        # Fill the window with 12 ms blocks.
+        events = []
+        for n in range(5):
+            ev = rule.on_block(_block(n, total_us=12_000))
+            if ev is not None:
+                events.append(ev)
+        assert len(events) == 1
+        assert events[0].severity == Severity.WARN
+        assert events[0].rule == "block_processing_slowdown"
+        assert "12.0 ms" in events[0].detail
+        assert "Predictive" in events[0].detail
+
+    def test_critical_arms_directly_from_clear(self):
+        """Median jumping straight past WARN to CRITICAL fires CRITICAL
+        only — not a WARN+CRITICAL pair."""
+        rule = self._rule(window=5)
+        events = []
+        for n in range(5):
+            ev = rule.on_block(_block(n, total_us=80_000))  # 80 ms, > critical 50 ms
+            if ev is not None:
+                events.append(ev)
+        assert len(events) == 1
+        assert events[0].severity == Severity.CRITICAL
+
+    def test_warn_to_critical_escalation(self):
+        """WARN arm, then median rises past critical_us → CRITICAL.
+        The intermediate WARN is NOT re-emitted."""
+        rule = self._rule(window=5)
+        # Fill with 15 ms (WARN territory).
+        for n in range(5):
+            rule.on_block(_block(n, total_us=15_000))
+        # State is now WARN. Drift up to 60 ms (CRITICAL).
+        events = []
+        for n in range(5, 15):
+            ev = rule.on_block(_block(n, total_us=60_000))
+            if ev is not None:
+                events.append(ev)
+        assert any(e.severity == Severity.CRITICAL for e in events)
+        # Should not see any extra WARN events during the escalation.
+        assert sum(1 for e in events if e.severity == Severity.WARN) == 0
+
+    def test_recovered_fires_only_after_hysteresis_clears(self):
+        """A median grazing back below the arm threshold must NOT
+        fire RECOVERED yet; it must drop below `arm * (1 - hysteresis)`
+        — otherwise boundary oscillation produces a flap."""
+        rule = self._rule(window=5)
+        # Arm at 12 ms.
+        for n in range(5):
+            rule.on_block(_block(n, total_us=12_000))
+        assert rule._state == Severity.WARN
+
+        # Push median to 9 ms — just below warn_us=10 ms but still
+        # above the disarm threshold (8 ms = warn_us * 0.8). Should
+        # stay armed.
+        for n in range(5, 10):
+            ev = rule.on_block(_block(n, total_us=9_000))
+            assert ev is None
+        assert rule._state == Severity.WARN
+
+        # Now drop to 5 ms — well below 8 ms disarm threshold.
+        events = []
+        for n in range(10, 15):
+            ev = rule.on_block(_block(n, total_us=5_000))
+            if ev is not None:
+                events.append(ev)
+        assert len(events) == 1
+        assert events[0].severity == Severity.RECOVERED
+        assert rule._state is None
+
+    def test_critical_to_warn_is_silent(self):
+        """De-escalation CRITICAL → WARN stays silent — we're still
+        in alarm overall. RECOVERED fires only on full disarm to CLEAR."""
+        rule = self._rule(window=5)
+        # Arm at CRITICAL (80 ms).
+        for n in range(5):
+            rule.on_block(_block(n, total_us=80_000))
+        assert rule._state == Severity.CRITICAL
+
+        # Drop to 15 ms (WARN band).
+        events = []
+        for n in range(5, 12):
+            ev = rule.on_block(_block(n, total_us=15_000))
+            if ev is not None:
+                events.append(ev)
+        # No event emitted on the CRITICAL→WARN transition.
+        assert events == []
+        assert rule._state == Severity.WARN
+
+    def test_single_outlier_block_doesnt_arm(self):
+        """A 200 ms block among 4 normal ones should not push the
+        median high enough to arm — that's the whole point of using
+        median over mean."""
+        rule = self._rule(window=5)
+        # 4 quiet (500 µs) + 1 outlier (200 ms).
+        for n in range(4):
+            assert rule.on_block(_block(n, total_us=500)) is None
+        ev = rule.on_block(_block(4, total_us=200_000))
+        # Window is now [500, 500, 500, 500, 200_000]; sorted median = 500.
+        assert ev is None
+        assert rule._state is None
 
 
 class TestReferenceLagRule:

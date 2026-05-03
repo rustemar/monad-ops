@@ -1,23 +1,32 @@
-"""Reorg detector.
+"""Pre-finalization block-id divergence detector.
 
-Fires when the same ``block_number`` is observed twice with a
-*different* ``block_id``. Monad uses HotStuff-2 consensus which provides
-optimistic responsiveness + pipelined finality, so single-block reorgs
-on testnet are an expected background event under load — most chains see
-a small steady rate that does not require operator action.
+Fires when the same ``block_number`` is observed twice with a *different*
+``block_id`` in the ``__exec_block`` log stream from monad-execution. The
+``block_id`` field is the **execution-layer hash**, distinct from the
+EVM-canonical block hash returned by ``eth_getBlockByNumber``: a sample
+of canonical RPC blocks shows our ``block_id`` never matches the RPC
+hash, on either reorged or non-reorged blocks. The two are different
+namespaces.
 
-Severity policy:
-  * Default = WARN. A lone reorg is a chain observation, not an incident
-    the operator needs to wake up for. Painting the dashboard CRITICAL
-    on every isolated reorg overloads the colour and means the header
-    pill stays red on a healthy node.
-  * CRITICAL = ``cluster_threshold`` reorgs within ``cluster_window_sec``.
-    Clusters are the operationally interesting case (chain instability,
-    correlated validator drop-off, local divergence) and warrant the
-    stronger signal.
+What we measure is therefore execution-layer re-execution at the same
+height pre-finalization: HotStuff-2 speculation, not a finality
+violation. Monad's pipelined finality means a reorged block_number with
+depth 0–1 is expected protocol behaviour; the chain still finalizes
+correctly on the canonical RPC. Operators reading "reorg" should not
+infer a chain rollback.
+
+Severity policy (post-2026-05-03 reframe — see
+``wiki/decisions/reorg-severity-reframe-20260503.md``):
+  * Default = INFO. A single divergence event is normal HotStuff-2
+    behaviour; surface it for visibility but do NOT paint the dashboard.
+  * WARN = ``cluster_threshold`` divergences within ``cluster_window_sec``.
+    Clusters can correlate with chain instability or correlated validator
+    drop-off and are worth a glance, but still not a CRITICAL — the
+    canonical chain finalizes regardless. The journal-capture artifact
+    on each fire remains the operationally interesting payload.
 
 Memory bound: we keep the last ``track_window`` seen ``(number, id)``
-pairs, not the whole history. Reorgs happen close in time to the
+pairs, not the whole history. Divergences happen close in time to the
 original observation or not at all; a deep-fork detector would need
 parent pointers which we do not currently parse.
 """
@@ -128,33 +137,40 @@ class ReorgRule:
         self._recent_ts.append(ts_sec)
         in_window = len(self._recent_ts)
         is_cluster = in_window >= self.cluster_threshold
-        severity = Severity.CRITICAL if is_cluster else Severity.WARN
+        severity = Severity.WARN if is_cluster else Severity.INFO
 
         if is_cluster:
             cluster_note = (
-                f" Cluster: {in_window} reorgs in the last "
-                f"{self.cluster_window_sec // 60}min — escalated to critical."
+                f" Cluster: {in_window} divergences in the last "
+                f"{self.cluster_window_sec // 60}min — escalated to WARN."
             )
         else:
             cluster_note = ""
 
         return AlertEvent(
+            # rule key kept as "reorg" for storage / API / frontend
+            # compatibility (existing alert history, journal-capture
+            # button wiring, dashboard chip filters). The user-facing
+            # framing — title, detail, severity tiers — is what changed
+            # in the 2026-05-03 reframe.
             rule="reorg",
             severity=severity,
-            # Key includes the new block_id so a chain of reorgs at the
-            # same height (rare, but possible in a brief fork) each
+            # Key includes the new block_id so a chain of divergences at
+            # the same height (rare, but possible in a brief fork) each
             # produce a distinct event rather than getting collapsed by
             # the deduping sink.
             key=f"reorg:{block.block_number}:{block.block_id}",
-            title="Chain reorg detected",
+            title="Pre-finalization block-id divergence",
             detail=(
-                f"Block #{block.block_number} id changed: "
+                f"Block #{block.block_number} exec-layer id changed: "
                 f"{_short(prev_id)} → {_short(block.block_id)}. "
                 # "observed" (not "since start") — counter is bootstrapped
                 # from sqlite on startup, so it reflects total lifetime of
                 # the node, not uptime of the current process.
-                f"Total reorgs observed: {self.reorg_count}."
+                f"Total divergences observed: {self.reorg_count}."
                 f"{cluster_note}"
+                " Execution-layer observation, not a finality violation —"
+                " HotStuff-2 expected behaviour at pre-finalization depth."
             ),
         )
 
