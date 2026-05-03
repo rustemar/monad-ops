@@ -1621,20 +1621,22 @@ function updateIntegrity(d) {
     // single reorgs are background noise, recent activity is what an
     // operator actually wants to see at a glance.
     //
-    // Card colouring is driven by recent (not lifetime) for the same
-    // reason: a healthy node accumulates lifetime reorgs over time;
-    // colouring the card by lifetime would mean it stays coloured
-    // forever and loses signal value. Threshold for crit (3) matches
-    // the rule's default cluster threshold.
+    // Card colouring is driven by recent (not lifetime): a healthy node
+    // accumulates lifetime reorgs over time; colouring by lifetime would
+    // mean the card stays coloured forever. Post-2026-05-03 reframe,
+    // single divergences are INFO and clusters are WARN — there's no
+    // rule path that takes reorg events to CRITICAL, so the card never
+    // paints red. The orange tint kicks in at the cluster threshold
+    // (matches `cluster_threshold` default of 3) so the card severity
+    // tracks the rule severity rather than a separate scale.
     card.classList.remove("has-recent-reorg-warn", "has-recent-reorg-crit");
     if (recent24h > 0) {
         recent.hidden = false;
         recent.textContent = `${recent24h} in last 24h`;
         if (recent24h >= 3) {
-            card.classList.add("has-recent-reorg-crit");
-        } else {
             card.classList.add("has-recent-reorg-warn");
         }
+        // 1–2 events = single INFO divergences; chip stays neutral.
     } else {
         recent.hidden = true;
         recent.textContent = "";

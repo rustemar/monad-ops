@@ -366,11 +366,13 @@
                     <div class="integrity-detail" id="integrity-detail">—</div>
                 </div>
                 <div class="integrity-note">
-                    A reorg means the same block number appeared with two different
-                    block_ids — a chain rewrite. Monad's HotStuff-2 consensus gives
-                    deterministic finality, so in healthy conditions this counter stays
-                    at 0. Non-zero = either a network-wide safety event or local state
-                    corruption on this node.
+                    The counter reflects pre-finalization block-id divergence at
+                    the execution layer — observed when the same block number
+                    arrives with a different exec-layer id. HotStuff-2 expected
+                    behaviour at depth 0–1; the canonical chain finalizes
+                    correctly regardless. Single events are informational; the
+                    card tints amber when ≥3 events land in the last 24h
+                    (cluster threshold).
                 </div>
             </div>
         </section>
