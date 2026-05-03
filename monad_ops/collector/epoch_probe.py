@@ -117,6 +117,83 @@ async def scan_epoch_history(
     return results
 
 
+async def find_current_epoch_first_seq(
+    target_epoch: int,
+    unit: str = "monad-bft",
+    since: str = "2 hours ago",
+    timeout_sec: float = 30.0,
+) -> int | None:
+    """Quick targeted scan: smallest ``block_seq_num`` whose
+    ``block_epoch`` matches ``target_epoch`` in the recent journal.
+
+    Complements ``scan_epoch_history`` (24h, full chronological scan,
+    populates `_epochs` for typical-length learning) — that one takes
+    30–90s on a busy host. After a restart that crossed an epoch
+    boundary, the carried-forward `_carried_current_first_seq` is for
+    the OLD epoch and gets ignored, so the dashboard reads as
+    "epoch just started" until the slow scan finishes.
+
+    This function answers a narrower question — "where did the current
+    epoch start?" — by reading roughly the last hour or two of journal
+    and tracking only one number. Cheap (1–3s on a normal host) and
+    one-shot: called once after the live probe identifies the current
+    epoch.
+
+    Returns the seq_num or None if nothing matched (target_epoch is
+    further in the past than `since`, or the journal window had no
+    matching markers — caller treats that as "no information, leave
+    state alone").
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "journalctl", "-u", unit, "-o", "cat", "--no-pager",
+            "--since", since,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            limit=1_000_000,
+        )
+    except FileNotFoundError:
+        return None
+    target = f'"block_epoch":"{target_epoch}"'
+    smallest: int | None = None
+    try:
+        async def _drain():
+            nonlocal smallest
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    return
+                line = raw.decode("utf-8", errors="replace")
+                # Cheap reject before regex.
+                if target not in line:
+                    continue
+                m = _EPOCH_RX.search(line)
+                if m is None:
+                    continue
+                seq = int(m.group(1))
+                if int(m.group(2)) != target_epoch:
+                    # The pre-filter substring `"block_epoch":"X"` could
+                    # match a `parent_block_epoch` field in the same
+                    # line; the regex extracts the canonical
+                    # `block_epoch` value so we double-check here.
+                    continue
+                if smallest is None or seq < smallest:
+                    smallest = seq
+        await asyncio.wait_for(_drain(), timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        pass
+    finally:
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=3)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                try: proc.kill()
+                except ProcessLookupError: pass
+    return smallest
+
+
 async def probe_epoch(
     unit: str = "monad-bft",
     since: str = "30 seconds ago",
