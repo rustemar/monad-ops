@@ -62,6 +62,21 @@ class ReferenceLagRuleConfig(BaseModel):
     window: int = 2
 
 
+class NetworkLayerSignalRuleConfig(BaseModel):
+    """Aggregate rate of monad-bft network-layer error events.
+
+    Watches three sparse-at-baseline event classes (RaptorCast decrypt
+    fail + wireauth session timeout + consensus_state timestamp
+    validation fail) over a rolling 5-min window. Defaults calibrated
+    on this node 2026-05-03 — baseline ~0.07 events/min (calm hour),
+    burst ~6.7 events/min (this morning's reorg storm). 5/15 thresholds
+    give clean separation without firing on isolated stray events.
+    """
+    window_sec: int = 300  # 5 minutes
+    warn_count: int = 5    # = 60/h sustained — well above any observed steady-state hour
+    critical_count: int = 15  # = 180/h — deep into burst territory
+
+
 class BlockProcessingSlowdownRuleConfig(BaseModel):
     """Predictive rule on rolling median ``total_us``.
 
@@ -106,6 +121,7 @@ class RulesConfig(BaseModel):
     reference_lag: ReferenceLagRuleConfig = ReferenceLagRuleConfig()
     reorg: ReorgRuleConfig = ReorgRuleConfig()
     block_processing_slowdown: BlockProcessingSlowdownRuleConfig = BlockProcessingSlowdownRuleConfig()
+    network_layer_signal: NetworkLayerSignalRuleConfig = NetworkLayerSignalRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

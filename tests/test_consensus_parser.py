@@ -163,6 +163,70 @@ def test_extracted_ts_ms_is_monotonic_in_fixture() -> None:
     assert all(t > 0 for t in timestamps)
 
 
+def test_parses_network_decrypt_fail() -> None:
+    """RaptorCast UDP-auth decrypt-fail line surfaces as
+    NETWORK_DECRYPT_FAIL with ts_ms populated; round/epoch unset."""
+    line = (
+        '{"timestamp":"2026-05-03T11:43:41.179560Z","level":"DEBUG",'
+        '"fields":{"message":"failed to decrypt message",'
+        '"addr":"<ip>","error":"SessionIndexNotFound { index: 41143 }"},'
+        '"target":"monad_raptorcast::auth::socket"}'
+    )
+    ev = parse_consensus(line)
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.NETWORK_DECRYPT_FAIL
+    assert ev.ts_ms > 0
+    assert ev.epoch is None
+
+
+def test_parses_network_session_timeout() -> None:
+    """wireauth session-timeout-expired line surfaces as
+    NETWORK_SESSION_TIMEOUT."""
+    line = (
+        '{"timestamp":"2026-05-03T11:43:41.677330Z","level":"DEBUG",'
+        '"fields":{"message":"session timeout expired",'
+        '"remote_addr":"<ip>"},'
+        '"target":"monad_wireauth::session::transport"}'
+    )
+    ev = parse_consensus(line)
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.NETWORK_SESSION_TIMEOUT
+    assert ev.ts_ms > 0
+
+
+def test_parses_network_timestamp_invalid() -> None:
+    """consensus_state Timestamp-validation-failed line surfaces as
+    NETWORK_TIMESTAMP_INVALID. WARN-level, distinct from the DEBUG
+    network-stack events above."""
+    line = (
+        '{"timestamp":"2026-05-03T07:33:14.577673Z","level":"WARN",'
+        '"fields":{"message":"Timestamp validation failed",'
+        '"prev_block_ts":"1777793594035849935",'
+        '"curr_block_ts":"1777793595654058190",'
+        '"local_ts":"1777793594573060313"},'
+        '"target":"monad_consensus_state"}'
+    )
+    ev = parse_consensus(line)
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.NETWORK_TIMESTAMP_INVALID
+    assert ev.ts_ms > 0
+
+
+def test_network_event_substrings_dont_match_unrelated_lines() -> None:
+    """The bare phrase 'session timeout' shouldn't match if it appears
+    in some other field's value (e.g. an error string). Markers are
+    fully qualified on `"message":"<phrase>"` to avoid that."""
+    # Nested `session timeout` mention inside a Debug repr — should NOT
+    # be classified as a network event.
+    line = (
+        '{"timestamp":"2026-05-03T11:43:41Z","level":"DEBUG",'
+        '"fields":{"message":"some other event",'
+        '"detail":"caused by session timeout expired earlier"},'
+        '"target":"some_target"}'
+    )
+    assert parse_consensus(line) is None
+
+
 def test_full_fixture_yields_expected_distribution() -> None:
     """End-to-end: count of TC vs QC vs local timeout matches what we
     captured. If this breaks, either the regex drifted or the fixture
