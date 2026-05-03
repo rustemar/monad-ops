@@ -140,6 +140,23 @@ class State:
         # bar empty until the backfill finishes. Once a fresh bracketed
         # observation is available, the live computation overrides.
         self._carried_typical_length: int | None = None
+        # Current epoch number + first seq_num observed for it, also
+        # carried across restart. Without this, the dashboard's
+        # `blocks_in` reads as ~1 (whatever the live probe just sampled)
+        # for the duration of the journal backfill — visually identical
+        # to "epoch just started" even when the real epoch is hours in.
+        # Used only when the live probe's first observation matches the
+        # carried epoch number; if the carried epoch is stale (we
+        # restarted across a boundary) it's ignored silently.
+        self._carried_current_epoch: int | None = None
+        self._carried_current_first_seq: int | None = None
+        # In-memory mirrors of the persisted meta values. Lets us skip
+        # the SQL round-trip on observe_epoch when nothing has changed —
+        # important during backfill which calls observe_epoch ~100K
+        # times in ~30s.
+        self._persisted_typical_length: int | None = None
+        self._persisted_current_epoch: int | None = None
+        self._persisted_current_first_seq: int | None = None
         # bft consensus accumulator. Closed minutes live in the deque;
         # the in-progress minute lives in `_bft_current` and gets flushed
         # to both the deque and storage on every minute roll.
@@ -188,10 +205,30 @@ class State:
         if epoch <= 0 or seq_num <= 0:
             return
         live_typical: int | None = None
+        current_epoch: int | None = None
+        current_first_seq: int | None = None
         with self._lock:
             prev = self._epochs.get(epoch)
             if prev is None:
-                self._epochs[epoch] = (seq_num, seq_num)
+                # First observation of this epoch in-memory. If the
+                # carried map promises a real first_seq for it, seed
+                # from there so blocks_in is correct from the very
+                # first probe sample. Skip the carry when:
+                #   * no carried entry, OR
+                #   * carried epoch differs (stale across restart that
+                #     crossed a boundary), OR
+                #   * carried first_seq is somehow > current seq (would
+                #     produce a negative blocks_in — paranoid guard).
+                if (
+                    epoch == self._carried_current_epoch
+                    and self._carried_current_first_seq is not None
+                    and self._carried_current_first_seq <= seq_num
+                ):
+                    self._epochs[epoch] = (
+                        self._carried_current_first_seq, seq_num,
+                    )
+                else:
+                    self._epochs[epoch] = (seq_num, seq_num)
             else:
                 first, last = prev
                 self._epochs[epoch] = (min(first, seq_num), max(last, seq_num))
@@ -216,42 +253,98 @@ class State:
                 # snapshots see the live value first; survives across
                 # restart only after the storage write below completes.
                 self._carried_typical_length = live_typical
+            # Snapshot the current-epoch view for persistence outside
+            # the lock. `current_epoch == max(_epochs)` because epoch
+            # numbers monotonically increase on testnet.
+            current_epoch = max(self._epochs)
+            current_first_seq = self._epochs[current_epoch][0]
         # Persist outside the State lock — Storage has its own lock.
-        # Skip when nothing changed to avoid hot-loop sqlite writes
-        # during steady state.
-        if (
-            live_typical is not None
-            and self._storage is not None
-        ):
+        # Compare against in-memory mirrors so we skip the SQL write
+        # when nothing changed (especially important during backfill,
+        # which fires observe_epoch ~100K times in ~30s).
+        if self._storage is not None:
             try:
-                if self._storage.get_meta("epoch_typical_length") != str(live_typical):
-                    self._storage.put_meta("epoch_typical_length", str(live_typical))
+                if (
+                    live_typical is not None
+                    and live_typical != self._persisted_typical_length
+                ):
+                    self._storage.put_meta(
+                        "epoch_typical_length", str(live_typical)
+                    )
+                    self._persisted_typical_length = live_typical
+                if current_epoch != self._persisted_current_epoch:
+                    self._storage.put_meta(
+                        "epoch_current", str(current_epoch)
+                    )
+                    self._persisted_current_epoch = current_epoch
+                if current_first_seq != self._persisted_current_first_seq:
+                    self._storage.put_meta(
+                        "epoch_current_first_seq", str(current_first_seq)
+                    )
+                    self._persisted_current_first_seq = current_first_seq
             except Exception:
                 # Persistence is best-effort; in-memory state is the
                 # source of truth for the live dashboard.
                 pass
 
     def bootstrap_carried_epoch_length(self) -> None:
-        """Populate `_carried_typical_length` from the meta table.
+        """Populate carried-forward epoch fields from the meta table.
 
-        Called once at startup. If the previous run learned an epoch
-        length, the dashboard renders against that estimate immediately
-        instead of showing the "epoch length unknown" placeholder for
-        the duration of the journal backfill (~30–90 s on a fresh
-        restart, longer if monad-bft journal retention is short).
+        Three values together let the dashboard render correct progress
+        the moment the live probe returns its first sample, instead of
+        waiting on the journal backfill (~30–90 s, longer if journald
+        retention is short):
+
+          * ``epoch_typical_length`` — median bracketed-epoch size,
+            used as fallback for typical_length until a fresh
+            bracketed observation arrives.
+          * ``epoch_current`` + ``epoch_current_first_seq`` — the
+            previous run's idea of the current epoch number and its
+            real first seq_num. Honoured only when the live probe's
+            first observation matches the carried epoch (we're still
+            in the same epoch); a restart that crosses a boundary
+            ignores the stale carried first_seq and starts fresh.
         """
         if self._storage is None:
             return
-        raw = self._storage.get_meta("epoch_typical_length")
-        if raw is None:
-            return
-        try:
-            value = int(raw)
-        except ValueError:
-            return
-        if value > 0:
-            with self._lock:
-                self._carried_typical_length = value
+        raw_typical = self._storage.get_meta("epoch_typical_length")
+        raw_epoch = self._storage.get_meta("epoch_current")
+        raw_first_seq = self._storage.get_meta("epoch_current_first_seq")
+
+        carried_typical: int | None = None
+        carried_epoch: int | None = None
+        carried_first_seq: int | None = None
+        if raw_typical is not None:
+            try:
+                v = int(raw_typical)
+                if v > 0:
+                    carried_typical = v
+            except ValueError:
+                pass
+        if raw_epoch is not None:
+            try:
+                v = int(raw_epoch)
+                if v > 0:
+                    carried_epoch = v
+            except ValueError:
+                pass
+        if raw_first_seq is not None:
+            try:
+                v = int(raw_first_seq)
+                if v > 0:
+                    carried_first_seq = v
+            except ValueError:
+                pass
+
+        with self._lock:
+            self._carried_typical_length = carried_typical
+            self._carried_current_epoch = carried_epoch
+            self._carried_current_first_seq = carried_first_seq
+            # Seed the persisted-mirrors so the first observe_epoch
+            # call doesn't re-write the same values it just loaded.
+            self._persisted_typical_length = carried_typical
+            self._persisted_current_epoch = carried_epoch
+            self._persisted_current_first_seq = carried_first_seq
 
     def _bft_window_summary(self, window_sec: int) -> tuple[float, float, int, int]:
         """Aggregate bft counters across the last ``window_sec`` seconds.
