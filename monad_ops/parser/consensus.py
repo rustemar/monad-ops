@@ -47,6 +47,15 @@ class ConsensusEventKind(StrEnum):
     ROUND_ADVANCE_TC = "round_advance_tc"   # round closed by TimeoutCertificate (chain-wide timeout)
     LOCAL_TIMEOUT = "local_timeout"         # this node's pacemaker fired
     PROPOSAL = "proposal"                    # proposal message with base_fee for the fee curve
+    # Network-layer signals from monad-bft. RaptorCast UDP-auth decrypt
+    # failure, wireauth peer-session timeout, consensus_state timestamp
+    # validation failure. Sparse at steady state (~0–4/h) but surge
+    # during peer-connectivity disruptions; consumed by
+    # ``NetworkLayerSignalRule`` for early-warning on network-stack
+    # health, distinct from consensus-layer round/timeout signals above.
+    NETWORK_DECRYPT_FAIL = "network_decrypt_fail"
+    NETWORK_SESSION_TIMEOUT = "network_session_timeout"
+    NETWORK_TIMESTAMP_INVALID = "network_timestamp_invalid"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +91,15 @@ _ADVANCING_ROUND_MARKER = '"advancing round"'
 # don't even pay the regex cost.
 _PROPOSAL_MARKER = '"proposal message"'
 _BASE_FEE_MARKER = "base_fee:"
+
+# Network-layer signal markers. Each fully-qualifies on
+# ``"message":"<phrase>"`` so we don't accidentally match these phrases
+# embedded in arbitrary Debug reprs (e.g. an error string that happens
+# to contain "session timeout"). All three are sparse at baseline so
+# the cheap-substring pass remains effectively a reject filter.
+_NETWORK_DECRYPT_FAIL_MARKER = '"message":"failed to decrypt message"'
+_NETWORK_SESSION_TIMEOUT_MARKER = '"message":"session timeout expired"'
+_NETWORK_TIMESTAMP_INVALID_MARKER = '"message":"Timestamp validation failed"'
 
 # ── extraction patterns ───────────────────────────────────────────────
 # ISO-8601 timestamp at start of the JSON envelope.
@@ -126,10 +144,39 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     has_local_timeout = _LOCAL_TIMEOUT_MARKER in line
     has_advancing_round = _ADVANCING_ROUND_MARKER in line
     has_proposal = _PROPOSAL_MARKER in line and _BASE_FEE_MARKER in line
-    if not (has_local_timeout or has_advancing_round or has_proposal):
+    has_decrypt_fail = _NETWORK_DECRYPT_FAIL_MARKER in line
+    has_session_timeout = _NETWORK_SESSION_TIMEOUT_MARKER in line
+    has_timestamp_invalid = _NETWORK_TIMESTAMP_INVALID_MARKER in line
+    if not (
+        has_local_timeout
+        or has_advancing_round
+        or has_proposal
+        or has_decrypt_fail
+        or has_session_timeout
+        or has_timestamp_invalid
+    ):
         return None
 
     ts_ms = _extract_ts_ms(line)
+
+    # Network-layer events first — cheapest path, no further regex.
+    # Round/epoch are not on these lines; ts_ms is enough for the
+    # NetworkLayerSignalRule's sliding-window rate calculation.
+    if has_decrypt_fail:
+        return ConsensusEvent(
+            kind=ConsensusEventKind.NETWORK_DECRYPT_FAIL,
+            round=0, epoch=None, ts_ms=ts_ms,
+        )
+    if has_session_timeout:
+        return ConsensusEvent(
+            kind=ConsensusEventKind.NETWORK_SESSION_TIMEOUT,
+            round=0, epoch=None, ts_ms=ts_ms,
+        )
+    if has_timestamp_invalid:
+        return ConsensusEvent(
+            kind=ConsensusEventKind.NETWORK_TIMESTAMP_INVALID,
+            round=0, epoch=None, ts_ms=ts_ms,
+        )
 
     if has_local_timeout:
         m = _LOCAL_TIMEOUT_RX.search(line)

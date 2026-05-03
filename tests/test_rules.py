@@ -1,7 +1,8 @@
-from monad_ops.parser import ExecBlock
+from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules import (
     BlockProcessingSlowdownRule,
     CodeColor,
+    NetworkLayerSignalRule,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
@@ -869,6 +870,151 @@ class TestReferenceLagRule:
         # whose min-of-window falls below the disarm threshold.
         ev = self._s(rule, 1005, 1000)
         assert ev is not None and ev.severity == Severity.RECOVERED
+
+
+class TestNetworkLayerSignalRule:
+    """Aggregate-rate rule across three monad-bft network-layer event
+    classes. Sparse at baseline (<1 event/min observed); fires on
+    cluster-shape bursts that historically co-occur with chain
+    disagreement. Rule is per-event for the count and per-tick for
+    natural de-arming as events fall out of the rolling window."""
+
+    def _ev(self, kind: ConsensusEventKind, ts_sec: float) -> ConsensusEvent:
+        return ConsensusEvent(
+            kind=kind, round=0, epoch=None, ts_ms=int(ts_sec * 1000),
+        )
+
+    def _decrypt(self, ts: float) -> ConsensusEvent:
+        return self._ev(ConsensusEventKind.NETWORK_DECRYPT_FAIL, ts)
+
+    def _session(self, ts: float) -> ConsensusEvent:
+        return self._ev(ConsensusEventKind.NETWORK_SESSION_TIMEOUT, ts)
+
+    def _ts_invalid(self, ts: float) -> ConsensusEvent:
+        return self._ev(ConsensusEventKind.NETWORK_TIMESTAMP_INVALID, ts)
+
+    def test_quiet_baseline_stays_clear(self):
+        """Stray events (1-2 per minute) below warn_count must not arm."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        events = []
+        # 4 events over 5 min — below warn_count=5.
+        for i in range(4):
+            ev = rule.on_event(self._decrypt(i * 60), now_sec=i * 60)
+            if ev is not None:
+                events.append(ev)
+        assert events == []
+
+    def test_warn_arms_on_burst(self):
+        """5 events of any class within window_sec arms WARN."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        events = []
+        for i in range(5):
+            ev = rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+            if ev is not None:
+                events.append(ev)
+        assert len(events) == 1
+        assert events[0].severity == Severity.WARN
+        assert events[0].rule == "network_layer_signal"
+        assert "5 monad-bft network-layer event" in events[0].detail
+        assert "decrypt-fail=5" in events[0].detail
+        assert "session-timeout=0" in events[0].detail
+        assert "Predictive" in events[0].detail
+
+    def test_critical_arms_directly_on_large_burst(self):
+        """A burst that lands above critical_count arms CRITICAL
+        directly, not WARN+CRITICAL."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        events = []
+        for i in range(15):
+            # Mix all three classes — the rule sums across.
+            kind = [
+                ConsensusEventKind.NETWORK_DECRYPT_FAIL,
+                ConsensusEventKind.NETWORK_SESSION_TIMEOUT,
+                ConsensusEventKind.NETWORK_TIMESTAMP_INVALID,
+            ][i % 3]
+            ev = rule.on_event(self._ev(kind, 100.0 + i), now_sec=100.0 + i)
+            if ev is not None:
+                events.append(ev)
+        # First arm is at the 5th event (WARN), then at the 15th (CRITICAL).
+        severities = [e.severity for e in events]
+        assert Severity.CRITICAL in severities
+        # Per-class breakdown should reflect the mix (5/5/5).
+        crit = next(e for e in events if e.severity == Severity.CRITICAL)
+        assert "decrypt-fail=5" in crit.detail
+        assert "session-timeout=5" in crit.detail
+        assert "timestamp-invalid=5" in crit.detail
+
+    def test_recovered_fires_when_window_empties(self):
+        """As old events age out of the rolling window, the count drops
+        below the disarm threshold and RECOVERED fires on tick."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        # Burst at t=100..104 — 5 events arms WARN.
+        for i in range(5):
+            rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+        assert rule._state == Severity.WARN
+
+        # Tick at t=410 (5 min + 6 sec after first event) — all events
+        # have aged out.
+        ev = rule.on_tick(now_sec=410.0)
+        assert ev is not None
+        assert ev.severity == Severity.RECOVERED
+        assert rule._state is None
+
+    def test_critical_to_warn_is_silent(self):
+        """De-escalation CRITICAL → WARN stays silent (still alarming
+        overall). RECOVERED fires only on full disarm to CLEAR."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        # 16 events — enough to land at CRITICAL.
+        for i in range(16):
+            rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+        assert rule._state == Severity.CRITICAL
+
+        # Tick a bit later, but only enough that ~10 events remain
+        # (still above warn_count=5 but below critical's disarm
+        # threshold of 12).
+        # First 7 events (t=100..106) age out by t=406.
+        ev = rule.on_tick(now_sec=406.0)
+        # State should fall to WARN; no event emitted.
+        assert ev is None
+        assert rule._state == Severity.WARN
+
+    def test_non_network_event_is_ignored(self):
+        """The rule ignores non-network ConsensusEvent kinds — the
+        consensus loop hands us every event without filtering."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        for i in range(10):
+            ev = rule.on_event(
+                ConsensusEvent(
+                    kind=ConsensusEventKind.LOCAL_TIMEOUT,
+                    round=100 + i, epoch=None, ts_ms=int((100.0 + i) * 1000),
+                ),
+                now_sec=100.0 + i,
+            )
+            assert ev is None
+        assert rule._state is None
+
+    def test_hysteresis_silences_oscillation_at_warn_boundary(self):
+        """Count grazing back below warn_count must NOT fire RECOVERED
+        until it drops below warn_count × 0.8 — the disarm threshold."""
+        rule = NetworkLayerSignalRule(window_sec=300, warn_count=5, critical_count=15)
+        # 5 events arms WARN. Spread over 4 sec so the windowing can
+        # selectively drop them later.
+        for i in range(5):
+            rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+        assert rule._state == Severity.WARN
+
+        # Tick at t=400.5: cutoff=100.5; only the event at t=100 falls
+        # out of window. 4 events remain. 4 == disarm threshold (5*0.8),
+        # so the rule stays armed (not strictly less than disarm).
+        ev = rule.on_tick(now_sec=400.5)
+        assert ev is None
+        assert rule._state == Severity.WARN
+
+        # Tick at t=401.5: cutoff=101.5; both t=100 and t=101 fall out.
+        # 3 events remain — below disarm. RECOVERED fires.
+        ev = rule.on_tick(now_sec=401.5)
+        assert ev is not None
+        assert ev.severity == Severity.RECOVERED
 
 
 class TestCodeColor:

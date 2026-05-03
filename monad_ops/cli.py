@@ -39,6 +39,7 @@ from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
     BlockProcessingSlowdownRule,
+    NetworkLayerSignalRule,
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
@@ -414,6 +415,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("retention.error", exc=str(e))
             await asyncio.sleep(interval_sec)
 
+    nls = NetworkLayerSignalRule(
+        window_sec=config.rules.network_layer_signal.window_sec,
+        warn_count=config.rules.network_layer_signal.warn_count,
+        critical_count=config.rules.network_layer_signal.critical_count,
+    )
+
     async def consensus_loop():
         """Tail monad-bft for round advances + local timeouts.
 
@@ -445,6 +452,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 return
             assert isinstance(item, ConsensusEvent)
             await state.add_consensus_event_async(item)
+            ev = nls.on_event(item)
+            if ev is not None:
+                await sink.deliver(ev)
+
+    async def network_signal_tick_loop():
+        """Periodic re-evaluation of NetworkLayerSignalRule so an
+        isolated burst de-arms naturally as events fall out of the
+        rolling window — without waiting for a fresh event."""
+        while True:
+            await asyncio.sleep(5)
+            ev = nls.on_tick()
+            if ev is not None:
+                await sink.deliver(ev)
 
     async def bft_flush_loop():
         """Drain bft pending writes to storage on a 1-second cadence.
@@ -650,9 +670,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
     bft_flush = asyncio.create_task(bft_flush_loop(), name="bft_flush")
     version_task = asyncio.create_task(version_loop(), name="version_watch")
+    network_signal_tick = asyncio.create_task(
+        network_signal_tick_loop(), name="network_signal_tick",
+    )
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
-        version_task,
+        version_task, network_signal_tick,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
