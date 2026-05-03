@@ -86,6 +86,16 @@ Key sections of `config.toml`:
 - `[enrichment]` — receipts-enrichment worker settings.
 
 The user running monad-ops must be in the `systemd-journal` group.
+Add it once and re-login:
+
+```bash
+sudo usermod -aG systemd-journal "$(id -un)"
+```
+
+Or, if you don't want a global group change, uncomment the
+`SupplementaryGroups=systemd-journal` line in
+`systemd/monad-ops.service.example` so the unit grants journal access
+only to the service.
 
 ### Run (manual)
 
