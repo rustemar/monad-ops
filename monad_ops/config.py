@@ -29,6 +29,7 @@ class TelegramConfig(BaseModel):
     chat_id: int
     topic_id: int = 0
     source_tag: str = "monad-ops"
+    drop_severities: list[str] = ["info"]
 
 
 class AlertsConfig(BaseModel):

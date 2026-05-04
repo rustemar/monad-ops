@@ -70,11 +70,17 @@ def _build_sink(config: Config) -> AlertSink:
         log.warning("telegram.not_configured", falling_back="stdout")
         inner: AlertSink = StdoutSink()
     else:
+        from monad_ops.rules.events import Severity
+        drop = frozenset(
+            Severity(s) for s in tg_cfg.drop_severities
+            if s in {sev.value for sev in Severity}
+        )
         inner = TelegramSink(
             bot_token=tg_cfg.bot_token,
             chat_id=tg_cfg.chat_id,
             topic_id=tg_cfg.topic_id,
             source_tag=tg_cfg.source_tag,
+            drop_severities=drop,
         )
     return DedupingSink(inner, cooldown_sec=config.rules.dedup.cooldown_sec)
 

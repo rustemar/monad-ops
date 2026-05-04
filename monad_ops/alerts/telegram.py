@@ -26,14 +26,18 @@ class TelegramSink:
         topic_id: int = 0,
         source_tag: str = "monad-ops",
         timeout_sec: float = 15.0,
+        drop_severities: frozenset[Severity] = frozenset({Severity.INFO}),
     ) -> None:
         self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self._chat_id = chat_id
         self._topic_id = topic_id
         self._source_tag = source_tag
         self._timeout = timeout_sec
+        self._drop = drop_severities
 
     async def deliver(self, event: AlertEvent) -> None:
+        if event.severity in self._drop:
+            return
         emoji = _SEVERITY_EMOJI.get(event.severity, "⚪")
         text = (
             f"{emoji} <b>[{self._source_tag}]</b> {event.title}\n"
