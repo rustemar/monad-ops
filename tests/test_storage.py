@@ -277,6 +277,27 @@ def test_alerts_round_trip(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_list_reorg_alerts_for_capture_returns_block_ts_ms(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    storage.write_block(_mk_block(100))
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.WARN, key="reorg:100:0xabc",
+                   title="t", detail="d"), ts=1_700_000_010.0)
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.INFO, key="reorg:101:0xdef",
+                   title="t", detail="d"), ts=1_700_000_020.0)
+    storage.write_alert(  # too old, must be filtered
+        AlertEvent(rule="reorg", severity=Severity.INFO, key="reorg:99:0x999",
+                   title="t", detail="d"), ts=1_600_000_000.0)
+    storage.write_alert(  # different rule, must be ignored
+        AlertEvent(rule="stall", severity=Severity.WARN, key="stall:1",
+                   title="t", detail="d"), ts=1_700_000_030.0)
+    rows = storage.list_reorg_alerts_for_capture(since_sec=1_700_000_000.0)
+    rows.sort()
+    assert rows == [(100, 1_776_000_040_000), (101, 1_700_000_020_000)]
+    storage.close()
+
+
 def test_list_reorg_minutes_buckets_by_severity(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     base_sec = float((1_777_000_000 // 60) * 60)  # minute-aligned

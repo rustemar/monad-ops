@@ -36,6 +36,7 @@ from monad_ops.parser import AssertionEvent, ConsensusEvent, ExecBlock
 from monad_ops.reorg_capture import (
     CaptureRequest,
     capture_reorg_journal,
+    find_artifact,
     journal_dir_for,
 )
 from monad_ops.replay_export import assemble_window_data, render_static_html
@@ -746,9 +747,54 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     process_restart_task = asyncio.create_task(
         process_restart_loop(), name="process_restart",
     )
+
+    async def reorg_capture_backfill_loop():
+        """Recover reorg journal captures whose live task got cancelled by
+        an ill-timed restart. Idempotent — find_artifact skips blocks that
+        already have a file. Bounded concurrency keeps journalctl polite.
+        Must NOT return — task is in FIRST_COMPLETED gather."""
+        if storage is None or journal_capture_dir is None:
+            await asyncio.Future()
+            return
+        try:
+            cutoff = time.time() - 12 * 3600
+            rows = await asyncio.to_thread(
+                storage.list_reorg_alerts_for_capture, cutoff)
+            sem = asyncio.Semaphore(3)
+            recovered = 0
+
+            async def _maybe(bn: int, ts_ms: int) -> None:
+                nonlocal recovered
+                if find_artifact(journal_capture_dir, bn) is not None:
+                    return
+                async with sem:
+                    path = await capture_reorg_journal(
+                        CaptureRequest(block_number=bn, block_ts_ms=ts_ms),
+                        journal_capture_dir,
+                        flush_buffer_sec=0,
+                    )
+                if path is not None:
+                    recovered += 1
+
+            await asyncio.gather(
+                *(_maybe(bn, ts) for bn, ts in rows),
+                return_exceptions=True,
+            )
+            if recovered:
+                log.info("reorg_capture_backfill.done",
+                         recovered=recovered, scanned=len(rows))
+        except Exception as e:  # noqa: BLE001
+            log.warning("reorg_capture_backfill.error", exc=str(e))
+        await asyncio.Future()
+
+    reorg_backfill = asyncio.create_task(
+        reorg_capture_backfill_loop(), name="reorg_capture_backfill",
+    )
+
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
         version_task, network_signal_tick, process_restart_task,
+        reorg_backfill,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
