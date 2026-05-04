@@ -82,8 +82,8 @@ class NetworkLayerSignalRuleConfig(BaseModel):
     give clean separation without firing on isolated stray events.
     """
     window_sec: int = 300  # 5 minutes
-    warn_count: int = 5    # = 60/h sustained — well above any observed steady-state hour
-    critical_count: int = 15  # = 180/h — deep into burst territory
+    warn_count: int = 10   # raised 2026-05-04: 5 was bouncing on healthy network noise
+    critical_count: int = 15
 
 
 class BlockProcessingSlowdownRuleConfig(BaseModel):

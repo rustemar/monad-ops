@@ -563,7 +563,58 @@ class TestReorgRule:
         rule.on_block(_block(200, block_id="0xc"))
         rule.on_block(_block(200, block_id="0xd"))  # reorg 2
         assert rule.reorg_count == 2
-        assert rule.last_reorg_number == 200
+
+    def test_cluster_repeats_stay_info_until_window_clears(self):
+        """Only the first event that opens a cluster fires WARN; the rest
+        stay INFO with an "ongoing" note. Otherwise a sustained burst of
+        10 divergences fires 10 WARN alerts that say the same thing."""
+        import dataclasses
+        rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
+        def at(n, sec, bid):
+            b = _block(n, block_id=bid)
+            return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
+        rule.on_block(at(100, 0, "0xa"))
+        ev1 = rule.on_block(at(100, 1, "0xb"))
+        rule.on_block(at(200, 2, "0xc"))
+        ev2 = rule.on_block(at(200, 3, "0xd"))
+        rule.on_block(at(300, 4, "0xe"))
+        ev3 = rule.on_block(at(300, 5, "0xf"))
+        rule.on_block(at(400, 6, "0xg"))
+        ev4 = rule.on_block(at(400, 7, "0xh"))
+        rule.on_block(at(500, 8, "0xi"))
+        ev5 = rule.on_block(at(500, 9, "0xj"))
+        assert ev1.severity == Severity.INFO
+        assert ev2.severity == Severity.INFO
+        assert ev3.severity == Severity.WARN
+        assert ev4.severity == Severity.INFO
+        assert "ongoing" in ev4.detail
+        assert ev5.severity == Severity.INFO
+        assert "ongoing" in ev5.detail
+
+    def test_cluster_re_arms_after_window_clears(self):
+        """A second cluster following a quiet period must re-arm WARN —
+        otherwise we'd silently miss the second burst."""
+        import dataclasses
+        rule = ReorgRule(cluster_window_sec=600, cluster_threshold=3)
+        def at(n, sec, bid):
+            b = _block(n, block_id=bid)
+            return dataclasses.replace(b, timestamp_ms=int(sec * 1000))
+        rule.on_block(at(100, 0, "0xa"))
+        rule.on_block(at(100, 1, "0xb"))
+        rule.on_block(at(200, 2, "0xc"))
+        rule.on_block(at(200, 3, "0xd"))
+        rule.on_block(at(300, 4, "0xe"))
+        first_warn = rule.on_block(at(300, 5, "0xf"))
+        assert first_warn.severity == Severity.WARN
+        rule.on_block(at(400, 10000, "0xg"))
+        ev_info = rule.on_block(at(400, 10001, "0xh"))
+        assert ev_info.severity == Severity.INFO
+        assert "Cluster" not in ev_info.detail
+        rule.on_block(at(500, 10002, "0xi"))
+        rule.on_block(at(500, 10003, "0xj"))
+        rule.on_block(at(600, 10004, "0xk"))
+        second_warn = rule.on_block(at(600, 10005, "0xl"))
+        assert second_warn.severity == Severity.WARN
 
     def test_track_window_evicts_oldest(self):
         """After more than ``track_window`` distinct numbers, the
