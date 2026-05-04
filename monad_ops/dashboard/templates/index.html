@@ -320,6 +320,19 @@
         </section>
 
         <section class="grid grid-1">
+            <div class="card chart" id="chart-reorg-events-card">
+                <div class="card-header">
+                    <span class="card-title">pre-finalization divergence events</span>
+                    <span class="card-hint" id="chart-reorg-events-hint">single divergences vs cluster-tier · per-minute · stacked</span>
+                </div>
+                <div class="chart-box">
+                    <canvas id="chart-reorg-events" role="img"
+                            aria-label="stacked per-minute counts of pre-finalization block-id divergences split into single events and cluster-tier escalations"></canvas>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid grid-1">
             <div class="card chart" id="chart-exec-card">
                 <div class="card-header">
                     <span class="card-title">block execution time breakdown</span>

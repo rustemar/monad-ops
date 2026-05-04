@@ -164,6 +164,22 @@ async def test_bft_series_rejects_oversized_span(client: httpx.AsyncClient) -> N
 
 
 @pytest.mark.asyncio
+async def test_reorg_series_endpoint_shape(client: httpx.AsyncClient) -> None:
+    r = await client.get("/api/reorg_series?from_ts_ms=1000&to_ts_ms=60001")
+    assert r.status_code == 200
+    body = r.json()
+    assert {"from_ts_ms", "to_ts_ms", "bin_ms", "bins"} <= set(body.keys())
+    assert body["bin_ms"] == 60_000
+    assert isinstance(body["bins"], list)
+
+
+@pytest.mark.asyncio
+async def test_reorg_series_rejects_oversized_span(client: httpx.AsyncClient) -> None:
+    r = await client.get("/api/reorg_series?from_ts_ms=0&to_ts_ms=999999999999")
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_window_summary_includes_consensus_aggregate(
     state_with_storage: State,
     client: httpx.AsyncClient,

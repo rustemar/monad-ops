@@ -422,6 +422,46 @@ def build_app(
         payload = await _cached("bft_series", 5.0, cache_key, _load)
         return JSONResponse(payload)
 
+    @app.api_route("/api/reorg_series", methods=["GET", "HEAD"])
+    async def api_reorg_series(
+        from_ts_ms: int = Query(..., ge=0),
+        to_ts_ms: int = Query(..., ge=0),
+    ) -> JSONResponse:
+        """Per-minute reorg event counts split into single (info) vs cluster
+        (warn). Pre-2026-05-03 critical-tier alerts are bucketed as cluster
+        for visualization consistency."""
+        if state.storage is None:
+            return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if to_ts_ms <= from_ts_ms:
+            return JSONResponse(
+                {"error": "to_ts_ms must be > from_ts_ms"}, status_code=400
+            )
+        MAX_SPAN_MS = 7 * 86400 * 1000
+        if to_ts_ms - from_ts_ms > MAX_SPAN_MS:
+            return JSONResponse(
+                {"error": "span too large (max 7 days)"}, status_code=400
+            )
+        step = 5_000
+        cache_key = (
+            (from_ts_ms // step) * step,
+            (to_ts_ms // step) * step,
+        )
+
+        async def _load():
+            bins = await asyncio.to_thread(
+                state.storage.list_reorg_minutes,
+                from_ts_ms,
+                to_ts_ms,
+            )
+            return {
+                "from_ts_ms": from_ts_ms,
+                "to_ts_ms": to_ts_ms,
+                "bin_ms": 60_000,
+                "bins": bins,
+            }
+        payload = await _cached("reorg_series", 5.0, cache_key, _load)
+        return JSONResponse(payload)
+
     @app.api_route("/api/base_fee_series", methods=["GET", "HEAD"])
     async def api_base_fee_series(
         from_ts_ms: int = Query(..., ge=0),

@@ -277,6 +277,36 @@ def test_alerts_round_trip(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_list_reorg_minutes_buckets_by_severity(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    base_sec = float((1_777_000_000 // 60) * 60)  # minute-aligned
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.INFO, key="r:1",
+                   title="t", detail="d"), ts=base_sec + 10)
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.INFO, key="r:2",
+                   title="t", detail="d"), ts=base_sec + 30)
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.WARN, key="r:3",
+                   title="t", detail="d"), ts=base_sec + 90)
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.CRITICAL, key="r:4",
+                   title="t", detail="d"), ts=base_sec + 100)
+    # other rules + out-of-window must not appear
+    storage.write_alert(
+        AlertEvent(rule="stall", severity=Severity.WARN, key="s:1",
+                   title="t", detail="d"), ts=base_sec + 30)
+    storage.write_alert(
+        AlertEvent(rule="reorg", severity=Severity.INFO, key="r:5",
+                   title="t", detail="d"), ts=base_sec + 99999)
+    bins = storage.list_reorg_minutes(
+        int(base_sec * 1000), int(base_sec * 1000) + 5 * 60_000)
+    assert len(bins) == 2
+    assert bins[0]["single"] == 2 and bins[0]["cluster"] == 0
+    assert bins[1]["single"] == 0 and bins[1]["cluster"] == 2
+    storage.close()
+
+
 def test_state_bootstrap_from_storage(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     # Seed a DB with 3 blocks, then create a fresh State bound to the same DB.
