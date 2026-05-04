@@ -1478,6 +1478,41 @@ class Storage:
             })
         return out
 
+    def list_reorg_minutes(
+        self,
+        from_ts_ms: int,
+        to_ts_ms: int,
+    ) -> list[dict]:
+        """Per-minute reorg-event counts split single (info) vs cluster.
+
+        Pre-2026-05-03 critical-tier rows are bucketed as cluster so the
+        chart reflects post-reframe semantics, not historical labels.
+        Only minutes with at least one event are returned (sparse).
+        """
+        from_sec = from_ts_ms / 1000.0
+        to_sec = to_ts_ms / 1000.0
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT CAST(ts AS INTEGER) AS ts_int, severity
+                   FROM alerts
+                   WHERE rule = 'reorg' AND ts >= ? AND ts <= ?
+                   ORDER BY ts ASC""",
+                (from_sec, to_sec),
+            ).fetchall()
+        buckets: dict[int, dict[str, int]] = {}
+        for r in rows:
+            minute_ms = (int(r["ts_int"]) // 60) * 60 * 1000
+            b = buckets.setdefault(minute_ms, {"single": 0, "cluster": 0})
+            sev = r["severity"]
+            if sev == "info":
+                b["single"] += 1
+            elif sev in ("warn", "critical"):
+                b["cluster"] += 1
+        return [
+            {"t": ts, "single": v["single"], "cluster": v["cluster"]}
+            for ts, v in sorted(buckets.items())
+        ]
+
     def load_base_fee_window(self, from_ts_ms: int, to_ts_ms: int) -> dict:
         """Base-fee aggregate over an arbitrary time window.
 

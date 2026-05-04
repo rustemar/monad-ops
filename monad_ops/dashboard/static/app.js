@@ -48,6 +48,7 @@ async function pollFetch(key, url, init = {}) {
 let rtpChart = null;
 let vtpChart = null;
 let networkSignalChart = null;
+let reorgEventsChart = null;
 let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
@@ -1126,6 +1127,7 @@ function _setChartRange(sec) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchReorgSeries();
     fetchBaseFeeSeries();
 }
 
@@ -1137,6 +1139,7 @@ function _setChartCustomRange(fromMs, toMs) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchReorgSeries();
     fetchBaseFeeSeries();
 }
 
@@ -1148,6 +1151,7 @@ function _setChartCustomLive(fromMs) {
     _syncChartControlsUI();
     fetchBlocks();
     fetchBftSeries();
+    fetchReorgSeries();
     fetchBaseFeeSeries();
 }
 
@@ -1371,6 +1375,26 @@ async function fetchBftSeries() {
         const d = await r.json();
         drawValTimeout(d.bins || []);
         drawNetworkSignal(d.bins || []);
+    } catch (e) {
+        if (e && e.name === "AbortError") return;
+    }
+}
+
+// Per-minute reorg event series. Same 7d cap + independent-poll
+// pattern as fetchBftSeries.
+async function fetchReorgSeries() {
+    const { fromMs, toMs } = _chartWindow();
+    if ((toMs - fromMs) > _MAX_BFT_SPAN_MS) {
+        drawReorgEvents([]);
+        return;
+    }
+    try {
+        const r = await pollFetch(
+            "reorg-series",
+            `/api/reorg_series?from_ts_ms=${fromMs}&to_ts_ms=${toMs}`);
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        drawReorgEvents(d.bins || []);
     } catch (e) {
         if (e && e.name === "AbortError") return;
     }
@@ -1684,6 +1708,83 @@ function drawNetworkSignal(bins) {
         const s = ds[1]?.data?.[idx] ?? 0;
         const t = ds[2]?.data?.[idx] ?? 0;
         return `decrypt ${d}\nsession ${s}\nts-inv ${t}`;
+    };
+}
+
+// Per-minute stacked-bar of pre-finalization divergences. The /api/reorg_series
+// endpoint returns sparse minutes (only ones with events); align them onto a
+// dense per-minute axis for the same 1-bar-per-minute look as the net-layer card.
+const REORG_SINGLE_COLOR  = "#8a8f99";  // neutral — background protocol behaviour
+const REORG_CLUSTER_COLOR = "#ffb454";  // matches WARN palette
+function _denseReorgBins(sparse, fromMs, toMs) {
+    const map = new Map(sparse.map(b => [b.t, b]));
+    const out = [];
+    const start = Math.floor(fromMs / 60000) * 60000;
+    const end = Math.ceil(toMs / 60000) * 60000;
+    for (let t = start; t < end; t += 60000) {
+        const b = map.get(t);
+        out.push({ t, single: b?.single ?? 0, cluster: b?.cluster ?? 0 });
+    }
+    return out;
+}
+function drawReorgEvents(sparse) {
+    const { fromMs, toMs } = _chartWindow();
+    const bins = _denseReorgBins(sparse, fromMs, toMs);
+    const labels = _labelsFromBins(bins);
+    const single  = bins.map(b => b.single);
+    const cluster = bins.map(b => b.cluster);
+    if (reorgEventsChart) {
+        reorgEventsChart.data.labels = labels;
+        reorgEventsChart.data.datasets[0].data = single;
+        reorgEventsChart.data.datasets[1].data = cluster;
+        _attachBinMeta(reorgEventsChart, bins);
+        reorgEventsChart.update("none");
+        return;
+    }
+    reorgEventsChart = new Chart(
+        document.getElementById("chart-reorg-events"),
+        {
+            type: "bar",
+            data: {
+                labels,
+                datasets: [
+                    { label: "single", data: single, backgroundColor: REORG_SINGLE_COLOR,
+                      borderWidth: 0, stack: "reorg", categoryPercentage: 1.0, barPercentage: 1.0 },
+                    { label: "cluster", data: cluster, backgroundColor: REORG_CLUSTER_COLOR,
+                      borderWidth: 0, stack: "reorg", categoryPercentage: 1.0, barPercentage: 1.0 },
+                ],
+            },
+            plugins: [crosshairPlugin],
+            options: {
+                ...chartCommon,
+                layout: { padding: { top: 36 } },
+                scales: {
+                    ...chartCommon.scales,
+                    x: { ...chartCommon.scales.x, stacked: true },
+                    y: {
+                        ...chartCommon.scales.y, stacked: true,
+                        min: 0, suggestedMax: 3,
+                        ticks: { ...chartCommon.scales.y.ticks, precision: 0 },
+                    },
+                },
+                plugins: {
+                    ...(chartCommon.plugins || {}),
+                    legend: {
+                        display: true, position: "top", align: "end",
+                        labels: { color: "rgba(215,218,224,0.7)",
+                                  boxWidth: 10, boxHeight: 10, padding: 12,
+                                  font: { size: 11 } },
+                    },
+                },
+            },
+        }
+    );
+    _attachBinMeta(reorgEventsChart, bins);
+    reorgEventsChart._tooltipValueFormatter = (_v, _v2, chart, idx) => {
+        const ds = chart.data.datasets;
+        const sg = ds[0]?.data?.[idx] ?? 0;
+        const cl = ds[1]?.data?.[idx] ?? 0;
+        return `single ${sg}\ncluster ${cl}`;
     };
 }
 
@@ -2596,6 +2697,7 @@ _syncChartControlsUI();
 fetchState();
 fetchBlocks();
 fetchBftSeries();
+fetchReorgSeries();
 fetchBaseFeeSeries();
 fetchContracts();
 fetchIncidents();
