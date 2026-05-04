@@ -422,6 +422,17 @@ def build_app(
         payload = await _cached("bft_series", 5.0, cache_key, _load)
         return JSONResponse(payload)
 
+    @app.api_route("/api/peers", methods=["GET", "HEAD"])
+    async def api_peers(
+        window_min: int = Query(60, ge=1, le=720),
+        limit: int = Query(50, ge=1, le=500),
+    ) -> JSONResponse:
+        """Top peers by network-layer error rate over the last N minutes.
+
+        Pure in-memory snapshot — safe to poll at 1 Hz."""
+        rows = state.peer_tracker.snapshot(window_min=window_min)[:limit]
+        return JSONResponse({"window_min": window_min, "peers": rows})
+
     @app.api_route("/api/reorg_series", methods=["GET", "HEAD"])
     async def api_reorg_series(
         from_ts_ms: int = Query(..., ge=0),
