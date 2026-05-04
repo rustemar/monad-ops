@@ -59,6 +59,8 @@ class ReorgRule:
     # under sustained reorg load doesn't accumulate state forever; the
     # window-prune in on_block keeps it correct regardless.
     _recent_ts: "deque[float]" = field(default_factory=lambda: deque(maxlen=64))
+    # True while inside an open cluster envelope — keeps repeat WARNs silent.
+    _cluster_armed: bool = False
     # Observability for the /api/state integrity panel.
     reorg_count: int = 0
     last_reorg_number: int | None = None
@@ -137,15 +139,24 @@ class ReorgRule:
         self._recent_ts.append(ts_sec)
         in_window = len(self._recent_ts)
         is_cluster = in_window >= self.cluster_threshold
-        severity = Severity.WARN if is_cluster else Severity.INFO
 
-        if is_cluster:
+        if is_cluster and not self._cluster_armed:
+            severity = Severity.WARN
+            self._cluster_armed = True
             cluster_note = (
                 f" Cluster: {in_window} divergences in the last "
                 f"{self.cluster_window_sec // 60}min — escalated to WARN."
             )
+        elif is_cluster:
+            severity = Severity.INFO
+            cluster_note = (
+                f" Cluster ongoing: {in_window} divergences in the last "
+                f"{self.cluster_window_sec // 60}min."
+            )
         else:
+            severity = Severity.INFO
             cluster_note = ""
+            self._cluster_armed = False
 
         return AlertEvent(
             # rule key kept as "reorg" for storage / API / frontend
