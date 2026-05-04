@@ -133,7 +133,7 @@ const crosshairPlugin = {
         const isPercent = chart.config.type === "line";
         let text;
         if (typeof chart._tooltipValueFormatter === "function") {
-            text = chart._tooltipValueFormatter(val, val2);
+            text = chart._tooltipValueFormatter(val, val2, chart, nearest);
         } else if (isPercent) {
             // When the chart carries a max-envelope dataset, surface both
             // numbers so viewers don't have to read it off the faint line.
@@ -151,12 +151,13 @@ const crosshairPlugin = {
         // Measure at the fonts we'll actually render with — mixing
         // fonts in measureText vs fillText was under-sizing the box.
         ctx.font = "600 11px 'JetBrains Mono', monospace";
-        const valW = ctx.measureText(text).width;
+        const valLines = String(text).split("\n");
+        const valW = Math.max(...valLines.map(l => ctx.measureText(l).width));
         ctx.font = "10px 'JetBrains Mono', monospace";
         const blockW = ctx.measureText(blockText).width;
         const timeW  = ctx.measureText(timeText).width;
         const tw = Math.max(valW, blockW, timeW) + 16;
-        const th = timeText ? 48 : 34;
+        const th = (timeText ? 48 : 34) + (valLines.length - 1) * 14;
         let lx = ptX - tw / 2;
         if (lx < left) lx = left;
         if (lx + tw > right) lx = right - tw;
@@ -192,7 +193,10 @@ const crosshairPlugin = {
         }
         ctx.font = "600 12px 'JetBrains Mono', monospace";
         ctx.fillStyle = "#d7dae0";
-        ctx.fillText(text, lx + tw / 2, row);
+        for (const line of valLines) {
+            ctx.fillText(line, lx + tw / 2, row);
+            row += 14;
+        }
         ctx.restore();
     },
 };
@@ -1674,8 +1678,13 @@ function drawNetworkSignal(bins) {
         }
     );
     _attachBinMeta(networkSignalChart, bins);
-    networkSignalChart._tooltipValueFormatter =
-        (v) => v == null ? "—" : `${v}`;
+    networkSignalChart._tooltipValueFormatter = (_v, _v2, chart, idx) => {
+        const ds = chart.data.datasets;
+        const d = ds[0]?.data?.[idx] ?? 0;
+        const s = ds[1]?.data?.[idx] ?? 0;
+        const t = ds[2]?.data?.[idx] ?? 0;
+        return `decrypt ${d}\nsession ${s}\nts-inv ${t}`;
+    };
 }
 
 
