@@ -126,9 +126,6 @@ class State:
         self._started_at = time.time()
         self._blocks_seen_total = 0
         self._storage = storage
-        # In-memory per-peer error counters; consumed by /api/peers.
-        from monad_ops.collector.peer_stats import PeerTracker
-        self.peer_tracker = PeerTracker()
         # Observable rule handles (counters/details read by snapshot()).
         self._reorg: ReorgRule | None = None
         # Latest reference-RPC sample; updated by the reference-poll loop

@@ -2386,41 +2386,6 @@ function renderProbes(probes, ranAt) {
     }).join("");
 }
 
-async function fetchPeers() {
-    try {
-        const r = await pollFetch("peers", "/api/peers?window_min=60");
-        if (!r.ok) return;
-        const d = await r.json();
-        renderPeers(d.peers || []);
-    } catch (e) {
-        if (e && e.name === "AbortError") return;
-    }
-}
-
-function renderPeers(rows) {
-    const body = document.getElementById("peers-body");
-    if (!body) return;
-    if (!rows.length) {
-        body.innerHTML = '<tr class="empty"><td colspan="7">no peer events in window</td></tr>';
-        return;
-    }
-    const html = rows.map(r => {
-        const lastAgo = r.last_ts_ms ? fmtSince(r.last_ts_ms) : "—";
-        const country = r.country || "—";
-        const lat = r.latency_ms != null ? `${r.latency_ms} ms` : "—";
-        return `<tr>
-            <td><code>${r.addr}</code></td>
-            <td>${country}</td>
-            <td class="num">${lat}</td>
-            <td>${lastAgo}</td>
-            <td class="num">${r.decrypt}</td>
-            <td class="num">${r.session}</td>
-            <td class="num"><b>${r.total}</b></td>
-        </tr>`;
-    }).join("");
-    body.innerHTML = html;
-}
-
 async function fetchVersion() {
     try {
         const r = await pollFetch("version", "/api/version");
@@ -2728,7 +2693,6 @@ fetchIncidents();
 fetchProbes();
 fetchVersion();
 fetchStressEvents();
-fetchPeers();
 // Throttle polling when the tab is hidden to save battery and reduce
 // rate-limit pressure (B5). On refocus, immediately refresh and
 // restore the normal interval.
@@ -2750,7 +2714,6 @@ _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);
 _schedule(fetchVersion, VERSION_INTERVAL);
 _schedule(fetchStressEvents, INCIDENTS_INTERVAL);
-_schedule(fetchPeers, 1000);
 
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
 // on mobile orientation change (portrait↔landscape) the parent's

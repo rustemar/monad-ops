@@ -495,7 +495,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 return
             assert isinstance(item, ConsensusEvent)
             await state.add_consensus_event_async(item)
-            state.peer_tracker.on_event(item)
             ev = nls.on_event(item)
             if ev is not None:
                 await sink.deliver(ev)
@@ -747,95 +746,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     process_restart_task = asyncio.create_task(
         process_restart_loop(), name="process_restart",
     )
-
-    async def peer_bootstrap_loop():
-        """Replay last 60 min of peer-error events using a journald-side grep
-        so we don't pay the 5500-line/s firehose cost. Must NOT return."""
-        from monad_ops.parser import parse_consensus
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "journalctl", "-u", "monad-bft", "-o", "cat", "--no-pager",
-                "--since", "60 min ago",
-                "--grep", "failed to decrypt message|session timeout expired",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            assert proc.stdout is not None
-            count = 0
-            async for raw in proc.stdout:
-                ev = parse_consensus(raw.decode("utf-8", errors="replace"))
-                if ev is not None:
-                    state.peer_tracker.on_event(ev)
-                    count += 1
-            await proc.wait()
-            log.info("peer_bootstrap.done", events=count)
-        except Exception as e:  # noqa: BLE001
-            log.warning("peer_bootstrap.error", exc=str(e))
-        await asyncio.Future()
-
-    async def peer_latency_loop():
-        """ICMP ping per peer; Monad's wire protocol is UDP so TCP connect
-        won't measure RTT. Cadence 5 min; quick re-scan when peer set empty."""
-        import re as _re
-        rtt_rx = _re.compile(r"min/avg/max/mdev\s*=\s*[\d.]+/([\d.]+)/")
-        while True:
-            ips = state.peer_tracker.known_ips()
-            for ip in ips:
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "ping", "-c", "1", "-W", "2", "-q", ip,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    )
-                    stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
-                    m = rtt_rx.search(stdout.decode("utf-8", errors="replace"))
-                    if m and proc.returncode == 0:
-                        state.peer_tracker.set_enrichment(ip, latency_ms=round(float(m.group(1))))
-                    else:
-                        state.peer_tracker.set_enrichment(ip, latency_ms=None)
-                except Exception:
-                    state.peer_tracker.set_enrichment(ip, latency_ms=None)
-                await asyncio.sleep(0.1)
-            await asyncio.sleep(15 if not ips else 300)
-
-    async def peer_geo_loop():
-        """Fetch ipinfo.io for unresolved peer IPs; cache forever in sqlite."""
-        import httpx
-        if storage is None:
-            return
-        cached = await asyncio.to_thread(storage.load_peer_geo)
-        for ip, info in cached.items():
-            state.peer_tracker.set_enrichment(ip, **info)
-        while True:
-            for ip in state.peer_tracker.known_ips():
-                if ip in cached:
-                    continue
-                try:
-                    async with httpx.AsyncClient(timeout=10) as c:
-                        r = await c.get(f"https://ipinfo.io/{ip}/json")
-                        if r.status_code != 200:
-                            await asyncio.sleep(2)
-                            continue
-                        d = r.json()
-                    cc = d.get("country")
-                    org = d.get("org")
-                    info = {"country_code": cc, "country": cc, "asn": None, "org": org}
-                    state.peer_tracker.set_enrichment(ip, **info)
-                    cached[ip] = info
-                    await asyncio.to_thread(storage.upsert_peer_geo, ip, cc, cc, None, org)
-                except Exception as e:  # noqa: BLE001
-                    log.warning("peer_geo.fetch_fail", ip=ip, exc=str(e))
-                await asyncio.sleep(1.0)
-            await asyncio.sleep(30)
-
-    peer_bootstrap = asyncio.create_task(peer_bootstrap_loop(), name="peer_bootstrap")
-    peer_latency = asyncio.create_task(peer_latency_loop(), name="peer_latency")
-    peer_geo = asyncio.create_task(peer_geo_loop(), name="peer_geo")
-
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
         version_task, network_signal_tick, process_restart_task,
-        peer_bootstrap, peer_latency, peer_geo,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
