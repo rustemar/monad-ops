@@ -430,40 +430,39 @@ const stackCrosshairPlugin = {
             const d = Math.abs(meta0.data[i].x - x);
             if (d < minDist) { minDist = d; nearest = i; }
         }
-        const blockNum = (chart._binBlocks && chart._binBlocks[nearest]) || chart.data.labels[nearest];
+        const blockNum = (chart._binBlocks && chart._binBlocks[nearest]) || null;
         const binTs = (chart._binTimes && chart._binTimes[nearest]) || null;
         const datasets = chart.data.datasets;
         const vals = datasets.map(ds => Number(ds.data[nearest]) || 0);
         const names = datasets.map(ds => ds.label);
         const colors = datasets.map(ds => ds.backgroundColor);
         const total = vals.reduce((a, b) => a + b, 0);
+        const showTotal = chart._stackShowTotal !== false;
 
-        // Header text built up-front so its width can shape the box.
-        const headerTxt = binTs
-            ? `block #${fmtInt(blockNum)} · ${_fmtBinClockSmart(binTs)} ${_tzShort}`
-            : `block #${fmtInt(blockNum)}`;
-        // Tooltip layout. Rows: 1 header + N datasets + 1 separator + 1 total.
-        const rows = names.length + 2;
+        const blockPart = blockNum != null ? `block #${fmtInt(blockNum)}` : "";
+        const timePart = binTs != null ? `${_fmtBinClockSmart(binTs)} ${_tzShort}` : "";
+        const headerTxt = [blockPart, timePart].filter(Boolean).join(" · ");
         const padX = 10, padY = 8;
         const lineH = 14;
-        const hdrH = 16;
-        // Measure widest label+value pair at the content font.
+        const hdrH = headerTxt ? 16 : 0;
         ctx.font = "600 11px 'JetBrains Mono', monospace";
-        const fmt = (us) => us >= 1000 ? `${(us/1000).toFixed(2)} ms` : `${Math.round(us)} µs`;
+        const defaultFmt = (v) => v >= 1000 ? `${(v/1000).toFixed(2)} ms` : `${Math.round(v)} µs`;
+        const fmt = chart._stackValueFormatter || defaultFmt;
         const labelWidth = Math.max(...names.map(n => ctx.measureText(n).width));
         const valueWidth = Math.max(
             ...vals.map(v => ctx.measureText(fmt(v)).width),
-            ctx.measureText(fmt(total)).width,
+            showTotal ? ctx.measureText(fmt(total)).width : 0,
         );
-        const swatch = 8;  // color square width
+        const swatch = 8;
         const swatchGap = 6;
         const labelGap = 14;
         const contentW = swatch + swatchGap + labelWidth + labelGap + valueWidth;
-        // Header is rendered at the header font size, so measure it there.
         ctx.font = "10px 'JetBrains Mono', monospace";
-        const headerW = ctx.measureText(headerTxt).width;
+        const headerW = headerTxt ? ctx.measureText(headerTxt).width : 0;
         const w = Math.max(contentW, headerW) + padX * 2;
-        const h = hdrH + lineH * (names.length + 1) + 6 /*sep*/ + padY * 2 - 4;
+        const totalRows = names.length + (showTotal ? 1 : 0);
+        const sepH = showTotal ? 6 : 0;
+        const h = hdrH + lineH * totalRows + sepH + padY * 2 - 4;
 
         // Anchor near the cursor; flip to the left side if it would
         // overflow the chart area on the right.
@@ -483,13 +482,13 @@ const stackCrosshairPlugin = {
         ctx.fill();
         ctx.stroke();
 
-        // Header — block number + bin time (font already set above).
-        ctx.fillStyle = "#8a8f99";
         ctx.textAlign = "left";
         ctx.textBaseline = "top";
-        ctx.fillText(headerTxt, tx + padX, ty + padY);
+        if (headerTxt) {
+            ctx.fillStyle = "#8a8f99";
+            ctx.fillText(headerTxt, tx + padX, ty + padY);
+        }
 
-        // Rows: swatch, label, value
         ctx.font = "600 11px 'JetBrains Mono', monospace";
         let yCursor = ty + padY + hdrH;
         for (let i = 0; i < names.length; i++) {
@@ -506,18 +505,19 @@ const stackCrosshairPlugin = {
             yCursor += lineH;
         }
 
-        // Separator + total
-        ctx.strokeStyle = "rgba(138,143,153,0.25)";
-        ctx.beginPath();
-        ctx.moveTo(tx + padX, yCursor + 2);
-        ctx.lineTo(tx + w - padX, yCursor + 2);
-        ctx.stroke();
-        yCursor += 6;
-        ctx.fillStyle = "#d7dae0";
-        ctx.fillText("total", tx + padX + swatch + swatchGap, yCursor);
-        ctx.textAlign = "right";
-        ctx.fillStyle = "#5b9cf5";
-        ctx.fillText(fmt(total), tx + w - padX, yCursor);
+        if (showTotal) {
+            ctx.strokeStyle = "rgba(138,143,153,0.25)";
+            ctx.beginPath();
+            ctx.moveTo(tx + padX, yCursor + 2);
+            ctx.lineTo(tx + w - padX, yCursor + 2);
+            ctx.stroke();
+            yCursor += 6;
+            ctx.fillStyle = "#d7dae0";
+            ctx.fillText("total", tx + padX + swatch + swatchGap, yCursor);
+            ctx.textAlign = "right";
+            ctx.fillStyle = "#5b9cf5";
+            ctx.fillText(fmt(total), tx + w - padX, yCursor);
+        }
         ctx.restore();
     },
 };
@@ -1666,7 +1666,7 @@ function drawNetworkSignal(bins) {
                     },
                 ],
             },
-            plugins: [crosshairPlugin],
+            plugins: [stackCrosshairPlugin],
             options: {
                 ...chartCommon,
                 layout: { padding: { top: 36 } },
@@ -1680,7 +1680,7 @@ function drawNetworkSignal(bins) {
                         suggestedMax: 5,
                         ticks: {
                             ...chartCommon.scales.y.ticks,
-                            precision: 0,  // integers
+                            precision: 0,
                         },
                     },
                 },
@@ -1702,13 +1702,7 @@ function drawNetworkSignal(bins) {
         }
     );
     _attachBinMeta(networkSignalChart, bins);
-    networkSignalChart._tooltipValueFormatter = (_v, _v2, chart, idx) => {
-        const ds = chart.data.datasets;
-        const d = ds[0]?.data?.[idx] ?? 0;
-        const s = ds[1]?.data?.[idx] ?? 0;
-        const t = ds[2]?.data?.[idx] ?? 0;
-        return `decrypt ${d}\nsession ${s}\nts-inv ${t}`;
-    };
+    networkSignalChart._stackValueFormatter = (v) => `${Math.round(v)}`;
 }
 
 // Per-minute stacked-bar of pre-finalization divergences. The /api/reorg_series
@@ -1754,7 +1748,7 @@ function drawReorgEvents(sparse) {
                       borderWidth: 0, stack: "reorg", categoryPercentage: 1.0, barPercentage: 1.0 },
                 ],
             },
-            plugins: [crosshairPlugin],
+            plugins: [stackCrosshairPlugin],
             options: {
                 ...chartCommon,
                 layout: { padding: { top: 36 } },
@@ -1780,12 +1774,7 @@ function drawReorgEvents(sparse) {
         }
     );
     _attachBinMeta(reorgEventsChart, bins);
-    reorgEventsChart._tooltipValueFormatter = (_v, _v2, chart, idx) => {
-        const ds = chart.data.datasets;
-        const sg = ds[0]?.data?.[idx] ?? 0;
-        const cl = ds[1]?.data?.[idx] ?? 0;
-        return `single ${sg}\ncluster ${cl}`;
-    };
+    reorgEventsChart._stackValueFormatter = (v) => `${Math.round(v)}`;
 }
 
 
