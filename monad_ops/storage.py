@@ -1478,6 +1478,32 @@ class Storage:
             })
         return out
 
+    def list_reorg_alerts_for_capture(self, since_sec: float) -> list[tuple[int, int]]:
+        """(block_number, block_ts_ms) for reorg alerts since ``since_sec``.
+
+        Drives the startup backfill that recovers captures cancelled by
+        an ill-timed restart. block_ts_ms preferred from the blocks table;
+        falls back to alert.ts*1000 if the block was pruned."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, ts FROM alerts WHERE rule='reorg' AND ts >= ?",
+                (float(since_sec),),
+            ).fetchall()
+            parsed: list[tuple[int, float]] = []
+            for r in rows:
+                parts = r["key"].split(":", 2)
+                if len(parts) >= 2 and parts[0] == "reorg" and parts[1].isdigit():
+                    parsed.append((int(parts[1]), float(r["ts"])))
+            if not parsed:
+                return []
+            block_nums = list({bn for bn, _ in parsed})
+            ph = ",".join("?" * len(block_nums))
+            block_ts = dict(self._conn.execute(
+                f"SELECT block_number, timestamp_ms FROM blocks WHERE block_number IN ({ph})",
+                block_nums,
+            ).fetchall())
+        return [(bn, int(block_ts.get(bn, ts * 1000))) for bn, ts in parsed]
+
     def list_reorg_minutes(
         self,
         from_ts_ms: int,
