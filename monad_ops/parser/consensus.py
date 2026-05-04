@@ -76,7 +76,6 @@ class ConsensusEvent:
     next_leader: str | None = None   # populated for LOCAL_TIMEOUT
     block_seq: int | None = None     # populated for PROPOSAL (= block_number)
     base_fee: int | None = None      # populated for PROPOSAL, in wei
-    peer_addr: str | None = None     # populated for NETWORK_DECRYPT_FAIL + NETWORK_SESSION_TIMEOUT
 
 
 # ── pre-filter substrings ─────────────────────────────────────────────
@@ -101,9 +100,6 @@ _BASE_FEE_MARKER = "base_fee:"
 _NETWORK_DECRYPT_FAIL_MARKER = '"message":"failed to decrypt message"'
 _NETWORK_SESSION_TIMEOUT_MARKER = '"message":"session timeout expired"'
 _NETWORK_TIMESTAMP_INVALID_MARKER = '"message":"Timestamp validation failed"'
-
-_DECRYPT_ADDR_RX = re.compile(r'"addr":"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)"')
-_SESSION_ADDR_RX = re.compile(r'"remote_addr":"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d+)"')
 
 # ── extraction patterns ───────────────────────────────────────────────
 # ISO-8601 timestamp at start of the JSON envelope.
@@ -167,18 +163,14 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     # Round/epoch are not on these lines; ts_ms is enough for the
     # NetworkLayerSignalRule's sliding-window rate calculation.
     if has_decrypt_fail:
-        m = _DECRYPT_ADDR_RX.search(line)
         return ConsensusEvent(
             kind=ConsensusEventKind.NETWORK_DECRYPT_FAIL,
             round=0, epoch=None, ts_ms=ts_ms,
-            peer_addr=m.group(1) if m else None,
         )
     if has_session_timeout:
-        m = _SESSION_ADDR_RX.search(line)
         return ConsensusEvent(
             kind=ConsensusEventKind.NETWORK_SESSION_TIMEOUT,
             round=0, epoch=None, ts_ms=ts_ms,
-            peer_addr=m.group(1) if m else None,
         )
     if has_timestamp_invalid:
         return ConsensusEvent(

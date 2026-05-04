@@ -204,18 +204,6 @@ CREATE TABLE IF NOT EXISTS meta (
     value      TEXT NOT NULL,
     updated_ts INTEGER NOT NULL
 );
-
--- Cached IP geolocation for /api/peers. Resolved once per IP via
--- ipinfo.io and persisted forever; IP→country/asn/org is stable
--- enough that a long-running cache is cheaper than re-resolving.
-CREATE TABLE IF NOT EXISTS peer_geo (
-    ip           TEXT PRIMARY KEY,
-    country_code TEXT,
-    country      TEXT,
-    asn          TEXT,
-    org          TEXT,
-    fetched_ts   INTEGER NOT NULL
-);
 """
 
 _HOUR_MS = 3_600_000
@@ -1489,32 +1477,6 @@ class Storage:
                 "timestamp_invalids": int(r["timestamp_invalids"]),
             })
         return out
-
-    def upsert_peer_geo(
-        self, ip: str, country_code: str | None, country: str | None,
-        asn: str | None, org: str | None,
-    ) -> None:
-        with self._lock:
-            self._conn.execute(
-                """INSERT INTO peer_geo(ip, country_code, country, asn, org, fetched_ts)
-                   VALUES(?,?,?,?,?,?)
-                   ON CONFLICT(ip) DO UPDATE SET country_code=excluded.country_code,
-                       country=excluded.country, asn=excluded.asn, org=excluded.org,
-                       fetched_ts=excluded.fetched_ts""",
-                (ip, country_code, country, asn, org, int(time.time())),
-            )
-            self._conn.commit()
-
-    def load_peer_geo(self) -> dict[str, dict]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT ip, country_code, country, asn, org FROM peer_geo"
-            ).fetchall()
-        return {
-            r["ip"]: {"country_code": r["country_code"], "country": r["country"],
-                      "asn": r["asn"], "org": r["org"]}
-            for r in rows
-        }
 
     def list_reorg_minutes(
         self,
