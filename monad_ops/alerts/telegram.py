@@ -27,6 +27,7 @@ class TelegramSink:
         source_tag: str = "monad-ops",
         timeout_sec: float = 15.0,
         drop_severities: frozenset[Severity] = frozenset({Severity.INFO}),
+        bypass_drop_for_rules: frozenset[str] = frozenset({"version_watch"}),
     ) -> None:
         self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
         self._chat_id = chat_id
@@ -34,9 +35,14 @@ class TelegramSink:
         self._source_tag = source_tag
         self._timeout = timeout_sec
         self._drop = drop_severities
+        # Rules whose events bypass the severity drop set. Carved out
+        # for transition-shaped INFO signals (new package release,
+        # daily upgrade reminder) where suppressing the only emission
+        # we ever make would defeat the purpose of the rule.
+        self._bypass = bypass_drop_for_rules
 
     async def deliver(self, event: AlertEvent) -> None:
-        if event.severity in self._drop:
+        if event.severity in self._drop and event.rule not in self._bypass:
             return
         emoji = _SEVERITY_EMOJI.get(event.severity, "⚪")
         text = (

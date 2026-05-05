@@ -36,6 +36,37 @@ async def test_telegram_drops_info_by_default(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_bypasses_drop_for_version_watch_info(monkeypatch) -> None:
+    """version_watch INFO must reach Telegram even when INFO is in
+    drop_severities — the rule fires once per release, suppressing it
+    silently is the bug we're guarding against."""
+    sink = TelegramSink(bot_token="x", chat_id=1)  # default drop=INFO, bypass=version_watch
+    sent: list = []
+
+    class _Stub:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, *a, **kw):
+            sent.append(kw)
+            class R:
+                def raise_for_status(self): pass
+            return R()
+
+    import httpx
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_: _Stub())
+
+    version_info = AlertEvent(
+        rule="version_watch", severity=Severity.INFO, key="k", title="t", detail="d",
+    )
+    other_info = AlertEvent(
+        rule="reorg", severity=Severity.INFO, key="k", title="t", detail="d",
+    )
+    await sink.deliver(version_info)
+    await sink.deliver(other_info)
+    assert len(sent) == 1  # version_watch passed; reorg INFO dropped
+
+
+@pytest.mark.asyncio
 async def test_telegram_respects_explicit_drop_set(monkeypatch) -> None:
     sink = TelegramSink(
         bot_token="x", chat_id=1,
