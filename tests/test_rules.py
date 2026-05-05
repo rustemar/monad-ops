@@ -932,13 +932,18 @@ class TestNetworkLayerSignalRule:
     disagreement. Rule is per-event for the count and per-tick for
     natural de-arming as events fall out of the rolling window."""
 
-    def _ev(self, kind: ConsensusEventKind, ts_sec: float) -> ConsensusEvent:
+    def _ev(self, kind: ConsensusEventKind, ts_sec: float, peer: str | None = None) -> ConsensusEvent:
         return ConsensusEvent(
-            kind=kind, round=0, epoch=None, ts_ms=int(ts_sec * 1000),
+            kind=kind, round=0, epoch=None, ts_ms=int(ts_sec * 1000), peer=peer,
         )
 
-    def _decrypt(self, ts: float) -> ConsensusEvent:
-        return self._ev(ConsensusEventKind.NETWORK_DECRYPT_FAIL, ts)
+    def _decrypt(self, ts: float, peer: str | None = None) -> ConsensusEvent:
+        # Default to a fresh-looking peer per timestamp so tests that
+        # expect CRITICAL escalation get the diversity they need without
+        # threading peers through every call site.
+        if peer is None:
+            peer = f"10.0.0.{int(ts) % 250 + 1}:8001"
+        return self._ev(ConsensusEventKind.NETWORK_DECRYPT_FAIL, ts, peer=peer)
 
     def _session(self, ts: float) -> ConsensusEvent:
         return self._ev(ConsensusEventKind.NETWORK_SESSION_TIMEOUT, ts)
@@ -1045,6 +1050,51 @@ class TestNetworkLayerSignalRule:
             )
             assert ev is None
         assert rule._state is None
+
+    def test_single_peer_storm_held_below_critical(self):
+        """A single-peer storm crossing critical_count must hold at
+        WARN — the diversity gate exists exactly to suppress
+        single-neighbour desync from painting the dashboard red."""
+        rule = NetworkLayerSignalRule(
+            window_sec=300, warn_count=5, critical_count=15,
+            critical_min_unique_peers=3,
+        )
+        events = []
+        for i in range(16):
+            ev = rule.on_event(
+                self._decrypt(100.0 + i, peer="23.83.186.216:8001"),
+                now_sec=100.0 + i,
+            )
+            if ev is not None:
+                events.append(ev)
+        severities = [e.severity for e in events]
+        assert Severity.CRITICAL not in severities
+        assert Severity.WARN in severities
+        assert rule._state == Severity.WARN
+        warn_events = [e for e in events if e.severity == Severity.WARN]
+        assert "Held below CRITICAL" in warn_events[-1].detail
+        assert "only 1 unique peer" in warn_events[-1].detail
+
+    def test_diverse_peer_burst_still_escalates_to_critical(self):
+        """When ≥critical_min_unique_peers distinct peers participate,
+        crossing critical_count still escalates as before."""
+        rule = NetworkLayerSignalRule(
+            window_sec=300, warn_count=5, critical_count=15,
+            critical_min_unique_peers=3,
+        )
+        peers = ["10.0.0.1:8001", "10.0.0.2:8001", "10.0.0.3:8001"]
+        events = []
+        for i in range(16):
+            ev = rule.on_event(
+                self._decrypt(100.0 + i, peer=peers[i % len(peers)]),
+                now_sec=100.0 + i,
+            )
+            if ev is not None:
+                events.append(ev)
+        severities = [e.severity for e in events]
+        assert Severity.CRITICAL in severities
+        crit = next(e for e in events if e.severity == Severity.CRITICAL)
+        assert "Unique peers: 3" in crit.detail
 
     def test_hysteresis_silences_oscillation_at_warn_boundary(self):
         """Count grazing back below warn_count must NOT fire RECOVERED

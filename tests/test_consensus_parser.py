@@ -165,11 +165,11 @@ def test_extracted_ts_ms_is_monotonic_in_fixture() -> None:
 
 def test_parses_network_decrypt_fail() -> None:
     """RaptorCast UDP-auth decrypt-fail line surfaces as
-    NETWORK_DECRYPT_FAIL with ts_ms populated; round/epoch unset."""
+    NETWORK_DECRYPT_FAIL with ts_ms + peer populated; round/epoch unset."""
     line = (
         '{"timestamp":"2026-05-03T11:43:41.179560Z","level":"DEBUG",'
         '"fields":{"message":"failed to decrypt message",'
-        '"addr":"<ip>","error":"SessionIndexNotFound { index: 41143 }"},'
+        '"addr":"23.83.186.216:8001","error":"SessionIndexNotFound { index: 41143 }"},'
         '"target":"monad_raptorcast::auth::socket"}'
     )
     ev = parse_consensus(line)
@@ -177,6 +177,7 @@ def test_parses_network_decrypt_fail() -> None:
     assert ev.kind is ConsensusEventKind.NETWORK_DECRYPT_FAIL
     assert ev.ts_ms > 0
     assert ev.epoch is None
+    assert ev.peer == "23.83.186.216:8001"
 
 
 def test_parses_network_session_timeout() -> None:

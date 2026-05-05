@@ -85,6 +85,11 @@ class NetworkLayerSignalRuleConfig(BaseModel):
     window_sec: int = 300  # 5 minutes
     warn_count: int = 10   # raised 2026-05-04: 5 was bouncing on healthy network noise
     critical_count: int = 15
+    # Single-peer storms (one desynced neighbour spamming RaptorCast)
+    # crossed critical_count alone on 2026-05-03 and 2026-05-05 with
+    # zero correlation to chain-side stress. Require ≥3 distinct peers
+    # before escalating; below that, hold at WARN. Set to 1 to disable.
+    critical_min_unique_peers: int = 3
 
 
 class BlockProcessingSlowdownRuleConfig(BaseModel):

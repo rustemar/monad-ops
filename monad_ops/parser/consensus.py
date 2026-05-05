@@ -76,6 +76,7 @@ class ConsensusEvent:
     next_leader: str | None = None   # populated for LOCAL_TIMEOUT
     block_seq: int | None = None     # populated for PROPOSAL (= block_number)
     base_fee: int | None = None      # populated for PROPOSAL, in wei
+    peer: str | None = None          # populated for NETWORK_DECRYPT_FAIL — "ip:port" of offender
 
 
 # ── pre-filter substrings ─────────────────────────────────────────────
@@ -100,6 +101,13 @@ _BASE_FEE_MARKER = "base_fee:"
 _NETWORK_DECRYPT_FAIL_MARKER = '"message":"failed to decrypt message"'
 _NETWORK_SESSION_TIMEOUT_MARKER = '"message":"session timeout expired"'
 _NETWORK_TIMESTAMP_INVALID_MARKER = '"message":"Timestamp validation failed"'
+
+# Peer address in decrypt-fail line: `"addr":"185.189.46.28:8001"`. We
+# carry the peer through on this class so NetworkLayerSignalRule can
+# require multi-peer participation before escalating to CRITICAL —
+# single-neighbour desync storms are common at validator-set epoch
+# boundaries and should stay WARN.
+_NETWORK_DECRYPT_FAIL_PEER_RX = re.compile(r'"addr":"([^"]+)"')
 
 # ── extraction patterns ───────────────────────────────────────────────
 # ISO-8601 timestamp at start of the JSON envelope.
@@ -163,9 +171,11 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     # Round/epoch are not on these lines; ts_ms is enough for the
     # NetworkLayerSignalRule's sliding-window rate calculation.
     if has_decrypt_fail:
+        m = _NETWORK_DECRYPT_FAIL_PEER_RX.search(line)
         return ConsensusEvent(
             kind=ConsensusEventKind.NETWORK_DECRYPT_FAIL,
             round=0, epoch=None, ts_ms=ts_ms,
+            peer=m.group(1) if m else None,
         )
     if has_session_timeout:
         return ConsensusEvent(

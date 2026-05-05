@@ -95,13 +95,27 @@ class NetworkLayerSignalRule:
     window_sec: int
     warn_count: int
     critical_count: int
+    # CRITICAL escalation requires events from at least this many
+    # distinct peers. Single-peer storms (one desynced neighbour
+    # spamming RaptorCast) are common at validator-set epoch
+    # boundaries and shouldn't paint the dashboard red. Set to 1 to
+    # disable the gate (legacy behaviour). Only counts peers we
+    # actually parsed; events from non-decrypt-fail classes carry
+    # peer=None and contribute to the count but not the diversity
+    # check.
+    critical_min_unique_peers: int = 3
 
-    # (ts_sec, kind) tuples — ts_sec is unix-epoch seconds, parsed
-    # from the monad-bft journal line. We sort by event time, NOT
-    # arrival time, so a delayed-tail batch doesn't artificially
-    # inflate the present-window rate.
-    _events: deque[tuple[float, ConsensusEventKind]] = field(default_factory=deque)
+    # (ts_sec, kind, peer) tuples — ts_sec is unix-epoch seconds,
+    # parsed from the monad-bft journal line. We sort by event time,
+    # NOT arrival time, so a delayed-tail batch doesn't artificially
+    # inflate the present-window rate. peer is "ip:port" or None.
+    _events: deque[tuple[float, ConsensusEventKind, str | None]] = field(default_factory=deque)
     _state: Severity | None = None
+    # True after we've already emitted a "held below CRITICAL" WARN
+    # for the current arming cycle. Resets when the rule disarms to
+    # CLEAR. Prevents a repeat WARN on every event past critical_count
+    # while the gate keeps holding.
+    _held_below_crit_emitted: bool = False
 
     def on_event(
         self, event: ConsensusEvent, now_sec: float | None = None
@@ -114,7 +128,7 @@ class NetworkLayerSignalRule:
         # bucket every line into 1970 and break the window. Detect that
         # and substitute now.
         ts_sec = (event.ts_ms / 1000.0) if event.ts_ms else (now_sec or time.time())
-        self._events.append((ts_sec, event.kind))
+        self._events.append((ts_sec, event.kind, event.peer))
         return self._evaluate(now_sec if now_sec is not None else time.time())
 
     def on_tick(self, now_sec: float | None = None) -> AlertEvent | None:
@@ -140,7 +154,16 @@ class NetworkLayerSignalRule:
             warn_t = self.warn_count
             crit_t = self.critical_count
 
-        if count >= crit_t:
+        # Diversity gate: count distinct peers seen on classes that
+        # carry one (decrypt-fail today). Events without a peer don't
+        # block escalation but don't contribute to diversity either,
+        # so a session-timeout-only burst still escalates on volume.
+        unique_peers = len({p for _, _, p in self._events if p is not None})
+        peers_known = any(p is not None for _, _, p in self._events)
+
+        if count >= crit_t and (
+            not peers_known or unique_peers >= self.critical_min_unique_peers
+        ):
             target: Severity | None = Severity.CRITICAL
         elif count >= warn_t:
             target = Severity.WARN
@@ -149,6 +172,23 @@ class NetworkLayerSignalRule:
 
         prev = self._state
         self._state = target
+
+        # Reset the held-back marker any time we drop to CLEAR.
+        if target is None:
+            self._held_below_crit_emitted = False
+
+        # Sub-state re-fire: state stays at WARN but count just crossed
+        # critical_count while the diversity gate held. Worth one
+        # extra WARN so the operator sees the elevated volume with the
+        # gate-hint context — silence here would mislead.
+        gate_holding = (
+            target == Severity.WARN
+            and count >= self.critical_count
+            and not self._held_below_crit_emitted
+        )
+        if gate_holding:
+            self._held_below_crit_emitted = True
+            return self._make_event(Severity.WARN, count)
 
         if prev == target:
             return None
@@ -181,6 +221,21 @@ class NetworkLayerSignalRule:
             self.critical_count if severity == Severity.CRITICAL else self.warn_count
         )
         per_class = self._per_class_breakdown()
+        unique_peers = len({p for _, _, p in self._events if p is not None})
+        # Tail hint when WARN is being held back by the peer-diversity
+        # gate. Helps the operator distinguish a real network-wide
+        # signal from a single-neighbour storm without leaving the
+        # alert.
+        gate_hint = ""
+        if (
+            severity == Severity.WARN
+            and count >= self.critical_count
+            and unique_peers < self.critical_min_unique_peers
+        ):
+            gate_hint = (
+                f" Held below CRITICAL: only {unique_peers} unique "
+                f"peer(s) (need {self.critical_min_unique_peers})."
+            )
         return AlertEvent(
             rule="network_layer_signal",
             severity=severity,
@@ -189,7 +244,7 @@ class NetworkLayerSignalRule:
             detail=(
                 f"{count} monad-bft network-layer event(s) in the last "
                 f"{self.window_sec // 60} min (threshold {threshold}). "
-                f"{per_class} "
+                f"{per_class} Unique peers: {unique_peers}.{gate_hint} "
                 "Predictive: peer-stack stress (RaptorCast auth + "
                 "wireauth session + consensus-state timestamp). "
                 "Co-occurs with chain-disagreement clusters; investigate "
@@ -198,9 +253,9 @@ class NetworkLayerSignalRule:
         )
 
     def _per_class_breakdown(self) -> str:
-        decrypt = sum(1 for _, k in self._events if k == ConsensusEventKind.NETWORK_DECRYPT_FAIL)
-        session = sum(1 for _, k in self._events if k == ConsensusEventKind.NETWORK_SESSION_TIMEOUT)
-        ts_inv = sum(1 for _, k in self._events if k == ConsensusEventKind.NETWORK_TIMESTAMP_INVALID)
+        decrypt = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_DECRYPT_FAIL)
+        session = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_SESSION_TIMEOUT)
+        ts_inv = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_TIMESTAMP_INVALID)
         return (
             f"By class: decrypt-fail={decrypt}, "
             f"session-timeout={session}, "
