@@ -42,6 +42,14 @@ Default thresholds give clear separation:
                               (= 180/h, deep into the 2026-05-03
                               burst territory)
 
+Diversity gates suppress single-neighbour storms that produce volume
+without node-wide signal (observed 2026-05-06 chronic chatter from one
+flapping peer post-upgrade): WARN needs ≥``warn_min_unique_peers``
+distinct peers, CRITICAL needs ≥``critical_min_unique_peers``. Below
+the WARN floor the rule stays silent entirely; between the two it
+holds at WARN with a gate-hint. Events from classes without peer info
+(session-timeout, timestamp-invalid) don't block escalation.
+
 State machine matches ``RetrySpikeRule`` / ``BlockProcessingSlowdownRule``:
 
   CLEAR    -> WARN        : emit WARN
@@ -95,14 +103,18 @@ class NetworkLayerSignalRule:
     window_sec: int
     warn_count: int
     critical_count: int
-    # CRITICAL escalation requires events from at least this many
-    # distinct peers. Single-peer storms (one desynced neighbour
-    # spamming RaptorCast) are common at validator-set epoch
-    # boundaries and shouldn't paint the dashboard red. Set to 1 to
-    # disable the gate (legacy behaviour). Only counts peers we
-    # actually parsed; events from non-decrypt-fail classes carry
-    # peer=None and contribute to the count but not the diversity
-    # check.
+    # Diversity gates. WARN entry needs at least ``warn_min_unique_peers``
+    # distinct peers; CRITICAL escalation needs ``critical_min_unique_peers``.
+    # Single-peer storms (one chronically desynced neighbour spamming
+    # RaptorCast) are peer-pair issues, not node-wide stress, and were
+    # producing constant Telegram chatter (2026-05-06) without any
+    # predictive value. Below the WARN floor we stay silent entirely;
+    # between WARN and CRITICAL we still emit WARN with a gate-hint.
+    # Only counts peers we actually parsed; events from classes without
+    # peer info (session-timeout, timestamp-invalid) contribute to the
+    # count but not the diversity check, so a volume-only burst on those
+    # classes still escalates. Set either to 1 to disable that gate.
+    warn_min_unique_peers: int = 2
     critical_min_unique_peers: int = 3
 
     # (ts_sec, kind, peer) tuples — ts_sec is unix-epoch seconds,
@@ -165,7 +177,9 @@ class NetworkLayerSignalRule:
             not peers_known or unique_peers >= self.critical_min_unique_peers
         ):
             target: Severity | None = Severity.CRITICAL
-        elif count >= warn_t:
+        elif count >= warn_t and (
+            not peers_known or unique_peers >= self.warn_min_unique_peers
+        ):
             target = Severity.WARN
         else:
             target = None
