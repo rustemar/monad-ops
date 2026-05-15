@@ -159,9 +159,10 @@ const crosshairPlugin = {
         const timeW  = ctx.measureText(timeText).width;
         const tw = Math.max(valW, blockW, timeW) + 16;
         const th = (timeText ? 48 : 34) + (valLines.length - 1) * 14;
-        let lx = ptX - tw / 2;
-        if (lx < left) lx = left;
-        if (lx + tw > right) lx = right - tw;
+        // Side-anchor so the tooltip doesn't cover the value at ptX.
+        let lx = ptX + 12;
+        if (lx + tw > right) lx = ptX - 12 - tw;
+        if (lx < left) lx = left + 4;
         // Draw INSIDE the chart area, anchored near the top edge. The
         // previous layout placed the box above `top`, which slid under
         // the card header at smaller heights. Anchoring inside means the
