@@ -332,6 +332,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 state.set_probes(results)
                 # Emit alerts on any critical probe.
                 for r in results:
+                    # key_backups is operator hygiene — internal-only
+                    # (also leaks file names in `detail`). Public dashboard
+                    # was filling with one WARN/min because _RecordingSink
+                    # records before DedupingSink.
+                    if r.name == "key_backups":
+                        continue
                     if r.status == "critical":
                         await sink.deliver(AlertEvent(
                             rule=f"probe:{r.name}",
