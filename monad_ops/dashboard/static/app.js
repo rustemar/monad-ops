@@ -52,6 +52,8 @@ let reorgEventsChart = null;
 let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
+let strainChart = null;
+let slowChunksChart = null;
 
 // Formatter for large integer TPS / gas values. Compact 48_780 → "48.8K".
 function fmtCompact(n) {
@@ -1475,6 +1477,8 @@ function _applyChartPayload(d) {
     drawRtp(bins);
     drawTx(bins);
     drawExec(bins);
+    drawStrain(bins);
+    drawSlowChunks(bins);
     // Sparklines (G5) — last N bins for inline KPI trends.
     const tail = bins.slice(-60);
     _renderSparkline("spark-rtp", tail.map(b => b.rtp_avg ?? 0));
@@ -2158,6 +2162,167 @@ function drawExec(bins) {
         },
     });
     _attachBinMeta(execChart, bins);
+}
+
+// Composite "strain index" — 4-metric ratio against baseline.
+// retry_pct + tx_exec_us + commit_us + state_reset_us all moved together
+// during the 2026-05-18 12:00 UTC pre-stall window. Single-metric spikes
+// are noise (precision 0.04% historically); a coordinated move across all
+// four reads qualitatively different. Baseline = median of first 20% of
+// bins in the visible window — falls back to median of full window when
+// the head is thin. Per-bin strain = average of (bin / baseline) across
+// the four metrics. 1.0 = baseline, >1.3 elevated, >1.5 high.
+function _strainBaseline(bins, key) {
+    const vals = bins.map(b => b[key]).filter(v => v != null && v > 0);
+    if (!vals.length) return null;
+    const headCount = Math.max(10, Math.floor(vals.length * 0.2));
+    const head = vals.slice(0, headCount);
+    const pool = head.length >= 10 ? head : vals;
+    const sorted = pool.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)] || null;
+}
+function _strainSeries(bins) {
+    // rtp_avg is in %, the others in µs — ratios are unit-free so mixing OK.
+    const KEYS = ["rtp_avg", "tx_exec_us", "commit_us", "state_reset_us"];
+    const baselines = {};
+    for (const k of KEYS) baselines[k] = _strainBaseline(bins, k);
+    return bins.map(b => {
+        const parts = [];
+        for (const k of KEYS) {
+            const base = baselines[k];
+            const v = b[k];
+            if (!base || v == null) continue;
+            parts.push(v / base);
+        }
+        if (!parts.length) return { strain: null, parts: null };
+        const strain = parts.reduce((a, x) => a + x, 0) / parts.length;
+        return {
+            strain,
+            parts: {
+                retry: baselines.rtp_avg ? (b.rtp_avg ?? 0) / baselines.rtp_avg : null,
+                txexec: baselines.tx_exec_us ? (b.tx_exec_us ?? 0) / baselines.tx_exec_us : null,
+                commit: baselines.commit_us ? (b.commit_us ?? 0) / baselines.commit_us : null,
+                sreset: baselines.state_reset_us ? (b.state_reset_us ?? 0) / baselines.state_reset_us : null,
+            },
+        };
+    });
+}
+function drawStrain(bins) {
+    const labels = _labelsFromBins(bins);
+    const series = _strainSeries(bins);
+    const data = series.map(s => s.strain);
+    if (strainChart) {
+        strainChart.data.labels = labels;
+        strainChart.data.datasets[0].data = data;
+        strainChart._strainParts = series.map(s => s.parts);
+        _attachBinMeta(strainChart, bins);
+        strainChart.update("none");
+        return;
+    }
+    strainChart = new Chart(document.getElementById("chart-strain"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                data,
+                borderColor: "rgba(255,180,84,0.85)",
+                backgroundColor: "rgba(255,180,84,0.10)",
+                fill: true,
+                borderWidth: 1.5,
+                tension: 0.25,
+                pointRadius: 0,
+            }],
+        },
+        plugins: [crosshairPlugin],
+        options: {
+            ...chartCommon,
+            layout: { padding: { top: 8 } },
+            scales: {
+                ...chartCommon.scales,
+                y: {
+                    ...chartCommon.scales.y,
+                    suggestedMin: 0.7,
+                    suggestedMax: 1.6,
+                    ticks: {
+                        ...chartCommon.scales.y.ticks,
+                        callback: v => Number(v).toFixed(2) + "×",
+                    },
+                },
+            },
+        },
+    });
+    strainChart._strainParts = series.map(s => s.parts);
+    // Custom tooltip — show composite + component breakdown so the viewer
+    // sees which of the four metrics is driving the index.
+    strainChart._tooltipValueFormatter = (val, _val2, chart, idx) => {
+        if (val == null) return "—";
+        const parts = (chart._strainParts || [])[idx];
+        const head = `strain ${Number(val).toFixed(2)}×`;
+        if (!parts) return head;
+        const fmt = (x) => x == null ? "—" : Number(x).toFixed(2) + "×";
+        return [
+            head,
+            `retry ${fmt(parts.retry)} · txexec ${fmt(parts.txexec)}`,
+            `commit ${fmt(parts.commit)} · sreset ${fmt(parts.sreset)}`,
+        ].join("\n");
+    };
+    _attachBinMeta(strainChart, bins);
+}
+
+// triedb slow_chunks growth — operator-visible accumulation metric.
+// Climbs roughly linearly over a node's uptime; resets when statesync
+// rebuilds state from a snapshot. See wiki/ideas/triedb-slow-chunks-
+// observability.md for hypothesis context. This chart is observability
+// only — no alert rule attached.
+function drawSlowChunks(bins) {
+    const labels = _labelsFromBins(bins);
+    const data = bins.map(b => b.slow_chunks_max ?? null);
+    if (slowChunksChart) {
+        slowChunksChart.data.labels = labels;
+        slowChunksChart.data.datasets[0].data = data;
+        _attachBinMeta(slowChunksChart, bins);
+        slowChunksChart.update("none");
+        return;
+    }
+    slowChunksChart = new Chart(document.getElementById("chart-slowchunks"), {
+        type: "line",
+        data: {
+            labels,
+            datasets: [{
+                data,
+                borderColor: "rgba(91,156,245,0.85)",
+                backgroundColor: "rgba(91,156,245,0.10)",
+                fill: true,
+                borderWidth: 1.5,
+                tension: 0.15,
+                pointRadius: 0,
+            }],
+        },
+        plugins: [crosshairPlugin],
+        options: {
+            ...chartCommon,
+            layout: { padding: { top: 8 } },
+            scales: {
+                ...chartCommon.scales,
+                y: {
+                    ...chartCommon.scales.y,
+                    suggestedMin: 0,
+                    ticks: {
+                        ...chartCommon.scales.y.ticks,
+                        callback: v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M`
+                                       : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v),
+                    },
+                },
+            },
+        },
+    });
+    slowChunksChart._tooltipValueFormatter = (val) => {
+        if (val == null) return "—";
+        return val >= 1e6 ? `${(val/1e6).toFixed(2)}M chunks`
+             : val >= 1e3 ? `${(val/1e3).toFixed(1)}K chunks`
+             : `${fmtInt(val)} chunks`;
+    };
+    _attachBinMeta(slowChunksChart, bins);
 }
 
 function shortAddr(a) {

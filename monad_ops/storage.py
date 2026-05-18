@@ -977,6 +977,8 @@ class Storage:
                     AVG(state_reset_us)        AS state_reset_us,
                     AVG(tx_exec_us)            AS tx_exec_us,
                     AVG(commit_us)             AS commit_us,
+                    MAX(slow_chunks)           AS slow_chunks_max,
+                    MAX(active_chunks)         AS active_chunks_max,
                     COUNT(*)                   AS samples
                 FROM blocks
                 WHERE timestamp_ms BETWEEN ? AND ?
