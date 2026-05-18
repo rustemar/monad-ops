@@ -325,6 +325,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
              http=f"{args.host}:{args.port}")
 
     async def probe_loop():
+        # Track previous severity per probe to close envelope on recovery.
+        prev_severity: dict[str, str] = {}
         # Run probes immediately, then every 60s.
         while True:
             try:
@@ -346,6 +348,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                             title=f"Probe {r.name} CRITICAL",
                             detail=r.summary,
                         ))
+                        prev_severity[r.name] = "critical"
                     elif r.status == "warn":
                         await sink.deliver(AlertEvent(
                             rule=f"probe:{r.name}",
@@ -354,6 +357,18 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                             title=f"Probe {r.name} WARN",
                             detail=r.summary,
                         ))
+                        prev_severity[r.name] = "warn"
+                    elif r.status == "ok":
+                        # Close envelope only if we previously armed.
+                        if prev_severity.get(r.name) in ("warn", "critical"):
+                            await sink.deliver(AlertEvent(
+                                rule=f"probe:{r.name}",
+                                severity=Severity.RECOVERED,
+                                key=f"probe:{r.name}",
+                                title=f"Probe {r.name} recovered",
+                                detail=r.summary,
+                            ))
+                        prev_severity[r.name] = "ok"
             except Exception as e:  # noqa: BLE001
                 log.error("probe_loop.error", exc=str(e))
             await asyncio.sleep(60)
