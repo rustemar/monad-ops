@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS blocks (
     gas_per_sec_effective INTEGER NOT NULL,
     gas_per_sec_avg       INTEGER NOT NULL,
     active_chunks         INTEGER NOT NULL,
-    slow_chunks           INTEGER NOT NULL
+    storage_cache_size    INTEGER NOT NULL  -- formerly `slow_chunks`; renamed 2026-05-19 after source dive confirmed sc=storage LRU cache size, not chunks
 );
 
 CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks (timestamp_ms);
@@ -404,6 +404,26 @@ class Storage:
                 except sqlite3.OperationalError as e:
                     if "duplicate column" not in str(e).lower():
                         raise
+            # Forward-migration 2026-05-19: rename `slow_chunks` column.
+            # The field stores the size of monad-execution's in-memory
+            # storage-slot LRU cache (sourced from __exec_block `sc=`
+            # field → db.print_stats() → cache_->storage_stats() →
+            # LruCache::size_.load()), not anything chunk-related. Old
+            # name was a parser-side misnomer that propagated. For
+            # fresh installs the CREATE TABLE above uses the new name
+            # and this rename is a no-op (caught by the missing-column
+            # exception). For existing DBs the rename preserves data.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE blocks "
+                    "RENAME COLUMN slow_chunks TO storage_cache_size"
+                )
+            except sqlite3.OperationalError as e:
+                msg = str(e).lower()
+                # Fresh install: `slow_chunks` doesn't exist (table was
+                # created with the new name). Anything else = real error.
+                if "no such column" not in msg:
+                    raise
             self._conn.commit()
 
     # -- writes ------------------------------------------------------------
@@ -414,13 +434,13 @@ class Storage:
                     block_number, block_id, timestamp_ms, tx_count, retried,
                     retry_pct, state_reset_us, tx_exec_us, commit_us, total_us,
                     tps_effective, tps_avg, gas_used, gas_per_sec_effective,
-                    gas_per_sec_avg, active_chunks, slow_chunks
+                    gas_per_sec_avg, active_chunks, storage_cache_size
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     b.block_number, b.block_id, b.timestamp_ms, b.tx_count, b.retried,
                     b.retry_pct, b.state_reset_us, b.tx_exec_us, b.commit_us, b.total_us,
                     b.tps_effective, b.tps_avg, b.gas_used, b.gas_per_sec_effective,
-                    b.gas_per_sec_avg, b.active_chunks, b.slow_chunks,
+                    b.gas_per_sec_avg, b.active_chunks, b.storage_cache_size,
                 ),
             )
 
@@ -747,7 +767,7 @@ class Storage:
                           retried, retry_pct, state_reset_us, tx_exec_us,
                           commit_us, total_us, tps_effective, tps_avg,
                           gas_used, gas_per_sec_effective, gas_per_sec_avg,
-                          active_chunks, slow_chunks
+                          active_chunks, storage_cache_size
                    FROM blocks
                    WHERE block_number BETWEEN ? AND ?
                    ORDER BY block_number ASC""",
@@ -977,7 +997,7 @@ class Storage:
                     AVG(state_reset_us)        AS state_reset_us,
                     AVG(tx_exec_us)            AS tx_exec_us,
                     AVG(commit_us)             AS commit_us,
-                    MAX(slow_chunks)           AS slow_chunks_max,
+                    MAX(storage_cache_size)    AS storage_cache_size_max,
                     MAX(active_chunks)         AS active_chunks_max,
                     COUNT(*)                   AS samples
                 FROM blocks
@@ -2194,7 +2214,7 @@ def _row_to_block(r: sqlite3.Row) -> ExecBlock:
         gas_per_sec_effective=r["gas_per_sec_effective"],
         gas_per_sec_avg=r["gas_per_sec_avg"],
         active_chunks=r["active_chunks"],
-        slow_chunks=r["slow_chunks"],
+        storage_cache_size=r["storage_cache_size"],
     )
 
 

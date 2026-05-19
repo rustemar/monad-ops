@@ -25,8 +25,10 @@ Field glossary:
   gas   — gas used
   gpse  — effective gas per second for this block
   gps   — rolling average gas per second
-  ac    — active chunks in MonadDB
-  sc    — slow chunks in MonadDB
+  ac    — account LRU cache size (entries currently in monad-execution's
+          in-memory account cache)
+  sc    — storage-slot LRU cache size (entries currently in monad-execution's
+          in-memory storage cache). Process-local RAM; resets on restart.
 """
 
 from __future__ import annotations
@@ -59,8 +61,8 @@ class ExecBlock:
     gas_used: int
     gas_per_sec_effective: int
     gas_per_sec_avg: int
-    active_chunks: int
-    slow_chunks: int
+    active_chunks: int           # account LRU cache size (sc field is misnamed historically)
+    storage_cache_size: int      # storage-slot LRU cache size — sc= field in __exec_block
 
     @property
     def parallelism_ratio(self) -> float:
@@ -108,7 +110,7 @@ def parse_exec_block(line: str) -> ExecBlock | None:
         gas_per_sec_effective=int(fields["gpse"]),
         gas_per_sec_avg=int(fields["gps"]),
         active_chunks=int(fields["ac"]),
-        slow_chunks=int(fields["sc"]),
+        storage_cache_size=int(fields["sc"]),
     )
 
 

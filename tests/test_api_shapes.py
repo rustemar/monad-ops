@@ -345,7 +345,7 @@ async def test_api_reorg_trace_partial_post_window_uses_short_ttl(
             state_reset_us=0, tx_exec_us=0, commit_us=0, total_us=0,
             tps_effective=0, tps_avg=0, gas_used=0,
             gas_per_sec_effective=0, gas_per_sec_avg=0,
-            active_chunks=0, slow_chunks=0,
+            active_chunks=0, storage_cache_size=0,
         )
     for n in range(95, 103):
         storage.write_block(mk(n))
@@ -393,7 +393,7 @@ async def test_api_reorg_trace_complete_window_uses_long_ttl(
             state_reset_us=0, tx_exec_us=0, commit_us=0, total_us=0,
             tps_effective=0, tps_avg=0, gas_used=0,
             gas_per_sec_effective=0, gas_per_sec_avg=0,
-            active_chunks=0, slow_chunks=0,
+            active_chunks=0, storage_cache_size=0,
         )
     # Fully ingested 95..105 — covers ±5 around block 100.
     for n in range(95, 106):
@@ -560,7 +560,7 @@ async def test_api_block_detail_shape_with_data(
             state_reset_us=73, tx_exec_us=653, commit_us=448, total_us=1232,
             tps_effective=4594, tps_avg=2435, gas_used=450276,
             gas_per_sec_effective=689, gas_per_sec_avg=365,
-            active_chunks=1, slow_chunks=0,
+            active_chunks=1, storage_cache_size=0,
         )
     # Seed blocks 100..104 and a per-(block, contract) row for block 102.
     for n in range(100, 105):
@@ -672,7 +672,7 @@ async def test_api_contract_detail_suppresses_pattern_for_system(
             state_reset_us=1, tx_exec_us=1, commit_us=1, total_us=3,
             tps_effective=1, tps_avg=1, gas_used=1,
             gas_per_sec_effective=1, gas_per_sec_avg=1,
-            active_chunks=0, slow_chunks=0,
+            active_chunks=0, storage_cache_size=0,
         )
     for n in range(100, 160):
         state_with_storage.storage.write_block(mk(n, rtp=10.0))
@@ -712,7 +712,7 @@ async def test_api_detail_endpoints_set_cache_header(
         retry_pct=0.0, state_reset_us=1, tx_exec_us=1, commit_us=1,
         total_us=3, tps_effective=1, tps_avg=1, gas_used=1,
         gas_per_sec_effective=1, gas_per_sec_avg=1, active_chunks=0,
-        slow_chunks=0,
+        storage_cache_size=0,
     )
     state_with_storage.storage.write_block(b)
     r = await client.get("/api/blocks/1234")
