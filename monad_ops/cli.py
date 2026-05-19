@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -681,6 +682,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             log.info("version_watch.disabled")
             return
         rule = VersionRule(reminder_interval_sec=cfg.reminder_interval_sec)
+        # Restore state across process restarts so we don't re-fire a
+        # first-time INFO for a release we've already announced. State
+        # lives in the meta table; loss-tolerant — missing/corrupt state
+        # just means we re-fire once (better than silent state-divergence).
+        meta_key = "version_watch_state"
+        if storage is not None:
+            raw = await asyncio.to_thread(storage.get_meta, meta_key)
+            if raw:
+                try:
+                    rule.load_state(json.loads(raw))
+                    log.info("version_watch.state.loaded", **rule.to_state())
+                except (ValueError, TypeError) as e:
+                    log.warning("version_watch.state.load_failed", exc=str(e))
         # Stagger startup so the first fetch doesn't compete with
         # bootstrap reads + the reference-RPC probe.
         await asyncio.sleep(20)
@@ -696,6 +710,13 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 ev = rule.on_status(status)
                 if ev is not None:
                     await sink.deliver(ev)
+                # Persist after every tick — _last_seen_installed updates
+                # even when no event is produced, and we want the next
+                # restart to resume from current observation.
+                if storage is not None:
+                    await asyncio.to_thread(
+                        storage.put_meta, meta_key, json.dumps(rule.to_state())
+                    )
                 log.debug(
                     "version_watch.tick",
                     installed=status.installed,

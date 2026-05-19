@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from typing import Any
 
 from monad_ops.collector.version import VersionStatus
 from monad_ops.rules.events import AlertEvent, Severity
@@ -32,10 +33,37 @@ from monad_ops.rules.events import AlertEvent, Severity
 class VersionRule:
     reminder_interval_sec: int = 24 * 3600
 
-    # State.
+    # State. Must be persisted across process restarts (caller loads
+    # via load_state / saves via to_state) — a fresh in-memory rule on
+    # every monad-ops restart would re-fire the first-time alert for an
+    # already-known release, spamming Telegram. See feedback_no_per_tx_…
+    # style operator complaint 2026-05-19 (three identical alerts in
+    # 43 minutes from three service restarts in the same session).
     _last_alerted_version: str | None = None     # the upstream version we last fired NEW for
     _last_reminder_ts: float = 0.0
     _last_seen_installed: str | None = None       # what we observed last tick
+
+    def to_state(self) -> dict[str, Any]:
+        """Serialize fields the caller must persist across restarts."""
+        return {
+            "last_alerted_version": self._last_alerted_version,
+            "last_reminder_ts": self._last_reminder_ts,
+            "last_seen_installed": self._last_seen_installed,
+        }
+
+    def load_state(self, state: dict[str, Any]) -> None:
+        """Restore from a previously-saved to_state() dict. Ignores
+        unknown keys and tolerates missing fields (treated as default)."""
+        if not isinstance(state, dict):
+            return
+        lav = state.get("last_alerted_version")
+        self._last_alerted_version = str(lav) if lav else None
+        try:
+            self._last_reminder_ts = float(state.get("last_reminder_ts") or 0.0)
+        except (TypeError, ValueError):
+            self._last_reminder_ts = 0.0
+        lsi = state.get("last_seen_installed")
+        self._last_seen_installed = str(lsi) if lsi else None
 
     def on_status(
         self,
