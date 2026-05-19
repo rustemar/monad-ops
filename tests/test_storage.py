@@ -30,7 +30,7 @@ def _mk_block(n: int, rtp: float = 0.0, tx: int = 10, retried: int = 0) -> ExecB
         gas_per_sec_effective=689,
         gas_per_sec_avg=365,
         active_chunks=1085212,
-        slow_chunks=10000000,
+        storage_cache_size=10000000,
     )
 
 

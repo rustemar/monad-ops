@@ -53,7 +53,7 @@ let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
 let strainChart = null;
-let slowChunksChart = null;
+let storageCacheSizeChart = null;
 
 // Formatter for large integer TPS / gas values. Compact 48_780 → "48.8K".
 function fmtCompact(n) {
@@ -1478,7 +1478,7 @@ function _applyChartPayload(d) {
     drawTx(bins);
     drawExec(bins);
     drawStrain(bins);
-    drawSlowChunks(bins);
+    drawStorageCacheSize(bins);
     // Sparklines (G5) — last N bins for inline KPI trends.
     const tail = bins.slice(-60);
     _renderSparkline("spark-rtp", tail.map(b => b.rtp_avg ?? 0));
@@ -2269,22 +2269,22 @@ function drawStrain(bins) {
     _attachBinMeta(strainChart, bins);
 }
 
-// triedb slow_chunks growth — operator-visible accumulation metric.
-// Climbs roughly linearly over a node's uptime; resets when statesync
-// rebuilds state from a snapshot. See wiki/ideas/triedb-slow-chunks-
-// observability.md for hypothesis context. This chart is observability
-// only — no alert rule attached.
-function drawSlowChunks(bins) {
+// Storage-slot LRU cache occupancy. Source: __exec_block `sc=` field
+// → db.print_stats() → cache_->storage_stats() → LruCache::print_stats()
+// → size_.load(). Grows linearly with state-touching activity; resets
+// on monad-execution restart (process-local RAM cache). Observability
+// only — no alert rule.
+function drawStorageCacheSize(bins) {
     const labels = _labelsFromBins(bins);
-    const data = bins.map(b => b.slow_chunks_max ?? null);
-    if (slowChunksChart) {
-        slowChunksChart.data.labels = labels;
-        slowChunksChart.data.datasets[0].data = data;
-        _attachBinMeta(slowChunksChart, bins);
-        slowChunksChart.update("none");
+    const data = bins.map(b => b.storage_cache_size_max ?? null);
+    if (storageCacheSizeChart) {
+        storageCacheSizeChart.data.labels = labels;
+        storageCacheSizeChart.data.datasets[0].data = data;
+        _attachBinMeta(storageCacheSizeChart, bins);
+        storageCacheSizeChart.update("none");
         return;
     }
-    slowChunksChart = new Chart(document.getElementById("chart-slowchunks"), {
+    storageCacheSizeChart = new Chart(document.getElementById("chart-storage-cache-size"), {
         type: "line",
         data: {
             labels,
@@ -2316,13 +2316,13 @@ function drawSlowChunks(bins) {
             },
         },
     });
-    slowChunksChart._tooltipValueFormatter = (val) => {
+    storageCacheSizeChart._tooltipValueFormatter = (val) => {
         if (val == null) return "—";
-        return val >= 1e6 ? `${(val/1e6).toFixed(2)}M chunks`
-             : val >= 1e3 ? `${(val/1e3).toFixed(1)}K chunks`
-             : `${fmtInt(val)} chunks`;
+        return val >= 1e6 ? `${(val/1e6).toFixed(2)}M entries`
+             : val >= 1e3 ? `${(val/1e3).toFixed(1)}K entries`
+             : `${fmtInt(val)} entries`;
     };
-    _attachBinMeta(slowChunksChart, bins);
+    _attachBinMeta(storageCacheSizeChart, bins);
 }
 
 function shortAddr(a) {

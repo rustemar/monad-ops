@@ -43,7 +43,7 @@ def _mk_block(n: int, rtp: float = 0.0, tx: int = 2) -> ExecBlock:
         state_reset_us=73, tx_exec_us=653, commit_us=448, total_us=1232,
         tps_effective=4594, tps_avg=2435, gas_used=450276,
         gas_per_sec_effective=689, gas_per_sec_avg=365,
-        active_chunks=1085212, slow_chunks=10000000,
+        active_chunks=1085212, storage_cache_size=10000000,
     )
 
 

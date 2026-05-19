@@ -39,7 +39,7 @@ def _block(
         gas_per_sec_effective=200,
         gas_per_sec_avg=200,
         active_chunks=1_000_000,
-        slow_chunks=10_000_000,
+        storage_cache_size=10_000_000,
     )
 
 
