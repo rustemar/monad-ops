@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · recovery-path assertion stall class</title>
+    <meta name="description" content="Operator-grade write-up of a recurring recovery-path assertion class in monad-execution, with source trace and mitigations.">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/incidents/recovery-path-assertion">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://ops.rustemar.dev/incidents/recovery-path-assertion">
+    <meta property="og:title" content="Recovery-path assertion stall class · monad-ops">
+    <meta property="og:description" content="N=2 observed cases of a runloop_monad.cpp:216 assertion on BFT restart, with source trace and mitigations.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Recovery-path assertion stall class">
+    <meta name="twitter:description" content="N=2 observed cases of a runloop_monad.cpp:216 assertion on BFT restart, with source trace and mitigations.">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <div class="brand">
+                <a href="/" class="brand-link">
+                    <span class="logo">◆</span>
+                    <span class="name">monad-ops</span>
+                </a>
+                <span class="sep">·</span>
+                <span class="node">incidents</span>
+            </div>
+            <div class="nav-links">
+                <a href="/">← dashboard</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="api-docs">
+        <h1>Recovery-path assertion stall class</h1>
+        <p class="hint-404">
+            Source-traced incident class observed on monad testnet · open archive · {{ incident_count }} confirmed cases · last seen {{ last_seen_label }}
+        </p>
+
+        <section class="card">
+            <h2>What it is</h2>
+            <p>
+                A class of stall on a monad full node where monad-execution aborts with a
+                <code>MONAD_ASSERT</code> on the recovery path — specifically when monad-bft
+                is restarted while monad-execution remains alive, and BFT replays proposals
+                whose <code>block_id</code> is still in monad-execution's in-memory
+                <code>block_cache</code> window.
+            </p>
+            <p>
+                Two cases have been confirmed by independent operators so far. The trigger
+                line spans at least monad v0.14.1 and v0.14.3 — this is a stable fragility of
+                the recovery path, not a regression in a particular release.
+            </p>
+        </section>
+
+        <section class="card">
+            <h2>Operator-visible signature</h2>
+            <ul class="api-notes">
+                <li><strong>monad-bft</strong> stops advancing rounds locally; the pacemaker keeps firing local timeouts at the configured cadence; <code>rounds_total</code> in any minute-level aggregate drops to 0 while <code>local_timeouts</code> stays at the round-timer floor.</li>
+                <li><strong>The chain advances without you.</strong> A reference RPC keeps producing blocks. The wedge is local to the affected node.</li>
+                <li><strong>BFT restart triggers the abort.</strong> When the operator restarts only monad-bft and leaves monad-execution running, monad-execution SIGABRTs within tens of seconds with a <code>MONAD_ASSERT</code> on the recovery path.</li>
+                <li><strong>Recovery requires a fresh on-disk state.</strong> Both confirmed cases resolved by landing on a clean snapshot (statesync or operator-driven workspace reset) rather than by re-running the same state.</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Source trace</h2>
+            <p>
+                The assertion is in <code>cmd/monad/runloop_monad.cpp</code> in the public
+                <a href="https://github.com/category-labs/monad" target="_blank" rel="noopener noreferrer">category-labs/monad</a>
+                repository. The relevant block at line 216 (as of the time of writing):
+            </p>
+            <pre class="api-code"><code>MONAD_ASSERT(
+    block_cache
+        .emplace(
+            block_id,
+            BlockCacheEntry{...})
+        .second);</code></pre>
+            <p>
+                <code>block_cache</code> is an unordered map keyed by the 32-byte
+                <code>block_id</code>. <code>emplace().second == false</code> means the key was
+                already in the map — i.e., the same block_id was proposed for execution twice.
+                The cache is bootstrap-filled on startup, sliding-window-pruned after
+                finalize, and lives for the lifetime of the monad-execution process.
+            </p>
+            <p>
+                When monad-bft is restarted independently, BFT re-establishes IPC to the
+                still-live monad-execution and replays proposals from its WAL / blocksync
+                catch-up. Some of those replayed proposals carry <code>block_id</code> values
+                already in monad-execution's <code>block_cache</code> window. Re-emplacing
+                triggers the assertion. SIGABRT, core dump, dead service.
+            </p>
+            <p>
+                A second operator observed the same class on monad v0.14.1 on a different
+                line of the same file; the framing "recovery-path assertion in
+                <code>runloop_monad.cpp</code>" therefore covers multiple sites in the same
+                file rather than a single line.
+            </p>
+        </section>
+
+        <section class="card">
+            <h2>Mitigations (in place on this node)</h2>
+            <ul class="api-notes">
+                <li>
+                    <strong>systemd Restart=on-failure</strong> on both
+                    <code>monad-execution.service</code> and <code>monad-bft.service</code>
+                    via a drop-in:
+                    <pre class="api-code"><code># /etc/systemd/system/monad-execution.service.d/restart.conf
+[Service]
+Restart=on-failure
+RestartSec=15s
+StartLimitBurst=3
+StartLimitIntervalSec=600</code></pre>
+                    Upstream ships <code>Restart=no</code>; this catches a SIGABRT of the
+                    recovery-path class and bounces execution automatically within 15 s.
+                    The <code>StartLimitBurst</code> guard avoids a tight crash-loop
+                    masking a deeper problem.
+                </li>
+                <li>
+                    <strong>journald retention bumped</strong> so the BFT debug trace
+                    survives the next incident. Defaults
+                    (<code>SystemMaxFiles=100</code>) can evict system journals within
+                    hours on a node with heavy <code>RUST_LOG=debug</code> output:
+                    <pre class="api-code"><code># /etc/systemd/journald.conf.d/retention.conf
+[Journal]
+Storage=persistent
+SystemMaxUse=120G
+SystemMaxFiles=2000
+SystemMaxFileSize=256M</code></pre>
+                </li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>What is still unknown</h2>
+            <ul class="api-notes">
+                <li><strong>The proximate cause of Layer 1.</strong> Both confirmed cases fell out of consensus at an epoch boundary on the affected node without a corresponding chain-wide event. The exact BFT-side reason (validator-set view divergence at the boundary, leader-election race, lost RaptorCast chunks for the proposal) requires the BFT debug-level trace from the pre-restart journal — which one of the two cases lost to the systemd journal eviction described above.</li>
+                <li><strong>Whether the two confirmed cases share Layer 1.</strong> Same recovery-path file class is confirmed; same proximate cause for the wedge is not.</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Contribute an observation</h2>
+            <p>
+                If you have observed a SIGABRT of monad-execution on the recovery path
+                after a monad-bft restart, regardless of monad version, please file an
+                issue at
+                <a href="https://github.com/rustemar/monad-ops/issues" target="_blank" rel="noopener noreferrer">github.com/rustemar/monad-ops</a>
+                with:
+            </p>
+            <ul class="api-notes">
+                <li>monad package version installed at the time</li>
+                <li>UTC timestamp of the initial wedge and of the SIGABRT</li>
+                <li>The exact <code>runloop_monad.cpp</code> line on which the assertion fired (if available)</li>
+                <li>Whether the node had been restarted recently or had multi-day uptime before the wedge</li>
+                <li>How recovery was achieved (statesync, workspace reset, manual data wipe)</li>
+            </ul>
+            <p>
+                Operator identities and node-specific details remain private unless you
+                explicitly opt in — only the anonymised case-class counters are surfaced
+                back into this page.
+            </p>
+        </section>
+
+        <section class="card">
+            <h2>Scope and limitations</h2>
+            <ul class="api-notes">
+                <li><strong>Operator-grade write-up.</strong> Source citations point at public files in the public monad repository at <code>HEAD</code> at the time of writing. Line numbers drift; the file-class framing is what survives.</li>
+                <li><strong>Anonymised by default.</strong> Operator identities and node addresses are kept out of the public counter. The class is a property of the codebase, not of any specific operator.</li>
+                <li><strong>Not Foundation guidance.</strong> Mitigations listed here are operator-driven defaults applied on a single full node. Treat as a starting point, not a recommendation from the protocol team.</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <a href="/" class="footlink">← dashboard</a>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API</a>
+        <span class="sep">·</span>
+        <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
+    </footer>
+</body>
+</html>

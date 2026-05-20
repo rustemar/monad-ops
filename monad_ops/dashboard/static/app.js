@@ -21,6 +21,10 @@ const PROBES_INTERVAL = 15000;
 // so a fresh apt-repo publication is picked up within a minute of the
 // next hourly probe tick instead of waiting for a tab reload.
 const VERSION_INTERVAL = 60000;
+// validator_set loop runs every 5 min server-side (snapshot changes per
+// epoch ~5.5h on testnet). 60s client poll keeps the tile fresh after
+// any restart-driven cache miss without flooding the server.
+const VALIDATOR_SET_INTERVAL = 60000;
 
 // Inflight-dedup per endpoint: when setInterval fires while a previous
 // request is still in flight (slow network, backgrounded tab releasing
@@ -2618,6 +2622,124 @@ function renderVersion(d) {
     extrasEl.textContent = "";
 }
 
+// Active validator-set snapshot (staking precompile). Updates once per
+// epoch (~5.5h on testnet); tile shows current consensus/eligible counts
+// + cutoff stake at a glance, popup carries the full snapshot.
+let _validatorSetLatest = null;
+
+async function fetchValidatorSet() {
+    try {
+        const r = await pollFetch("validator-set", "/api/validator_set");
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        renderValidatorSet(d);
+        _validatorSetLatest = d;
+    } catch (e) { /* swallow */ }
+}
+
+function _fmtMonFromWei(wei) {
+    if (wei == null) return null;
+    try {
+        // wei is a stringified uint256 on the wire to dodge JS Number
+        // overflow (10^7 MON × 10^18 wei/MON = 10^25, well past 2^53).
+        // BigInt + integer division yields whole MON; format compactly.
+        const w = BigInt(String(wei));
+        const ONE = 10n ** 18n;
+        const mon = Number(w / ONE);
+        return mon;
+    } catch (_) {
+        return null;
+    }
+}
+
+function renderValidatorSet(d) {
+    const row = document.getElementById("validator-set-row");
+    const statusEl = document.getElementById("validator-set-status");
+    const lineEl = document.getElementById("validator-set-line");
+    const extrasEl = document.getElementById("validator-set-extras");
+    if (!row || !statusEl || !lineEl) return;
+
+    if (!d || !d.enabled) {
+        statusEl.className = "status unknown";
+        statusEl.textContent = "off";
+        lineEl.className = "version-line";
+        lineEl.textContent = "validator_set probe disabled in config";
+        extrasEl.textContent = "";
+        return;
+    }
+
+    if (d.status !== "ok") {
+        statusEl.className = "status unknown";
+        statusEl.textContent = "unknown";
+        lineEl.className = "version-line";
+        lineEl.textContent = d.error || "querying staking precompile…";
+        extrasEl.textContent = "";
+        return;
+    }
+
+    const cons = d.consensus_count;
+    const cap = d.active_valset_cap || 200;
+    const bench = d.bench_count;
+    const floorMon = _fmtMonFromWei(d.lowest_active_stake_wei);
+
+    // Status chip: ok when active set is full (200/200), update when
+    // headroom (consensus < cap = under-filled set, operationally
+    // unusual on testnet).
+    if (cons != null && cons >= cap) {
+        statusEl.className = "status ok";
+        statusEl.textContent = `${cons}/${cap}`;
+    } else {
+        statusEl.className = "status update";
+        statusEl.textContent = `${cons ?? "?"}/${cap}`;
+    }
+
+    const epochPart = d.epoch != null
+        ? `<span class="v-installed">epoch ${d.epoch}</span>` : "";
+    const floorPart = floorMon != null
+        ? `<span class="sep">·</span><span class="v-latest">${fmtCompact(floorMon)} MON floor</span>`
+        : "";
+    const benchPart = bench != null && bench > 0
+        ? `<span class="sep">·</span><span class="v-installed">${bench} on bench</span>`
+        : "";
+    lineEl.className = "version-line";
+    lineEl.innerHTML = epochPart + floorPart + benchPart;
+
+    extrasEl.textContent = d.checked_at
+        ? `checked ${fmtSince(d.checked_at * 1000)}`
+        : "";
+}
+
+// Curated counter for the recovery-path assertion incident class.
+// Static-ish — bumped manually when a peer confirms a new case via
+// GitHub issue. Tile is the visible entry point; the full write-up
+// lives at /incidents/recovery-path-assertion.
+async function fetchRecoveryPath() {
+    try {
+        const r = await pollFetch("recovery-path", "/api/incidents/recovery-path-assertion");
+        if (!r.ok) throw new Error(r.statusText);
+        const d = await r.json();
+        renderRecoveryPath(d);
+    } catch (e) { /* swallow */ }
+}
+
+function renderRecoveryPath(d) {
+    const statusEl = document.getElementById("recovery-path-status");
+    const lineEl = document.getElementById("recovery-path-line");
+    const extrasEl = document.getElementById("recovery-path-extras");
+    if (!statusEl || !lineEl) return;
+    const count = (d && typeof d.count === "number") ? d.count : 0;
+    statusEl.className = count > 0 ? "status update" : "status ok";
+    statusEl.textContent = `N=${count}`;
+    const releases = (d.releases || []).join(" + ");
+    const lastSeen = d.last_seen_label ? `last ${d.last_seen_label}` : "";
+    const parts = [];
+    if (releases) parts.push(`<span class="v-installed">${escapeHTML(releases)}</span>`);
+    if (lastSeen) parts.push(`<span class="v-latest">${escapeHTML(lastSeen)}</span>`);
+    lineEl.className = "version-line";
+    lineEl.innerHTML = parts.join(`<span class="sep">·</span>`);
+    extrasEl.textContent = "open archive →";
+}
+
 async function fetchIncidents() {
     try {
         // Refresh journal-availability alongside alerts so the 📥 journal
@@ -2858,6 +2980,8 @@ fetchContracts();
 fetchIncidents();
 fetchProbes();
 fetchVersion();
+fetchValidatorSet();
+fetchRecoveryPath();
 fetchStressEvents();
 // Throttle polling when the tab is hidden to save battery and reduce
 // rate-limit pressure (B5). On refocus, immediately refresh and
@@ -2879,6 +3003,11 @@ _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);
 _schedule(fetchVersion, VERSION_INTERVAL);
+_schedule(fetchValidatorSet, VALIDATOR_SET_INTERVAL);
+// recovery-path counter is curated (operator updates it on GitHub
+// issue confirmation); 10-min cadence is generous, the page itself
+// is the canonical surface.
+_schedule(fetchRecoveryPath, 600000);
 _schedule(fetchStressEvents, INCIDENTS_INTERVAL);
 
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
@@ -3065,6 +3194,18 @@ function _popupInit() {
         });
     }
 
+    // Validator-set tile — same pattern as the version tile.
+    const validatorSetRow = document.getElementById("validator-set-row");
+    if (validatorSetRow) {
+        validatorSetRow.addEventListener("click", () => openPopup("validator-set", "set"));
+        validatorSetRow.addEventListener("keydown", (e) => {
+            if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openPopup("validator-set", "set");
+            }
+        });
+    }
+
     // Copy-address. Only visible on contract popups; hidden in the default
     // openPopup() reset and re-shown by _renderContractPopup once we know
     // the address. navigator.clipboard requires HTTPS or localhost — ops.
@@ -3164,6 +3305,7 @@ async function openPopup(kind, key, opts = {}) {
                              : kind === "contract" ? "Contract detail"
                              : kind === "reorg" ? "Reorg trace"
                              : kind === "version" ? "Node version"
+                             : kind === "validator-set" ? "Active validator set"
                              : "Detail";
     // Hide + reset the copy button on every open; the contract-popup
     // renderer re-enables it once the address is known.
@@ -3203,6 +3345,10 @@ async function openPopup(kind, key, opts = {}) {
             const r = await fetch("/api/version", { signal });
             if (!r.ok) throw new Error(r.statusText);
             _renderVersionPopup(await r.json());
+        } else if (kind === "validator-set") {
+            const r = await fetch("/api/validator_set", { signal });
+            if (!r.ok) throw new Error(r.statusText);
+            _renderValidatorSetPopup(await r.json());
         } else {
             _popupError("unknown popup kind");
         }
@@ -3615,6 +3761,67 @@ function _renderVersionPopup(d) {
 
     _popup.foot.innerHTML = `
         <span class="foot-note">read release notes + back up keys before upgrading · if <code>apt-mark hold monad</code> is set, run <code>apt-mark unhold monad</code> first</span>
+    `;
+}
+
+// ---- popup render: active validator set ------------------------------
+function _renderValidatorSetPopup(d) {
+    _popup.body.className = "popup-body";
+    _popup.title.textContent = "Active validator set";
+    const checkedLabel = d.checked_at
+        ? `${_fmtLocal(d.checked_at * 1000)} ${_tzShort} · ${fmtSince(d.checked_at * 1000)}`
+        : "not checked yet";
+    _popup.sub.textContent = `staking precompile · ${checkedLabel}`;
+
+    let summaryBody;
+    if (!d.enabled) {
+        summaryBody = `<div class="pk-sub">validator_set probe is disabled in config.toml.</div>`;
+    } else if (d.status === "ok") {
+        const cap = d.active_valset_cap || 200;
+        const cons = d.consensus_count ?? "?";
+        const execn = d.execution_count ?? "?";
+        const bench = d.bench_count ?? 0;
+        const floorMon = _fmtMonFromWei(d.lowest_active_stake_wei);
+        const floorTxt = floorMon != null ? `${fmtCompact(floorMon)} MON` : "—";
+        const epochTxt = d.epoch != null ? String(d.epoch) : "—";
+        const epochDelayHint = d.in_epoch_delay
+            ? `<div class="pk-sub">epoch boundary delay flag set</div>` : "";
+        summaryBody = `
+            <div class="pk-grid">
+                <div class="pk-cell"><div class="pk-label">epoch</div>
+                    <div class="pk-val">${escapeHTML(epochTxt)}</div>
+                    ${epochDelayHint}</div>
+                <div class="pk-cell"><div class="pk-label">consensus / cap</div>
+                    <div class="pk-val">${cons} / ${cap}</div>
+                    <div class="pk-sub">validators selected this epoch</div></div>
+                <div class="pk-cell"><div class="pk-label">eligible total</div>
+                    <div class="pk-val">${execn}</div>
+                    <div class="pk-sub">≥ active-stake threshold</div></div>
+                <div class="pk-cell"><div class="pk-label">on bench</div>
+                    <div class="pk-val">${bench}</div>
+                    <div class="pk-sub">eligible but not in consensus set</div></div>
+                <div class="pk-cell"><div class="pk-label">cutoff stake</div>
+                    <div class="pk-val">${escapeHTML(floorTxt)}</div>
+                    <div class="pk-sub">lowest active consensusStake</div></div>
+            </div>`;
+    } else {
+        summaryBody = `<div class="pk-sub">${escapeHTML(d.error || "snapshot probe has not produced a result yet")}</div>`;
+    }
+
+    _popup.body.innerHTML = `
+        ${summaryBody}
+        <div class="pk-section">protocol constants</div>
+        <div class="pk-sub">
+            ACTIVE_VALSET_SIZE = ${d.active_valset_cap || 200} ·
+            ACTIVE_VALIDATOR_STAKE = ${fmtCompact(d.active_validator_stake_mon || 10_000_000)} MON ·
+            MIN_AUTH_ADDRESS_STAKE = ${fmtCompact(d.min_auth_address_stake_mon || 100_000)} MON
+        </div>
+        <div class="pk-section">source</div>
+        <div class="pk-sub">staking precompile <code>0x0000000000000000000000000000000000001000</code> · queried via local node RPC</div>
+    `;
+
+    _popup.foot.innerHTML = `
+        <span class="foot-note">snapshot changes on epoch boundaries (~5.5h on testnet) · selectors documented at docs.monad.xyz/reference/staking/api</span>
     `;
 }
 

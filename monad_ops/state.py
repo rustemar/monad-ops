@@ -17,6 +17,7 @@ from threading import Lock
 
 from monad_ops.collector.probes import ProbeResult
 from monad_ops.collector.reference_rpc import ReferenceSample
+from monad_ops.collector.validator_set import ValidatorSetSnapshot
 from monad_ops.collector.version import VersionStatus
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules.events import AlertEvent, code_color_for
@@ -123,6 +124,11 @@ class State:
         # surfaced via /api/version for the dashboard tile.
         self._version: VersionStatus | None = None
         self._version_checked_at: float | None = None
+        # Validator-set snapshot from the staking precompile. Populated
+        # by validator_set_loop in cli.py; surfaced via /api/validator_set
+        # for the dashboard tile.
+        self._validator_set: ValidatorSetSnapshot | None = None
+        self._validator_set_checked_at: float | None = None
         self._started_at = time.time()
         self._blocks_seen_total = 0
         self._storage = storage
@@ -666,6 +672,15 @@ class State:
     def version(self) -> tuple[VersionStatus | None, float | None]:
         with self._lock:
             return self._version, self._version_checked_at
+
+    def set_validator_set(self, snapshot: ValidatorSetSnapshot) -> None:
+        with self._lock:
+            self._validator_set = snapshot
+            self._validator_set_checked_at = time.time()
+
+    def validator_set(self) -> tuple[ValidatorSetSnapshot | None, float | None]:
+        with self._lock:
+            return self._validator_set, self._validator_set_checked_at
 
     # -- reads (from API) --------------------------------------------------
     def recent_blocks(self, limit: int = 500) -> list[ExecBlock]:

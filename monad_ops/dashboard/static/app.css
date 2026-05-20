@@ -285,6 +285,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
     transition: background-color 120ms ease;
 }
 .version-row:hover, .version-row:focus { background: var(--surface-hover, rgba(255,255,255,0.03)); }
+a.version-row { text-decoration: none; color: var(--text-dim); }
+a.version-row:hover, a.version-row:focus { color: var(--text-dim); text-decoration: none; }
 .version-line {
     color: var(--text); font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;

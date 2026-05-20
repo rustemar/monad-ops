@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · stress-event replay archive</title>
+    <meta name="description" content="Public replay-export archive for monad testnet stress events — aggregate metrics, top retried contracts, base-fee curve, validator-timeout %.">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/replay/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://ops.rustemar.dev/replay/">
+    <meta property="og:title" content="monad-ops · stress-event replay archive">
+    <meta property="og:description" content="Aggregate metrics + top retried contracts + base-fee curve for monad testnet stress windows.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="monad-ops · stress-event replay archive">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <div class="brand">
+                <a href="/" class="brand-link">
+                    <span class="logo">◆</span>
+                    <span class="name">monad-ops</span>
+                </a>
+                <span class="sep">·</span>
+                <span class="node">replay archive</span>
+            </div>
+            <div class="nav-links">
+                <a href="/">← dashboard</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="api-docs">
+        <h1>Stress-event replay archive</h1>
+        <p class="hint-404">
+            Per-event aggregate of retry rate, top retried contracts, base-fee response, validator-timeout %.
+            One link per stress window so anyone reviewing can pull the same numbers without looking up
+            epoch boundaries. Source is a single EU full node — treat it as one viewpoint among many.
+        </p>
+
+        <section class="card">
+            <h2>Convention</h2>
+            <p>
+                Each Foundation testnet stress event gets a stable URL on this site within
+                ~30 minutes of the window closing:
+            </p>
+            <ul class="api-notes">
+                <li><code>{{ base_url }}/replay/<em>EVENT_ID</em></code> — HTML landing with summary metrics and a per-batch breakdown.</li>
+                <li><code>{{ base_url }}/api/window_summary?from_ts_ms=…&amp;to_ts_ms=…</code> — JSON aggregate behind every landing page, also usable standalone.</li>
+                <li><code>monad-ops replay-export</code> — the CLI that produces a static asset dump of any window. Shipped in Sprint 2; runs against a local <code>state.db</code> so the artefact survives the live server.</li>
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Archive</h2>
+            {% if events %}
+            <ul class="event-list">
+                {% for ev in events %}
+                <li class="event">
+                    <div class="event-title">
+                        <a href="{{ ev.page_url }}">{{ ev.title }}</a>
+                        <span class="event-date">{{ ev.date_label }}</span>
+                    </div>
+                    <div class="event-sub">{{ ev.summary }}</div>
+                    <div class="event-batches">
+                        {% for b in ev.batches %}
+                        <code class="event-batch"><a href="{{ ev.api_base }}{{ b.from_ts }}&amp;to_ts_ms={{ b.to_ts }}&amp;top_contracts_limit=20">{{ b.label }} → /api/window_summary</a></code>
+                        {% endfor %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <p class="hint-404">No stress events on file yet. Next Foundation event will land here.</p>
+            {% endif %}
+        </section>
+
+        <section class="card">
+            <h2>Scope</h2>
+            <ul class="api-notes">
+                <li><strong>Single-viewpoint.</strong> All counters are what one full node observed. Other validators may have seen different reorg / retry / timeout signatures during the same window — pair this with a reference RPC for chain-wide truth.</li>
+                <li><strong>Static once written.</strong> Replay artefacts don't update after the event closes; if a metric is wrong, the fix is a fresh dump, not in-place patch.</li>
+                <li><strong>Not Foundation guidance.</strong> Curated by the operator of this node. Use for retrospective comparison, not as the canonical record.</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <a href="/" class="footlink">← dashboard</a>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API</a>
+        <span class="sep">·</span>
+        <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
+    </footer>
+</body>
+</html>

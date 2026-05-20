@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · {{ event.title }}</title>
+    <meta name="description" content="Replay-export landing for {{ event.title }} — aggregate retry profile, top retried contracts, base-fee curve, validator-timeout %.">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev{{ event.page_url }}">
+    <meta property="og:type" content="article">
+    <meta property="og:url" content="https://ops.rustemar.dev{{ event.page_url }}">
+    <meta property="og:title" content="{{ event.title }} · monad-ops">
+    <meta property="og:description" content="{{ event.summary }}">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="{{ event.title }}">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <div class="brand">
+                <a href="/" class="brand-link">
+                    <span class="logo">◆</span>
+                    <span class="name">monad-ops</span>
+                </a>
+                <span class="sep">·</span>
+                <a href="/replay/" class="node">replay</a>
+            </div>
+            <div class="nav-links">
+                <a href="/">← dashboard</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="api-docs">
+        <h1>{{ event.title }}</h1>
+        <p class="hint-404">{{ event.date_label }} · single full node viewpoint (EU)</p>
+
+        <section class="card">
+            <h2>Summary</h2>
+            <p>{{ event.summary }}</p>
+        </section>
+
+        <section class="card">
+            <h2>Per-batch aggregate</h2>
+            <p>
+                Each curl below returns aggregate metrics + top retried contracts for one
+                batch window. Add <code>&amp;include_blocks=true</code> for the per-block series
+                (capped at 2 h spans on the server).
+            </p>
+            {% for b in event.batches %}
+            <div class="example">
+                <div class="example-label">{{ b.label }}</div>
+                <pre class="example-code"><code>curl -s "{{ base_url }}/api/window_summary?from_ts_ms={{ b.from_ts }}&amp;to_ts_ms={{ b.to_ts }}&amp;top_contracts_limit=20" \
+  | jq '.aggregate'</code></pre>
+            </div>
+            {% endfor %}
+        </section>
+
+        <section class="card">
+            <h2>Scope</h2>
+            <ul class="api-notes">
+                <li><strong>Single-viewpoint.</strong> Counters reflect what this one full node observed during the window. Other validators may have seen different signatures.</li>
+                <li><strong>Static.</strong> Once the event closes, the artefact doesn't update in place; a corrected dump would land as a new URL.</li>
+                <li><strong>Not Foundation guidance.</strong> Operator-curated retrospective. Pair with the official Foundation summary if you need the canonical record.</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <a href="/replay/" class="footlink">← all events</a>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API</a>
+        <span class="sep">·</span>
+        <a href="https://github.com/rustemar/monad-ops" class="footlink" target="_blank" rel="noopener noreferrer">source ↗</a>
+    </footer>
+</body>
+</html>

@@ -897,6 +897,57 @@ def build_app(
         payload = await _cached("version", _VERSION_TTL, (), _load)
         return JSONResponse(payload)
 
+    @app.api_route("/api/validator_set", methods=["GET", "HEAD"])
+    async def api_validator_set() -> JSONResponse:
+        """Active validator-set snapshot from the staking precompile.
+
+        Powers the "active validator set" tile on the dashboard. The
+        snapshot itself changes on epoch boundaries (~5.5h on testnet);
+        polled every 5 min by ``validator_set_loop`` in cli.py.
+
+        Public-safe: returns only protocol constants + on-chain counts
+        + the cutoff stake (already public via the precompile). No host
+        metadata or peer-level identity.
+        """
+        async def _load():
+            snapshot, checked_at = state.validator_set()
+            if snapshot is None:
+                return {
+                    "enabled": config.validator_set.enabled,
+                    "status": "unknown",
+                    "error": "validator_set probe has not run yet",
+                    "checked_at": None,
+                    "epoch": None,
+                    "in_epoch_delay": False,
+                    "consensus_count": None,
+                    "execution_count": None,
+                    "bench_count": None,
+                    "lowest_active_stake_wei": None,
+                    "active_valset_cap": 200,
+                    "active_validator_stake_mon": 10_000_000,
+                    "min_auth_address_stake_mon": 100_000,
+                }
+            return {
+                "enabled": config.validator_set.enabled,
+                "status": snapshot.status,
+                "error": snapshot.error,
+                "checked_at": checked_at,
+                "epoch": snapshot.epoch,
+                "in_epoch_delay": snapshot.in_epoch_delay,
+                "consensus_count": snapshot.consensus_count,
+                "execution_count": snapshot.execution_count,
+                "bench_count": snapshot.bench_count,
+                "lowest_active_stake_wei": (
+                    str(snapshot.lowest_active_stake_wei)
+                    if snapshot.lowest_active_stake_wei is not None else None
+                ),
+                "active_valset_cap": 200,
+                "active_validator_stake_mon": 10_000_000,
+                "min_auth_address_stake_mon": 100_000,
+            }
+        payload = await _cached("validator_set", 30.0, (), _load)
+        return JSONResponse(payload)
+
     @app.api_route("/api/contracts/top_retried", methods=["GET", "HEAD"])
     async def api_top_retried(
         since_block: int | None = Query(None, ge=0),
@@ -1387,6 +1438,117 @@ def build_app(
             request,
             "alerts.html",
             {"node_name": config.node.name, "asset_version": _ASSET_VERSION},
+        )
+
+    # Curated counter for the recovery-path assertion incident class.
+    # Source-of-truth lives here rather than in a side table because the
+    # entries are operator-curated (peer observations confirmed in
+    # conversation, not auto-detected from this node's journal). When a
+    # third case lands, append to this list and bump the count + last_seen
+    # in one place; the page and the JSON endpoint stay consistent.
+    _RECOVERY_PATH_CASES = [
+        {"release": "v0.14.1", "month": "2026-04"},
+        {"release": "v0.14.3", "month": "2026-05"},
+    ]
+    _RECOVERY_PATH_LAST_SEEN_LABEL = "2026-05-18"
+
+    @app.api_route("/api/incidents/recovery-path-assertion", methods=["GET", "HEAD"])
+    async def api_incidents_recovery_path() -> JSONResponse:
+        """Curated counter for the recovery-path assertion class.
+
+        Static payload — incremented by hand when a new case is
+        confirmed via GitHub issue. The API exists so the dashboard
+        tile can display the current count without templating the
+        value into the HTML at build time.
+        """
+        return JSONResponse({
+            "slug": "recovery-path-assertion",
+            "title": "Recovery-path assertion stall class",
+            "count": len(_RECOVERY_PATH_CASES),
+            "last_seen_label": _RECOVERY_PATH_LAST_SEEN_LABEL,
+            "releases": sorted({c["release"] for c in _RECOVERY_PATH_CASES}),
+            "page_url": "/incidents/recovery-path-assertion",
+        })
+
+    @app.api_route("/incidents/recovery-path-assertion", methods=["GET", "HEAD"])
+    async def incidents_recovery_path_page(request: Request):
+        return templates.TemplateResponse(
+            request,
+            "incidents/recovery_path_assertion.html",
+            {
+                "asset_version": _ASSET_VERSION,
+                "incident_count": len(_RECOVERY_PATH_CASES),
+                "last_seen_label": _RECOVERY_PATH_LAST_SEEN_LABEL,
+            },
+        )
+
+    # Stress-event replay archive — listing of past Foundation stress
+    # windows with stable URLs. New events append a row here. Same
+    # static-curated pattern as _RECOVERY_PATH_CASES; auto-detection
+    # would be nice but stress events are rare enough (few per year)
+    # that manual curation costs nothing and avoids false-positive
+    # noise from non-stress retry spikes.
+    _REPLAY_EVENTS = [
+        {
+            "id": "2026-04-20",
+            "page_url": "/replay/2026-04-20",
+            "title": "Foundation testnet stress test — 2026-04-20",
+            "date_label": "2026-04-20",
+            "summary": (
+                "Three 2-hour batches across epochs 532 / 533 / 534. "
+                "~3–5k TPS, ~400 M gas/s, validator-timeout < 3% per Foundation summary."
+            ),
+            "api_base": "/api/window_summary?from_ts_ms=",
+            "batches": [
+                {"label": "epoch 532 (00:00 → 05:37 UTC)",
+                 "from_ts": 1776643200000, "to_ts": 1776663420000},
+                {"label": "epoch 533 (05:37 → 11:14 UTC)",
+                 "from_ts": 1776663420000, "to_ts": 1776683640000},
+                {"label": "epoch 534 (11:14 → 16:50 UTC)",
+                 "from_ts": 1776683640000, "to_ts": 1776703800000},
+            ],
+        },
+    ]
+
+    @app.api_route("/api/replay", methods=["GET", "HEAD"])
+    async def api_replay_index() -> JSONResponse:
+        """Stress-event replay archive index — JSON shape so the HTML
+        page and any external integrator share the same source of
+        truth."""
+        return JSONResponse({"events": _REPLAY_EVENTS})
+
+    @app.api_route("/replay/{event_id}", methods=["GET", "HEAD"])
+    async def replay_event_page(request: Request, event_id: str):
+        event = next((e for e in _REPLAY_EVENTS if e["id"] == event_id), None)
+        if event is None:
+            raise StarletteHTTPException(status_code=404)
+        host = request.headers.get("host", "")
+        scheme = request.url.scheme or "https"
+        base_url = f"{scheme}://{host}".rstrip("/") if host else ""
+        return templates.TemplateResponse(
+            request,
+            "replay/event.html",
+            {
+                "asset_version": _ASSET_VERSION,
+                "base_url": base_url,
+                "event": event,
+            },
+        )
+
+    @app.api_route("/replay/", methods=["GET", "HEAD"])
+    @app.api_route("/replay", methods=["GET", "HEAD"])
+    async def replay_index_page(request: Request):
+        host = request.headers.get("host", "")
+        scheme = request.url.scheme or "https"
+        base_url = f"{scheme}://{host}".rstrip("/") if host else ""
+        return templates.TemplateResponse(
+            request,
+            "replay/index.html",
+            {
+                "asset_version": _ASSET_VERSION,
+                "base_url": base_url,
+                "events": _REPLAY_EVENTS,
+            },
         )
 
     @app.api_route("/api", methods=["GET", "HEAD"])
