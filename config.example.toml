@@ -48,3 +48,11 @@ rpc_timeout_sec = 5.0
 [labels]
 # Path to the contract label registry JSON. Missing file = empty map.
 path = "labels.json"
+
+# [validator_set]
+# Active validator-set snapshot from the staking precompile (powers
+# the "active validator set" tile on the dashboard). Default enabled,
+# 5-min poll cadence — set itself only changes on epoch boundaries.
+# enabled = true
+# poll_interval_sec = 300
+# timeout_sec = 10.0

@@ -178,6 +178,23 @@ class LabelsConfig(BaseModel):
     path: str = "labels.json"
 
 
+class ValidatorSetConfig(BaseModel):
+    """Active validator-set snapshot on the public dashboard.
+
+    Polls the staking precompile (``0x...1000``) via the local node's
+    RPC every ``poll_interval_sec``. The set itself changes on epoch
+    boundaries (~5.5h on testnet), so a 5-min cadence is generous.
+    Mirrors the validator-set block already rendered in
+    ``monitoring/monad_monitor.py`` Telegram heartbeats — same data,
+    public surface.
+
+    ``enabled=false`` disables both the loop and the API endpoint.
+    """
+    enabled: bool = True
+    poll_interval_sec: int = 300
+    timeout_sec: float = 10.0
+
+
 class VersionWatchConfig(BaseModel):
     """Hourly check that the locally installed monad package is current.
 
@@ -234,6 +251,7 @@ class Config(BaseModel):
     labels: LabelsConfig = LabelsConfig()
     retention: RetentionConfig = RetentionConfig()
     version_watch: VersionWatchConfig = VersionWatchConfig()
+    validator_set: ValidatorSetConfig = ValidatorSetConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:

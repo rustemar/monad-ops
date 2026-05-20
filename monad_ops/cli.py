@@ -29,6 +29,7 @@ from monad_ops.collector.epoch_probe import (
     scan_epoch_history,
 )
 from monad_ops.collector.reference_rpc import fetch_reference_block
+from monad_ops.collector.validator_set import fetch_validator_set
 from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
@@ -728,6 +729,39 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("version_watch.error", exc=str(e))
             await asyncio.sleep(max(60, int(cfg.poll_interval_sec)))
 
+    async def validator_set_loop():
+        """Polls the staking precompile for the active validator-set
+        snapshot. No alerts emitted — the dashboard tile reads
+        ``state.validator_set()`` and renders whatever is current.
+
+        ``enabled=false`` disables the loop entirely (no fetch, no API
+        data). Initial delay staggers startup so the first fetch doesn't
+        compete with bootstrap reads.
+        """
+        cfg = config.validator_set
+        if not cfg.enabled:
+            log.info("validator_set.disabled")
+            return
+        await asyncio.sleep(30)
+        while True:
+            try:
+                snapshot = await fetch_validator_set(
+                    rpc_url=config.node.rpc_url,
+                    timeout_sec=cfg.timeout_sec,
+                )
+                state.set_validator_set(snapshot)
+                log.debug(
+                    "validator_set.tick",
+                    epoch=snapshot.epoch,
+                    consensus_count=snapshot.consensus_count,
+                    execution_count=snapshot.execution_count,
+                    status=snapshot.status,
+                    error=snapshot.error,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.error("validator_set.error", exc=str(e))
+            await asyncio.sleep(max(60, int(cfg.poll_interval_sec)))
+
     async def contract_hour_loop():
         """Keep the `contract_hour` rollup current.
 
@@ -785,6 +819,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
     bft_flush = asyncio.create_task(bft_flush_loop(), name="bft_flush")
     version_task = asyncio.create_task(version_loop(), name="version_watch")
+    validator_set_task = asyncio.create_task(validator_set_loop(), name="validator_set")
     network_signal_tick = asyncio.create_task(
         network_signal_tick_loop(), name="network_signal_tick",
     )
@@ -837,8 +872,8 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
-        version_task, network_signal_tick, process_restart_task,
-        reorg_backfill,
+        version_task, validator_set_task, network_signal_tick,
+        process_restart_task, reorg_backfill,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))

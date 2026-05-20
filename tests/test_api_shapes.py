@@ -102,6 +102,122 @@ async def test_enrichment_status_disabled(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_validator_set_unknown_until_first_probe(
+    client: httpx.AsyncClient,
+) -> None:
+    r = await client.get("/api/validator_set")
+    assert r.status_code == 200
+    body = r.json()
+    # Before validator_set_loop has run the tile shows "unknown" with
+    # the protocol constants still populated so the popup can render
+    # the protocol-constants block without waiting for a real probe.
+    assert body["enabled"] is True
+    assert body["status"] == "unknown"
+    assert body["active_valset_cap"] == 200
+    assert body["active_validator_stake_mon"] == 10_000_000
+    assert body["min_auth_address_stake_mon"] == 100_000
+    assert body["checked_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_api_validator_set_serializes_snapshot(
+    client: httpx.AsyncClient, state_with_storage: State,
+) -> None:
+    """After ``state.set_validator_set`` is populated the endpoint
+    returns the snapshot fields, with ``lowest_active_stake_wei``
+    stringified to dodge JSON int-overflow on uint256."""
+    from monad_ops.collector.validator_set import ValidatorSetSnapshot
+    snap = ValidatorSetSnapshot(
+        epoch=545,
+        in_epoch_delay=False,
+        consensus_count=200,
+        execution_count=208,
+        bench_count=8,
+        lowest_active_stake_wei=11_000_000 * 10**18,
+        status="ok",
+        error=None,
+    )
+    state_with_storage.set_validator_set(snap)
+    r = await client.get("/api/validator_set")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["epoch"] == 545
+    assert body["consensus_count"] == 200
+    assert body["execution_count"] == 208
+    assert body["bench_count"] == 8
+    # uint256 is serialised as a string so the JS BigInt parses it
+    # without loss; raw int would silently round above 2^53.
+    assert body["lowest_active_stake_wei"] == str(11_000_000 * 10**18)
+    assert body["checked_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_api_incidents_recovery_path_shape(client: httpx.AsyncClient) -> None:
+    """Curated incident-class counter for the dashboard tile + page."""
+    r = await client.get("/api/incidents/recovery-path-assertion")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["slug"] == "recovery-path-assertion"
+    assert isinstance(body["count"], int) and body["count"] >= 1
+    assert body["page_url"] == "/incidents/recovery-path-assertion"
+    assert isinstance(body["releases"], list) and all(
+        isinstance(r, str) for r in body["releases"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_api_replay_index_shape(client: httpx.AsyncClient) -> None:
+    r = await client.get("/api/replay")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body["events"], list)
+    # At least the historical Apr 20 stress event is on file from the
+    # baseline curation.
+    ev = next(e for e in body["events"] if e["id"] == "2026-04-20")
+    assert "batches" in ev and len(ev["batches"]) == 3
+    assert ev["page_url"] == "/replay/2026-04-20"
+
+
+@pytest.mark.asyncio
+async def test_replay_index_page_renders(client: httpx.AsyncClient) -> None:
+    r = await client.get("/replay/")
+    assert r.status_code == 200
+    body = r.text
+    assert "Stress-event replay archive" in body
+    assert "/api/window_summary" in body
+
+
+@pytest.mark.asyncio
+async def test_replay_event_page_renders(client: httpx.AsyncClient) -> None:
+    r = await client.get("/replay/2026-04-20")
+    assert r.status_code == 200
+    body = r.text
+    assert "Foundation testnet stress test" in body
+    assert "epoch 532" in body
+
+
+@pytest.mark.asyncio
+async def test_replay_event_404_on_unknown_id(client: httpx.AsyncClient) -> None:
+    r = await client.get("/replay/2099-12-31")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_incidents_recovery_path_page_renders(client: httpx.AsyncClient) -> None:
+    r = await client.get("/incidents/recovery-path-assertion")
+    assert r.status_code == 200
+    assert "text/html" in r.headers["content-type"]
+    body = r.text
+    assert "runloop_monad.cpp" in body
+    assert "Recovery-path assertion stall class" in body
+    # Negative checks: no operator names / Foundation first names slip
+    # into the public copy.
+    for forbidden in ("ColinkaMalinka", "Vasily", "Poland", "Jackson", "Abraar"):
+        assert forbidden not in body, f"public page leaks {forbidden!r}"
+
+
+@pytest.mark.asyncio
 async def test_api_blocks_returns_list(client: httpx.AsyncClient) -> None:
     r = await client.get("/api/blocks")
     assert r.status_code == 200
