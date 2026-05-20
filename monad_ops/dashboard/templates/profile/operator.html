@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <script src="/static/theme.js?v={{ asset_version }}"></script>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>monad-ops · operator profile · {{ operator.handle }}</title>
+    <meta name="description" content="Operator-readiness profile — uptime, version compliance, reorg counts, validator-timeout %, base-fee response, and public artefacts for a Monad {{ operator.chain }} full node.">
+    <meta name="theme-color" content="#0f1115" media="(prefers-color-scheme: dark)">
+    <meta name="theme-color" content="#f4f6fa" media="(prefers-color-scheme: light)">
+    <link rel="canonical" href="https://ops.rustemar.dev/profile/{{ operator.handle }}">
+    <meta property="og:type" content="profile">
+    <meta property="og:url" content="https://ops.rustemar.dev/profile/{{ operator.handle }}">
+    <meta property="og:title" content="Operator profile · {{ operator.handle }} · monad-ops">
+    <meta property="og:description" content="Live readiness snapshot for a Monad {{ operator.chain }} full node operator.">
+    <meta property="og:image" content="https://ops.rustemar.dev/static/og.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Operator profile · {{ operator.handle }}">
+    <meta name="twitter:image" content="https://ops.rustemar.dev/static/og.png">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{ asset_version }}">
+    <link rel="manifest" href="/manifest.json">
+    <link rel="stylesheet" href="/static/app.css?v={{ asset_version }}">
+</head>
+<body>
+    <header class="top">
+        <div class="top-inner">
+            <div class="brand">
+                <a href="/" class="brand-link">
+                    <span class="logo">◆</span>
+                    <span class="name">monad-ops</span>
+                </a>
+                <span class="sep">·</span>
+                <span class="node">operator profile</span>
+            </div>
+            <div class="nav-links">
+                <a href="/">← dashboard</a>
+                <button class="theme-toggle" id="theme-toggle" title="toggle light/dark theme" aria-label="toggle theme">☀</button>
+            </div>
+        </div>
+    </header>
+
+    <main class="api-docs">
+        <h1>Operator profile · {{ operator.handle }}</h1>
+        <p class="hint-404">
+            Monad {{ operator.chain }} full node ·
+            {% if operator.region %}{{ operator.region }} · {% endif %}
+            {% if operator.since_date %}running since {{ operator.since_date }} ·{% endif %}
+            live snapshot, refresh for current numbers
+        </p>
+
+        <section class="card">
+            <h2>Reliability</h2>
+            <div class="profile-grid">
+                <div class="profile-cell">
+                    <div class="profile-label">process uptime</div>
+                    <div class="profile-val" id="prof-uptime">—</div>
+                    <div class="profile-sub" id="prof-uptime-sub">monad-ops service</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">monad version</div>
+                    <div class="profile-val" id="prof-version">—</div>
+                    <div class="profile-sub" id="prof-version-sub">vs apt repo</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">reorgs</div>
+                    <div class="profile-val" id="prof-reorgs">—</div>
+                    <div class="profile-sub" id="prof-reorgs-sub">lifetime · last 24h</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">validator-timeout %</div>
+                    <div class="profile-val" id="prof-vtp">—</div>
+                    <div class="profile-sub">over last 5 min · Foundation target &lt; 3 %</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Performance signals</h2>
+            <div class="profile-grid">
+                <div class="profile-cell">
+                    <div class="profile-label">retry rate</div>
+                    <div class="profile-val" id="prof-rtp">—</div>
+                    <div class="profile-sub">5 min avg · 1 min peak</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">blocks per sec</div>
+                    <div class="profile-val" id="prof-bps">—</div>
+                    <div class="profile-sub">1 min average</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">effective TPS peak</div>
+                    <div class="profile-val" id="prof-tps">—</div>
+                    <div class="profile-sub">1 min · intra-block ceiling</div>
+                </div>
+                <div class="profile-cell">
+                    <div class="profile-label">active validator set</div>
+                    <div class="profile-val" id="prof-valset">—</div>
+                    <div class="profile-sub" id="prof-valset-sub">current epoch</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="card">
+            <h2>Public artefacts</h2>
+            <ul class="api-notes">
+                <li><strong>Live dashboard</strong> — <a href="/">ops.rustemar.dev</a> · full per-block telemetry</li>
+                <li><strong>API reference</strong> — <a href="/api">/api</a> · curl-able JSON for every chart</li>
+                <li><strong>Incidents archive</strong> — <a href="/incidents/recovery-path-assertion">/incidents/recovery-path-assertion</a> · operator-curated stall classes</li>
+                <li><strong>Stress-event replays</strong> — <a href="/replay/">/replay/</a> · aggregate per Foundation stress window</li>
+                {% if operator.public_repo %}
+                <li><strong>Source repository</strong> — <a href="{{ operator.public_repo }}" target="_blank" rel="noopener noreferrer">{{ operator.public_repo }}</a></li>
+                {% endif %}
+            </ul>
+        </section>
+
+        <section class="card">
+            <h2>Scope</h2>
+            <ul class="api-notes">
+                <li><strong>Single-viewpoint.</strong> All counters are what this one full node observed. Pair with a reference RPC for chain-wide truth.</li>
+                <li><strong>Live snapshot.</strong> Values refresh on page load. For historical windows, use <code>/api/window_summary</code> or the replay archive.</li>
+                <li><strong>Operator-curated.</strong> This is one operator's transparency surface — not Foundation-endorsed and not a substitute for any official VDP status check.</li>
+            </ul>
+        </section>
+    </main>
+
+    <footer class="bot">
+        <a href="/" class="footlink">← dashboard</a>
+        <span class="sep">·</span>
+        <a href="/api" class="footlink">API</a>
+        <span class="sep">·</span>
+        <a href="/replay/" class="footlink">replays</a>
+        <span class="sep">·</span>
+        <a href="/incidents/recovery-path-assertion" class="footlink">incidents</a>
+    </footer>
+
+    <script src="/static/profile.js?v={{ asset_version }}" defer></script>
+</body>
+</html>

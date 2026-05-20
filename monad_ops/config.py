@@ -24,6 +24,28 @@ class NodeConfig(BaseModel):
     reference_poll_sec: int = 15
 
 
+class OperatorConfig(BaseModel):
+    """Public identity surface for the operator-readiness profile page.
+
+    Powers ``/profile/<handle>`` — a transparency surface aggregating
+    uptime, version compliance, reorg awareness, validator-timeout %,
+    base-fee response and links to the public artefact set. ``enabled=
+    false`` removes the route entirely; the rest of the dashboard is
+    unaffected.
+
+    All fields are optional with conservative defaults so a fresh
+    operator forking monad-ops can ship the dashboard without filling
+    them in — the profile page just won't render until they configure
+    an identity.
+    """
+    enabled: bool = True
+    handle: str = ""
+    region: str = ""
+    chain: str = "testnet"
+    since_date: str = ""
+    public_repo: str = ""
+
+
 class TelegramConfig(BaseModel):
     bot_token: str
     chat_id: int
@@ -252,6 +274,7 @@ class Config(BaseModel):
     retention: RetentionConfig = RetentionConfig()
     version_watch: VersionWatchConfig = VersionWatchConfig()
     validator_set: ValidatorSetConfig = ValidatorSetConfig()
+    operator: OperatorConfig = OperatorConfig()
 
 
 def load_config(path: Path | str | None = None) -> Config:

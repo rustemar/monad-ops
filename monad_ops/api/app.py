@@ -1551,6 +1551,20 @@ def build_app(
             },
         )
 
+    @app.api_route("/profile/{handle}", methods=["GET", "HEAD"])
+    async def profile_page(request: Request, handle: str):
+        op = config.operator
+        if not op.enabled or not op.handle or handle != op.handle:
+            raise StarletteHTTPException(status_code=404)
+        return templates.TemplateResponse(
+            request,
+            "profile/operator.html",
+            {
+                "asset_version": _ASSET_VERSION,
+                "operator": op,
+            },
+        )
+
     @app.api_route("/api", methods=["GET", "HEAD"])
     async def api_docs(request: Request):
         # base_url comes from the Host header — kept out of the template
