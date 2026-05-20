@@ -31,6 +31,24 @@ def _minimal_config() -> Config:
     return Config(node=NodeConfig(name="test-node", rpc_url="http://127.0.0.1:9999"))
 
 
+def _config_with_operator(handle: str = "rustemar") -> Config:
+    from monad_ops.config import OperatorConfig
+    cfg = _minimal_config()
+    cfg.operator = OperatorConfig(
+        enabled=True, handle=handle, region="EU", chain="testnet",
+        since_date="2026-04-14",
+        public_repo="https://github.com/rustemar/monad-ops",
+    )
+    return cfg
+
+
+@pytest.fixture()
+def client_with_operator(state_with_storage: State) -> httpx.AsyncClient:
+    app = build_app(state_with_storage, _config_with_operator(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://testserver")
+
+
 @pytest.fixture()
 def state_with_storage(tmp_path: Path) -> State:
     storage = Storage(tmp_path / "state.db")
@@ -215,6 +233,43 @@ async def test_incidents_recovery_path_page_renders(client: httpx.AsyncClient) -
     # into the public copy.
     for forbidden in ("ColinkaMalinka", "Vasily", "Poland", "Jackson", "Abraar"):
         assert forbidden not in body, f"public page leaks {forbidden!r}"
+
+
+@pytest.mark.asyncio
+async def test_profile_page_renders_for_configured_handle(
+    client_with_operator: httpx.AsyncClient,
+) -> None:
+    r = await client_with_operator.get("/profile/rustemar")
+    assert r.status_code == 200
+    body = r.text
+    assert "Operator profile" in body
+    assert "rustemar" in body
+    # Forbidden references — operator profile is public and shouldn't
+    # leak coordination-circle handles or Foundation first names.
+    for forbidden in ("ColinkaMalinka", "Vasily", "ShadowOfTime",
+                      "Mav3rick", "Sobolk", "Jackson", "Abraar"):
+        assert forbidden not in body, f"profile leaks {forbidden!r}"
+
+
+@pytest.mark.asyncio
+async def test_profile_page_404_on_unknown_handle(
+    client_with_operator: httpx.AsyncClient,
+) -> None:
+    r = await client_with_operator.get("/profile/someone-else")
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_profile_page_404_when_operator_disabled(
+    state_with_storage: State,
+) -> None:
+    # Default config has operator disabled (empty handle, enabled=true
+    # but handle="" → effectively disabled by the route guard).
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        r = await c.get("/profile/rustemar")
+        assert r.status_code == 404
 
 
 @pytest.mark.asyncio

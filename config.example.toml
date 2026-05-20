@@ -56,3 +56,15 @@ path = "labels.json"
 # enabled = true
 # poll_interval_sec = 300
 # timeout_sec = 10.0
+
+# [operator]
+# Public identity surface for /profile/<handle> — operator-readiness
+# profile page aggregating uptime, version compliance, reorg counts,
+# validator-timeout %, base-fee response and links to public artefacts.
+# Fill in the handle to render the page; leave empty to disable.
+# enabled = true
+# handle = ""
+# region = ""
+# chain = "testnet"
+# since_date = ""
+# public_repo = ""

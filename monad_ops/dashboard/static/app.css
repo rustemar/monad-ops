@@ -287,6 +287,30 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
 .version-row:hover, .version-row:focus { background: var(--surface-hover, rgba(255,255,255,0.03)); }
 a.version-row { text-decoration: none; color: var(--text-dim); }
 a.version-row:hover, a.version-row:focus { color: var(--text-dim); text-decoration: none; }
+
+.profile-grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    margin-top: 8px;
+}
+.profile-cell {
+    padding: 12px 14px;
+    border-radius: 8px;
+    background: var(--surface-hover, rgba(255,255,255,0.03));
+    display: flex; flex-direction: column; gap: 4px;
+}
+.profile-label {
+    font-family: var(--mono); font-size: 11.5px;
+    color: var(--text-faint); text-transform: lowercase;
+    letter-spacing: 0.02em;
+}
+.profile-val {
+    font-family: var(--mono); font-size: 22px; font-weight: 600;
+    color: var(--text); font-variant-numeric: tabular-nums;
+}
+.profile-sub {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-faint);
+}
 .version-line {
     color: var(--text); font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;
