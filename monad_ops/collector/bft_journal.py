@@ -17,6 +17,9 @@ Why a second tailer instead of folding bft into the existing one:
 
 A cheap substring pre-filter in the parser drops ~99.95% of bft lines
 before any regex work happens — see ``parser/consensus.py``.
+
+Self-healing follow (idle-respawn on a stalled ``journalctl -f``) lives
+in ``tail_raw_lines`` — see ``collector/journal.py``.
 """
 
 from __future__ import annotations
@@ -24,14 +27,30 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from monad_ops.collector.journal import TailError
+from monad_ops.collector.journal import (
+    DEFAULT_IDLE_TIMEOUT_SEC,
+    DEFAULT_MAX_RESPAWNS,
+    DEFAULT_RESPAWN_WINDOW_SEC,
+    TailError,
+    tail_raw_lines,
+)
 from monad_ops.parser import ConsensusEvent, parse_consensus
+
+# bft proposal lines run several KB because of the BLS signer bitvec,
+# comfortably under 1 MB but well over the asyncio 64 KB default that an
+# earlier epoch_probe iteration tripped silently.
+_BFT_READ_LIMIT = 1_000_000
 
 
 async def tail_consensus_events(
     unit: str = "monad-bft",
     lookback: str | None = None,
     follow: bool = True,
+    *,
+    idle_timeout_sec: float = DEFAULT_IDLE_TIMEOUT_SEC,
+    max_respawns: int = DEFAULT_MAX_RESPAWNS,
+    respawn_window_sec: float = DEFAULT_RESPAWN_WINDOW_SEC,
+    spawn=asyncio.create_subprocess_exec,
 ) -> AsyncIterator[ConsensusEvent | TailError]:
     """Yield consensus events from the bft journal: round advances + local timeouts.
 
@@ -44,49 +63,19 @@ async def tail_consensus_events(
       * ``follow=False, lookback="5 min ago"`` — emit history then stop
         (used by replay/backfill, not the live service).
     """
-    cmd = ["journalctl", "-u", unit, "-o", "cat", "--no-pager"]
-    if follow:
-        cmd.append("-f")
-    if lookback is None:
-        if follow:
-            cmd += ["--lines=0"]
-    else:
-        cmd += ["--since", lookback]
-
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        # 1 MB StreamReader buffer — bft proposal lines run several KB
-        # because of the BLS signer bitvec, comfortably under 1 MB but
-        # well over the asyncio 64 KB default that an earlier
-        # epoch_probe iteration tripped silently.
-        limit=1_000_000,
-    )
-
-    try:
-        assert proc.stdout is not None
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                code = await proc.wait()
-                stderr = (
-                    (await proc.stderr.read()).decode(errors="replace")
-                    if proc.stderr else ""
-                )
-                yield TailError(
-                    message=f"journalctl exited rc={code}: {stderr.strip()[:500]}",
-                    graceful=code < 0,
-                )
-                return
-            line = raw.decode("utf-8", errors="replace").rstrip("\n")
-            event = parse_consensus(line)
-            if event is not None:
-                yield event
-    finally:
-        if proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except asyncio.TimeoutError:
-                proc.kill()
+    async for line in tail_raw_lines(
+        unit,
+        follow=follow,
+        lookback=lookback,
+        idle_timeout_sec=idle_timeout_sec,
+        max_respawns=max_respawns,
+        respawn_window_sec=respawn_window_sec,
+        read_limit=_BFT_READ_LIMIT,
+        spawn=spawn,
+    ):
+        if isinstance(line, TailError):
+            yield line
+            return
+        event = parse_consensus(line)
+        if event is not None:
+            yield event

@@ -185,7 +185,11 @@ async def _collector_loop(
     tick_handle = asyncio.create_task(tick_task())
 
     try:
-        async for item in tail_execution_blocks():
+        async for item in tail_execution_blocks(
+            idle_timeout_sec=config.tailer.idle_timeout_sec,
+            max_respawns=config.tailer.max_respawns,
+            respawn_window_sec=config.tailer.respawn_window_sec,
+        ):
             if isinstance(item, TailError):
                 if item.graceful:
                     # Signal-initiated shutdown (our own restart / systemd
@@ -505,7 +509,11 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         async-iterator yield); persistence batches into bft_flush_loop
         below to avoid contending on Storage._lock at event rate.
         """
-        async for item in tail_consensus_events():
+        async for item in tail_consensus_events(
+            idle_timeout_sec=config.tailer.idle_timeout_sec,
+            max_respawns=config.tailer.max_respawns,
+            respawn_window_sec=config.tailer.respawn_window_sec,
+        ):
             if isinstance(item, TailError):
                 if item.graceful:
                     log.info("consensus_tailer.graceful_exit", detail=item.message)
