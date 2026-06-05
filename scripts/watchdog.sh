@@ -5,7 +5,11 @@
 # the thing that died. Invoked by a systemd timer every 5s:
 #   1. HTTP-check the local dashboard (127.0.0.1:8873) with a short
 #      timeout. Any non-200 or timeout = problem.
-#   2. Read current memory usage and a few systemd state properties.
+#   2. Ingestion-freshness: a 200 with a stale last block is still a
+#      failure. If the dashboard hasn't ingested a block in a while AND
+#      the node RPC is well ahead, ingestion is wedged (the 2026-06-05
+#      broken-follow class) — invisible to a plain HTTP probe.
+#   3. Read current memory usage and a few systemd state properties.
 #   3. Alerting is edge-triggered with reminder cadence:
 #        - healthy → degraded : send UNHEALTHY alert (once)
 #        - degraded → healthy : send RECOVERED alert (once)
@@ -24,6 +28,16 @@ STATE_FILE="${RUNTIME_DIRECTORY:-/run/monad-ops-watchdog}/state"
 HEALTH_URL="http://127.0.0.1:8873/api/state"
 HEALTH_TIMEOUT_SEC=5
 SERVICE="monad-ops.service"
+# Node RPC, used to tell "ingestion wedged" (node ahead, dashboard
+# frozen) apart from a genuine chain halt (which the in-process stall
+# rule already owns — we stay quiet there to avoid a double alert).
+NODE_RPC_URL="${NODE_RPC_URL:-http://127.0.0.1:8080}"
+# Consider ingestion stale after no fresh block for this long. The chain
+# produces ~2.5 blk/s, so 3 min of silence is far outside normal.
+STALE_BLOCK_SEC=180
+# Minimum node-ahead-of-dashboard gap to call it a wedge rather than
+# ordinary tailer lag. ~2.5 blk/s x 180s ≈ 450 blocks.
+INGEST_LAG_BLOCKS=400
 # While degraded, send a reminder every N seconds so a slow fire
 # doesn't disappear from the chat backlog. 300s = 5 min — often
 # enough to stay visible, rare enough to not spam.
@@ -50,8 +64,12 @@ sub_state=$(systemctl show -p SubState --value "$SERVICE" 2>/dev/null || echo "u
 mem_current=$(systemctl show -p MemoryCurrent --value "$SERVICE" 2>/dev/null || echo "0")
 mem_max=$(systemctl show -p MemoryMax --value "$SERVICE" 2>/dev/null || echo "0")
 
-# HTTP probe.
-http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time "$HEALTH_TIMEOUT_SEC" "$HEALTH_URL" 2>/dev/null || echo "000")
+# HTTP probe — capture body + status code in one request so we can also
+# inspect ingestion freshness, not just reachability. Body is single-line
+# JSON, so we append the code on its own trailing line and split.
+http_resp=$(curl -s --max-time "$HEALTH_TIMEOUT_SEC" -w $'\n%{http_code}' "$HEALTH_URL" 2>/dev/null || printf '\n000')
+http_code="${http_resp##*$'\n'}"
+http_body="${http_resp%$'\n'*}"
 
 # Decide status.
 degraded_reason=""
@@ -59,6 +77,37 @@ if [[ "$active_state" != "active" ]]; then
     degraded_reason="service not active: ActiveState=$active_state SubState=$sub_state"
 elif [[ "$http_code" != "200" ]]; then
     degraded_reason="http $HEALTH_URL returned $http_code (timeout or error)"
+fi
+
+# Ingestion freshness — only when the endpoint answered cleanly. A 200
+# with a 30h-old last block is the failure mode that ran silent on
+# 2026-06-05; the plain probe above can't see it.
+if [[ -z "$degraded_reason" && "$http_code" == "200" ]]; then
+    ops_last_block=$(grep -oE '"last_block":[0-9]+' <<< "$http_body" | grep -oE '[0-9]+' | head -1)
+    ops_seen_ms=$(grep -oE '"last_block_seen_ms":[0-9]+' <<< "$http_body" | grep -oE '[0-9]+' | head -1)
+    if [[ "$ops_seen_ms" =~ ^[0-9]+$ ]]; then
+        now_ms=$(date +%s%3N)
+        age_ms=$(( now_ms - ops_seen_ms ))
+        if (( age_ms > STALE_BLOCK_SEC * 1000 )); then
+            age_s=$(( age_ms / 1000 ))
+            # Is the node still producing? Compare to its RPC tip.
+            node_hex=$(curl -s --max-time 4 -X POST \
+                -H 'content-type: application/json' \
+                --data '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
+                "$NODE_RPC_URL" 2>/dev/null | grep -oiE '0x[0-9a-f]+' | head -1)
+            if [[ "$node_hex" =~ ^0[xX][0-9a-fA-F]+$ ]]; then
+                node_block=$(( node_hex ))
+                lag=$(( node_block - ${ops_last_block:-0} ))
+                if (( lag > INGEST_LAG_BLOCKS )); then
+                    degraded_reason="ingestion wedged: node tip $node_block, dashboard ${ops_last_block:-?} (Δ${lag} blocks, no fresh block ${age_s}s) — tailer follow likely broken"
+                fi
+                # node≈dashboard ⇒ chain itself quiet/halted; the
+                # in-process stall rule owns that. Stay quiet here.
+            else
+                degraded_reason="ingestion stale ${age_s}s and node RPC unreachable at $NODE_RPC_URL"
+            fi
+        fi
+    fi
 fi
 
 # MemoryMax pressure warning (80% threshold) — useful as a leading

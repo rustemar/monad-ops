@@ -151,6 +151,24 @@ class ReorgRuleConfig(BaseModel):
     recent_window_sec: int = 24 * 3600
 
 
+class TailerConfig(BaseModel):
+    """journalctl-follow self-heal.
+
+    A live ``journalctl -f`` can silently stop delivering lines after a
+    journald rotation: readline() then blocks forever — no EOF, no error
+    — while the node keeps producing. That is the failure that froze
+    ingestion for 30h on 2026-06-05 under a monad-bft log flood. The
+    tailer bounds each read by ``idle_timeout_sec`` and respawns the
+    child on silence; repeated respawns inside the window escalate to a
+    CRITICAL alert instead of spinning quietly.
+    """
+    # Both monad units log every sub-second, so this much total silence
+    # is an unambiguous broken-follow signal, not a quiet node.
+    idle_timeout_sec: float = 30.0
+    max_respawns: int = 10
+    respawn_window_sec: float = 300.0
+
+
 class DedupConfig(BaseModel):
     cooldown_sec: int = 300
 
@@ -268,6 +286,7 @@ class Config(BaseModel):
     node: NodeConfig
     alerts: AlertsConfig = AlertsConfig()
     rules: RulesConfig = RulesConfig()
+    tailer: TailerConfig = TailerConfig()
     persistence: PersistenceConfig = PersistenceConfig()
     enrichment: EnrichmentConfig = EnrichmentConfig()
     labels: LabelsConfig = LabelsConfig()
