@@ -88,8 +88,12 @@ def parse_exec_block(line: str) -> ExecBlock | None:
     for key, value in _FIELD_RE.findall(payload):
         fields[key] = value
 
+    # ac (account LRU) and sc (storage LRU) are optional: monad 0.14.5
+    # dropped both from the __exec_block line. Reject a block only for a
+    # missing core field — defaulting the caches to 0 keeps ingestion
+    # alive (and resumes automatically if the fields ever return).
     required = {"bl", "id", "ts", "tx", "rt", "rtp", "sr", "txe", "cmt", "tot",
-                "tpse", "tps", "gas", "gpse", "gps", "ac", "sc"}
+                "tpse", "tps", "gas", "gpse", "gps"}
     if not required.issubset(fields):
         return None
 
@@ -109,8 +113,8 @@ def parse_exec_block(line: str) -> ExecBlock | None:
         gas_used=int(fields["gas"]),
         gas_per_sec_effective=int(fields["gpse"]),
         gas_per_sec_avg=int(fields["gps"]),
-        active_chunks=int(fields["ac"]),
-        storage_cache_size=int(fields["sc"]),
+        active_chunks=int(fields["ac"]) if "ac" in fields else 0,
+        storage_cache_size=int(fields["sc"]) if "sc" in fields else 0,
     )
 
 
