@@ -57,7 +57,6 @@ let baseFeeChart = null;
 let txChart = null;
 let execChart = null;
 let strainChart = null;
-let storageCacheSizeChart = null;
 
 // Formatter for large integer TPS / gas values. Compact 48_780 → "48.8K".
 function fmtCompact(n) {
@@ -1482,7 +1481,6 @@ function _applyChartPayload(d) {
     drawTx(bins);
     drawExec(bins);
     drawStrain(bins);
-    drawStorageCacheSize(bins);
     // Sparklines (G5) — last N bins for inline KPI trends.
     const tail = bins.slice(-60);
     _renderSparkline("spark-rtp", tail.map(b => b.rtp_avg ?? 0));
@@ -2271,62 +2269,6 @@ function drawStrain(bins) {
         ].join("\n");
     };
     _attachBinMeta(strainChart, bins);
-}
-
-// Storage-slot LRU cache occupancy. Source: __exec_block `sc=` field
-// → db.print_stats() → cache_->storage_stats() → LruCache::print_stats()
-// → size_.load(). Grows linearly with state-touching activity; resets
-// on monad-execution restart (process-local RAM cache). Observability
-// only — no alert rule.
-function drawStorageCacheSize(bins) {
-    const labels = _labelsFromBins(bins);
-    const data = bins.map(b => b.storage_cache_size_max ?? null);
-    if (storageCacheSizeChart) {
-        storageCacheSizeChart.data.labels = labels;
-        storageCacheSizeChart.data.datasets[0].data = data;
-        _attachBinMeta(storageCacheSizeChart, bins);
-        storageCacheSizeChart.update("none");
-        return;
-    }
-    storageCacheSizeChart = new Chart(document.getElementById("chart-storage-cache-size"), {
-        type: "line",
-        data: {
-            labels,
-            datasets: [{
-                data,
-                borderColor: "rgba(91,156,245,0.85)",
-                backgroundColor: "rgba(91,156,245,0.10)",
-                fill: true,
-                borderWidth: 1.5,
-                tension: 0.15,
-                pointRadius: 0,
-            }],
-        },
-        plugins: [crosshairPlugin],
-        options: {
-            ...chartCommon,
-            layout: { padding: { top: 8 } },
-            scales: {
-                ...chartCommon.scales,
-                y: {
-                    ...chartCommon.scales.y,
-                    suggestedMin: 0,
-                    ticks: {
-                        ...chartCommon.scales.y.ticks,
-                        callback: v => v >= 1e6 ? `${(v/1e6).toFixed(1)}M`
-                                       : v >= 1e3 ? `${(v/1e3).toFixed(0)}K` : String(v),
-                    },
-                },
-            },
-        },
-    });
-    storageCacheSizeChart._tooltipValueFormatter = (val) => {
-        if (val == null) return "—";
-        return val >= 1e6 ? `${(val/1e6).toFixed(2)}M entries`
-             : val >= 1e3 ? `${(val/1e3).toFixed(1)}K entries`
-             : `${fmtInt(val)} entries`;
-    };
-    _attachBinMeta(storageCacheSizeChart, bins);
 }
 
 function shortAddr(a) {
