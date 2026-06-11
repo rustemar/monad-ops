@@ -91,7 +91,7 @@ def _format_journal_ts(epoch_sec: float) -> str:
 def _run_journalctl(since_iso: str, until_iso: str, unit: str = "monad-bft") -> bytes:
     """Run ``journalctl -o cat`` over a closed window, return raw bytes.
 
-    ``-o cat`` strips the ``shadow-anafra monad-node[PID]:`` prefix so
+    ``-o cat`` strips the ``<hostname> monad-node[PID]:`` prefix so
     the captured artifact carries only the JSON message body — no
     hostname, no PID. Fails closed: on non-zero exit we return whatever
     stdout was emitted plus the stderr appended as a comment line, so
