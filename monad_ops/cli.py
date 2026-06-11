@@ -34,7 +34,7 @@ from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
-from monad_ops.parser import AssertionEvent, ConsensusEvent, ExecBlock
+from monad_ops.parser import AssertionEvent, ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.reorg_capture import (
     CaptureRequest,
     capture_reorg_journal,
@@ -55,7 +55,9 @@ from monad_ops.rules import (
     Severity,
     StallRule,
     VersionRule,
+    WaltraceFloodRule,
 )
+from monad_ops.waltrace_capture import capture_waltrace_evidence, waltrace_dir_for
 from monad_ops.state import State
 from monad_ops.storage import Storage
 
@@ -470,6 +472,36 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     )
     process_restart_rule = ProcessRestartRule()
 
+    waltrace_rule = WaltraceFloodRule(
+        window_sec=config.rules.waltrace_flood.window_sec,
+        warn_count=config.rules.waltrace_flood.warn_count,
+        critical_after_sec=config.rules.waltrace_flood.critical_after_sec,
+    )
+    waltrace_capture_dir = (
+        waltrace_dir_for(config.persistence.path)
+        if config.persistence.enabled and config.rules.waltrace_flood.capture
+        else None
+    )
+
+    async def _deliver_waltrace(ev: AlertEvent) -> None:
+        """Deliver a waltrace alert; on arm, snapshot the evidence first
+        as a fire-and-forget task. The arm event is CLEAR→WARN only, so
+        this naturally captures once per envelope. Capture immediacy
+        matters: the 0-byte chunk that pins the death time is deleted
+        by the hourly monad-cruft cleanup once it ages past 5 h."""
+        if ev.severity is Severity.WARN and waltrace_capture_dir is not None:
+            first_ts = waltrace_rule.first_error_ts
+            if first_ts is not None:
+                asyncio.create_task(
+                    capture_waltrace_evidence(
+                        first_ts,
+                        waltrace_capture_dir,
+                        wal_dir=config.rules.waltrace_flood.wal_dir,
+                    ),
+                    name=f"waltrace_capture:{int(first_ts)}",
+                )
+        await sink.deliver(ev)
+
     async def process_restart_loop():
         """Periodic poll of systemd InvocationID for tracked services.
 
@@ -528,20 +560,33 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                     ))
                 return
             assert isinstance(item, ConsensusEvent)
+            # Waltrace spam bypasses the per-minute state tally: during
+            # a flood it arrives at ~250/sec and would only churn the
+            # state lock without contributing to any rollup counter.
+            if item.kind is ConsensusEventKind.WALTRACE_STOPPED:
+                wt_ev = waltrace_rule.on_event(item)
+                if wt_ev is not None:
+                    await _deliver_waltrace(wt_ev)
+                continue
             await state.add_consensus_event_async(item)
             ev = nls.on_event(item)
             if ev is not None:
                 await sink.deliver(ev)
 
     async def network_signal_tick_loop():
-        """Periodic re-evaluation of NetworkLayerSignalRule so an
-        isolated burst de-arms naturally as events fall out of the
-        rolling window — without waiting for a fresh event."""
+        """Periodic re-evaluation of the window-based bft rules so they
+        de-arm naturally as events fall out of the rolling window —
+        without waiting for a fresh event. For the waltrace rule the
+        tick also drives the WARN→CRITICAL escalation clock (after a
+        restart no fresh lines arrive at all)."""
         while True:
             await asyncio.sleep(5)
             ev = nls.on_tick()
             if ev is not None:
                 await sink.deliver(ev)
+            wt_ev = waltrace_rule.on_tick()
+            if wt_ev is not None:
+                await _deliver_waltrace(wt_ev)
 
     async def bft_flush_loop():
         """Drain bft pending writes to storage on a 1-second cadence.

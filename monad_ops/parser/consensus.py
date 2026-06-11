@@ -56,6 +56,11 @@ class ConsensusEventKind(StrEnum):
     NETWORK_DECRYPT_FAIL = "network_decrypt_fail"
     NETWORK_SESSION_TIMEOUT = "network_session_timeout"
     NETWORK_TIMESTAMP_INVALID = "network_timestamp_invalid"
+    # The v0.14.5 WAL persist thread died (observed 2026-06-11: dies at
+    # a 1 GiB chunk rotation, then monad-bft emits this ERROR ~250/sec
+    # until restart). Strictly zero at baseline; consumed by
+    # ``WaltraceFloodRule``.
+    WALTRACE_STOPPED = "waltrace_stopped"
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,6 +106,10 @@ _BASE_FEE_MARKER = "base_fee:"
 _NETWORK_DECRYPT_FAIL_MARKER = '"message":"failed to decrypt message"'
 _NETWORK_SESSION_TIMEOUT_MARKER = '"message":"session timeout expired"'
 _NETWORK_TIMESTAMP_INVALID_MARKER = '"message":"Timestamp validation failed"'
+# v0.14.5 WAL-thread death spam. Exact line shape (2026-06-11):
+# {"timestamp":"...","level":"ERROR","fields":{"message":"waltrace
+# thread stopped"},"target":"monad_node"}
+_WALTRACE_STOPPED_MARKER = '"message":"waltrace thread stopped"'
 
 # Peer address in decrypt-fail line: `"addr":"185.189.46.28:8001"`. We
 # carry the peer through on this class so NetworkLayerSignalRule can
@@ -155,6 +164,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     has_decrypt_fail = _NETWORK_DECRYPT_FAIL_MARKER in line
     has_session_timeout = _NETWORK_SESSION_TIMEOUT_MARKER in line
     has_timestamp_invalid = _NETWORK_TIMESTAMP_INVALID_MARKER in line
+    has_waltrace_stopped = _WALTRACE_STOPPED_MARKER in line
     if not (
         has_local_timeout
         or has_advancing_round
@@ -162,10 +172,19 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
         or has_decrypt_fail
         or has_session_timeout
         or has_timestamp_invalid
+        or has_waltrace_stopped
     ):
         return None
 
     ts_ms = _extract_ts_ms(line)
+
+    # Waltrace spam first: during a flood this is by far the hottest
+    # branch (~250 lines/sec), so it must exit before any further regex.
+    if has_waltrace_stopped:
+        return ConsensusEvent(
+            kind=ConsensusEventKind.WALTRACE_STOPPED,
+            round=0, epoch=None, ts_ms=ts_ms,
+        )
 
     # Network-layer events first — cheapest path, no further regex.
     # Round/epoch are not on these lines; ts_ms is enough for the

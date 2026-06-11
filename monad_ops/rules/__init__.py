@@ -8,6 +8,7 @@ from monad_ops.rules.reorg import ReorgRule
 from monad_ops.rules.retry_spike import RetrySpikeRule
 from monad_ops.rules.stall import StallRule
 from monad_ops.rules.version import VersionRule
+from monad_ops.rules.waltrace import WaltraceFloodRule
 
 __all__ = [
     "AlertEvent",
@@ -22,5 +23,6 @@ __all__ = [
     "Severity",
     "StallRule",
     "VersionRule",
+    "WaltraceFloodRule",
     "code_color_for",
 ]
