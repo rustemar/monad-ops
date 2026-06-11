@@ -242,3 +242,30 @@ def test_full_fixture_yields_expected_distribution() -> None:
     assert qc == 72
     assert tc == 1
     assert lt == 1
+
+
+def test_parses_waltrace_stopped() -> None:
+    """v0.14.5 WAL-thread death spam surfaces as WALTRACE_STOPPED with
+    ts_ms populated. Line captured live 2026-06-11 on this node."""
+    line = (
+        '{"timestamp":"2026-06-11T09:34:00.003336Z","level":"ERROR",'
+        '"fields":{"message":"waltrace thread stopped"},'
+        '"target":"monad_node"}'
+    )
+    ev = parse_consensus(line)
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.WALTRACE_STOPPED
+    assert ev.ts_ms > 0
+    assert ev.epoch is None
+
+
+def test_waltrace_phrase_inside_other_field_is_ignored() -> None:
+    """The marker anchors on "message":"..." so the phrase embedded in
+    an arbitrary detail string does not classify."""
+    line = (
+        '{"timestamp":"2026-06-11T09:34:00.003336Z","level":"INFO",'
+        '"fields":{"message":"something else",'
+        '"detail":"recovered after waltrace thread stopped earlier"},'
+        '"target":"monad_node"}'
+    )
+    assert parse_consensus(line) is None

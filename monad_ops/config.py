@@ -173,6 +173,23 @@ class DedupConfig(BaseModel):
     cooldown_sec: int = 300
 
 
+class WaltraceFloodRuleConfig(BaseModel):
+    """v0.14.5 ``waltrace thread stopped`` flood detector.
+
+    Baseline is strictly zero; the flood runs ~250 lines/sec, so the
+    thresholds need no calibration headroom. CRITICAL fires if the
+    operator hasn't restarted within ``critical_after_sec``. The
+    evidence capture snapshots the wal dir + journal pre-context the
+    moment the rule arms, because the hourly monad-cruft cleanup
+    deletes the proof (the 0-byte chunk) after 5 h.
+    """
+    window_sec: int = 60
+    warn_count: int = 10
+    critical_after_sec: int = 900  # 15 min un-restarted -> RED
+    capture: bool = True
+    wal_dir: str = "/home/monad/monad-bft/wal"
+
+
 class RulesConfig(BaseModel):
     stall: StallRuleConfig = StallRuleConfig()
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
@@ -181,6 +198,7 @@ class RulesConfig(BaseModel):
     block_processing_slowdown: BlockProcessingSlowdownRuleConfig = BlockProcessingSlowdownRuleConfig()
     network_layer_signal: NetworkLayerSignalRuleConfig = NetworkLayerSignalRuleConfig()
     process_restart: ProcessRestartRuleConfig = ProcessRestartRuleConfig()
+    waltrace_flood: WaltraceFloodRuleConfig = WaltraceFloodRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

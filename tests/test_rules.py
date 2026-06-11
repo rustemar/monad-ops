@@ -10,6 +10,7 @@ from monad_ops.rules import (
     RetrySpikeRule,
     Severity,
     StallRule,
+    WaltraceFloodRule,
     code_color_for,
 )
 
@@ -1294,3 +1295,113 @@ class TestCodeColor:
         assert CodeColor.RED.value == "red"
         assert CodeColor.ORANGE.value == "orange"
         assert CodeColor.GREEN.value == "green"
+
+
+class TestWaltraceFloodRule:
+    """v0.14.5 WAL-thread death detector. Baseline is strictly zero;
+    a flood runs ~250 lines/sec, so arming is effectively instant.
+    CRITICAL is time-driven (operator hasn't restarted), RECOVERED
+    fires once the window drains post-restart."""
+
+    def _ev(self, ts_sec: float) -> ConsensusEvent:
+        return ConsensusEvent(
+            kind=ConsensusEventKind.WALTRACE_STOPPED,
+            round=0, epoch=None, ts_ms=int(ts_sec * 1000),
+        )
+
+    def test_below_threshold_stays_clear(self):
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        for i in range(9):
+            assert rule.on_event(self._ev(100.0 + i), now_sec=100.0 + i) is None
+
+    def test_flood_arms_warn_once(self):
+        """First 10 lines arm WARN; the next thousands stay silent."""
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        events = []
+        for i in range(50):
+            ev = rule.on_event(self._ev(100.0 + i * 0.004), now_sec=100.0 + i * 0.004)
+            if ev is not None:
+                events.append(ev)
+        assert len(events) == 1
+        assert events[0].severity == Severity.WARN
+        assert events[0].rule == "waltrace_flood"
+        assert "v0.14.5" in events[0].detail
+        assert "systemctl restart monad-bft" in events[0].detail
+        assert rule.first_error_ts == 100.0
+
+    def test_non_waltrace_event_is_ignored(self):
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        ev = ConsensusEvent(
+            kind=ConsensusEventKind.LOCAL_TIMEOUT, round=5, epoch=None, ts_ms=100_000,
+        )
+        assert rule.on_event(ev, now_sec=100.0) is None
+        assert rule.first_error_ts is None
+
+    def test_escalates_to_critical_when_not_restarted(self):
+        """Flood still running critical_after_sec past arming -> exactly
+        one CRITICAL, whichever evaluation path crosses the clock first."""
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        for i in range(10):
+            rule.on_event(self._ev(100.0 + i * 0.004), now_sec=100.0 + i * 0.004)
+        # Keep the window non-empty as the flood continues.
+        t = 100.0
+        events = []
+        while t < 1100.0:
+            t += 5.0
+            for ev in (rule.on_event(self._ev(t), now_sec=t), rule.on_tick(now_sec=t)):
+                if ev is not None:
+                    events.append(ev)
+        assert [e.severity for e in events] == [Severity.CRITICAL]
+        assert "off the whole time" in events[0].detail
+
+    def test_escalates_via_tick_alone(self):
+        """Escalation must not depend on fresh events: if lines somehow
+        stop arriving but the window still holds some, the tick clock
+        alone escalates. (Real floods never pause, but the tick path is
+        what guarantees the clock.)"""
+        rule = WaltraceFloodRule(window_sec=2000, warn_count=10, critical_after_sec=900)
+        for i in range(10):
+            rule.on_event(self._ev(100.0 + i), now_sec=100.0 + i)
+        assert rule.on_tick(now_sec=1000.0) is None
+        ev = rule.on_tick(now_sec=1010.0)
+        assert ev is not None and ev.severity == Severity.CRITICAL
+
+    def test_recovered_after_restart_drains_window(self):
+        """Post-restart no fresh lines arrive; ticks drain the window
+        and emit exactly one RECOVERED, resetting the envelope."""
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        for i in range(10):
+            rule.on_event(self._ev(100.0 + i), now_sec=100.0 + i)
+        # 60s after the last line the window empties.
+        assert rule.on_tick(now_sec=150.0) is None
+        ev = rule.on_tick(now_sec=170.0)
+        assert ev is not None and ev.severity == Severity.RECOVERED
+        assert rule.first_error_ts is None
+        # Further ticks are silent.
+        assert rule.on_tick(now_sec=180.0) is None
+
+    def test_second_envelope_rearms_and_recaptures_first_ts(self):
+        """The bug recurs ~16-25h after a restart; a fresh flood after
+        RECOVERED must arm again with a fresh first-error timestamp."""
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        for i in range(10):
+            rule.on_event(self._ev(100.0 + i), now_sec=100.0 + i)
+        rule.on_tick(now_sec=170.0)  # RECOVERED
+        events = []
+        for i in range(10):
+            ev = rule.on_event(self._ev(90000.0 + i), now_sec=90000.0 + i)
+            if ev is not None:
+                events.append(ev)
+        assert [e.severity for e in events] == [Severity.WARN]
+        assert rule.first_error_ts == 90000.0
+
+    def test_critical_clock_starts_at_arm_not_first_line(self):
+        """A slow trickle that arms late must not instantly escalate:
+        the escalation clock runs from arming, not the first line."""
+        rule = WaltraceFloodRule(window_sec=60, warn_count=10, critical_after_sec=900)
+        # 10 lines spread over 50s -> arms at t=150.
+        for i in range(10):
+            rule.on_event(self._ev(100.0 + i * 5.55), now_sec=100.0 + i * 5.55)
+        # 899s after arming: still WARN.
+        rule.on_event(self._ev(1040.0), now_sec=1040.0)
+        assert rule.on_tick(now_sec=1049.0) is None
