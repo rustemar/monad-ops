@@ -1163,6 +1163,112 @@ class TestNetworkLayerSignalRule:
         assert ev is not None
         assert ev.severity == Severity.RECOVERED
 
+    def test_explicit_disarm_levels_override_factor(self):
+        """Deployed config sets explicit disarm levels (~0.5 × arm)
+        instead of the legacy 0.8 factor. Armed at warn=25, the rule
+        must stay armed all the way down to 12 and only disarm below."""
+        rule = NetworkLayerSignalRule(
+            window_sec=300, warn_count=25, critical_count=50,
+            warn_disarm_count=12, critical_disarm_count=25,
+        )
+        for i in range(25):
+            rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+        assert rule._state == Severity.WARN
+
+        # Age out events until 13 remain — above disarm=12, below the
+        # legacy 0.8 disarm (20). Must hold WARN silently.
+        ev = rule.on_tick(now_sec=411.5)  # cutoff 111.5 → 13 left
+        assert ev is None
+        assert rule._state == Severity.WARN
+
+        # 11 remain — below disarm. Immediate RECOVERED (confirm=0).
+        ev = rule.on_tick(now_sec=413.5)  # cutoff 113.5 → 11 left
+        assert ev is not None
+        assert ev.severity == Severity.RECOVERED
+        assert rule._state is None
+
+    def test_recovery_confirmation_coalesces_dip_and_rebound(self):
+        """With recovery_confirm_sec set, a dip below disarm followed by
+        a rebound must NOT produce RECOVERED + re-WARN — the envelope
+        stays open. RECOVERED fires only after a full quiet window."""
+        rule = NetworkLayerSignalRule(
+            window_sec=300, warn_count=5, critical_count=15,
+            recovery_confirm_sec=600.0,
+        )
+        for i in range(5):
+            rule.on_event(self._decrypt(100.0 + i), now_sec=100.0 + i)
+        assert rule._state == Severity.WARN
+
+        # All events age out — dip starts, but no RECOVERED yet.
+        ev = rule.on_tick(now_sec=500.0)
+        assert ev is None
+        assert rule._state == Severity.WARN
+
+        # Rebound within the confirm window: 5 fresh events. The rule
+        # re-arms internally with NO new Telegram message (state never
+        # left WARN).
+        events = []
+        for i in range(5):
+            e = rule.on_event(self._decrypt(600.0 + i), now_sec=600.0 + i)
+            if e is not None:
+                events.append(e)
+        assert events == []
+        assert rule._state == Severity.WARN
+
+        # Second dip; quiet from t=1000. Still silent mid-confirm.
+        ev = rule.on_tick(now_sec=1000.0)
+        assert ev is None
+        ev = rule.on_tick(now_sec=1500.0)
+        assert ev is None
+        # Confirm window (600s) elapsed → exactly one RECOVERED.
+        ev = rule.on_tick(now_sec=1601.0)
+        assert ev is not None
+        assert ev.severity == Severity.RECOVERED
+        assert "quiet" in ev.detail
+        assert rule._state is None
+
+    def test_gate_fail_at_volume_holds_armed_no_recovered(self):
+        """A diversity-gate failure while the count is still at/above
+        disarm must HOLD the armed state, not emit RECOVERED. Observed
+        2026-06-02: single-peer storm faded in/out of the gate and
+        produced greens at counts 75–108."""
+        rule = NetworkLayerSignalRule(
+            window_sec=300, warn_count=5, critical_count=15,
+            warn_min_unique_peers=2, critical_min_unique_peers=3,
+        )
+        # Arm CRITICAL with 3 diverse peers.
+        peers = ["10.0.0.1:8001", "10.0.0.2:8001", "10.0.0.3:8001"]
+        for i in range(16):
+            rule.on_event(
+                self._decrypt(100.0 + i, peer=peers[i % 3]), now_sec=100.0 + i
+            )
+        assert rule._state == Severity.CRITICAL
+
+        # A continuous single-peer flood overlaps the diverse burst and
+        # outlives it: once the diverse events age out (t>415), the
+        # window holds dozens of events from ONE peer — the gate drops
+        # the target to None while volume stays far above disarm.
+        events = []
+        for t in range(120, 460, 5):
+            e = rule.on_event(
+                self._decrypt(float(t), peer="23.83.186.216:8001"),
+                now_sec=float(t),
+            )
+            if e is not None:
+                events.append(e)
+        # Exactly one message is allowed through: the by-design
+        # "held below CRITICAL" WARN as diversity collapses. Crucially:
+        # zero RECOVERED while volume is above disarm.
+        assert [e.severity for e in events] == [Severity.WARN]
+        assert "Held below CRITICAL" in events[0].detail
+        assert rule._state in (Severity.WARN, Severity.CRITICAL)  # held
+
+        # Only when volume itself drains does recovery begin (confirm=0
+        # here → immediate).
+        ev = rule.on_tick(now_sec=900.0)
+        assert ev is not None
+        assert ev.severity == Severity.RECOVERED
+
 
 class TestProcessRestartRule:
     """systemd-InvocationID change detector. First sight silent;

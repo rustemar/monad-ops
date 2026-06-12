@@ -33,14 +33,14 @@ Calibration on this node (2026-05-03):
   * Burst (today's morning reorg storm, 5h): ~2000 events combined,
     ~6.7 events/min — about 100× baseline.
 
-Default thresholds give clear separation:
-
-  * ``warn_count_5min`` = 5  combined events in any 5-min window
-                              (= 60/h rate, well above any observed
-                              steady-state hour)
-  * ``critical_count_5min`` = 15 combined events in 5 min
-                              (= 180/h, deep into the 2026-05-03
-                              burst territory)
+Deployed thresholds (third generation, 2026-06-12 audit): arm
+``warn_count`` = 25 / ``critical_count`` = 50 per 5-min window —
+p99.7 / p99.9 of the 30-day measured distribution. The original 5/15
+and the 2026-05-04 bump to 10/15 both sat inside the background tail
+(warn=10 ≈ p98) and produced 74% of all Telegram volume with a 4-min
+median flap. Real incidents in that window ran 91–2582 events/5min,
+so the audit raised arms an order of magnitude below incident scale
+but clear of background.
 
 Diversity gates suppress single-neighbour storms that produce volume
 without node-wide signal (observed 2026-05-06 chronic chatter from one
@@ -56,12 +56,27 @@ State machine matches ``RetrySpikeRule`` / ``BlockProcessingSlowdownRule``:
   CLEAR    -> CRITICAL    : emit CRITICAL  (skip intermediate WARN)
   WARN     -> CRITICAL    : emit CRITICAL
   CRITICAL -> WARN        : silent (still in alarm overall)
-  WARN     -> CLEAR       : emit RECOVERED
-  CRITICAL -> CLEAR       : emit RECOVERED
+  WARN     -> CLEAR       : emit RECOVERED (after recovery confirm)
+  CRITICAL -> CLEAR       : emit RECOVERED (after recovery confirm)
 
-Hysteresis: arming uses raw thresholds; disarming requires the count
-to drop ``HYSTERESIS_FACTOR`` below the arm threshold. Without this,
-a count grazing the boundary produces flap pairs.
+Hysteresis: arming uses raw thresholds; disarming uses the explicit
+``warn_disarm_count`` / ``critical_disarm_count`` levels when set
+(deployed: 12/25 ≈ 0.5 × arm), else falls back to
+``arm × (1 - HYSTERESIS_FACTOR)``. Without a gap, a count grazing the
+boundary produces flap pairs.
+
+Recovery confirmation (``recovery_confirm_sec``, deployed 600 s):
+RECOVERED is not emitted on the first dip below disarm — the count
+must stay below it for the whole confirmation window. RECOVERED
+bypasses the dedup sink by design, so without this every dip-and-
+rebound delivered an orphan green (87 RECOVERED vs 37 real episodes
+in the 30-day audit). Same defense ``StallRule`` got in April.
+
+Gate-fail hold: if the peer-diversity gate drops the target to None
+while the measured count is still at/above the warn disarm level, the
+rule HOLDS its armed state silently instead of emitting RECOVERED —
+a single-peer storm fading in and out of the gate is not a recovery
+(observed 2026-06-02: RECOVERED greens at counts 75–108).
 
 The rule supports both ``on_event`` (called on each network-layer
 ConsensusEvent) and ``on_tick`` (called periodically) so the count
@@ -116,6 +131,13 @@ class NetworkLayerSignalRule:
     # classes still escalates. Set either to 1 to disable that gate.
     warn_min_unique_peers: int = 2
     critical_min_unique_peers: int = 3
+    # Explicit disarm levels (hysteresis). None = legacy fallback to
+    # arm × (1 - HYSTERESIS_FACTOR).
+    warn_disarm_count: int | None = None
+    critical_disarm_count: int | None = None
+    # Seconds the count must stay below the warn disarm level before
+    # RECOVERED is emitted. 0 = immediate (legacy behavior).
+    recovery_confirm_sec: float = 0.0
 
     # (ts_sec, kind, peer) tuples — ts_sec is unix-epoch seconds,
     # parsed from the monad-bft journal line. We sort by event time,
@@ -123,6 +145,9 @@ class NetworkLayerSignalRule:
     # inflate the present-window rate. peer is "ip:port" or None.
     _events: deque[tuple[float, ConsensusEventKind, str | None]] = field(default_factory=deque)
     _state: Severity | None = None
+    # When the count first dipped below the warn disarm level while
+    # armed; None when not in a pending-recovery stretch.
+    _clear_since: float | None = None
     # True after we've already emitted a "held below CRITICAL" WARN
     # for the current arming cycle. Resets when the rule disarms to
     # CLEAR. Prevents a repeat WARN on every event past critical_count
@@ -155,12 +180,23 @@ class NetworkLayerSignalRule:
 
         count = len(self._events)
 
+        warn_d = (
+            self.warn_disarm_count
+            if self.warn_disarm_count is not None
+            else self.warn_count * (1 - HYSTERESIS_FACTOR)
+        )
+        crit_d = (
+            self.critical_disarm_count
+            if self.critical_disarm_count is not None
+            else self.critical_count * (1 - HYSTERESIS_FACTOR)
+        )
+
         # Arm thresholds going up; disarm thresholds going down.
         if self._state == Severity.CRITICAL:
-            warn_t = self.warn_count * (1 - HYSTERESIS_FACTOR)
-            crit_t = self.critical_count * (1 - HYSTERESIS_FACTOR)
+            warn_t = warn_d
+            crit_t = crit_d
         elif self._state == Severity.WARN:
-            warn_t = self.warn_count * (1 - HYSTERESIS_FACTOR)
+            warn_t = warn_d
             crit_t = self.critical_count
         else:  # CLEAR
             warn_t = self.warn_count
@@ -185,6 +221,39 @@ class NetworkLayerSignalRule:
             target = None
 
         prev = self._state
+
+        # De-escalation is gated twice before RECOVERED can fire.
+        if target is None and prev in (Severity.WARN, Severity.CRITICAL):
+            if count >= warn_d:
+                # Only the diversity gate failed; volume is still at or
+                # above disarm. A single-peer storm fading in and out of
+                # the gate is not a recovery — hold armed, silently.
+                self._clear_since = None
+                self._state = prev
+                return None
+            if self._clear_since is None:
+                self._clear_since = now_sec
+            if now_sec - self._clear_since < self.recovery_confirm_sec:
+                self._state = prev
+                return None
+            quiet_sec = now_sec - self._clear_since
+            self._state = None
+            self._clear_since = None
+            self._held_below_crit_emitted = False
+            return AlertEvent(
+                rule="network_layer_signal",
+                severity=Severity.RECOVERED,
+                key="network_layer_signal",
+                title="Network-layer signal rate normalized",
+                detail=(
+                    f"{count} network-layer event(s) in the last "
+                    f"{self.window_sec // 60} min "
+                    f"(was {prev.value}; quiet {int(quiet_sec)}s "
+                    f"below disarm {warn_d:g})."
+                ),
+            )
+
+        self._clear_since = None
         self._state = target
 
         # Reset the held-back marker any time we drop to CLEAR.
@@ -212,20 +281,6 @@ class NetworkLayerSignalRule:
             return self._make_event(Severity.CRITICAL, count)
         if target == Severity.WARN and prev not in (Severity.WARN, Severity.CRITICAL):
             return self._make_event(Severity.WARN, count)
-
-        # De-escalation to CLEAR.
-        if target is None and prev in (Severity.WARN, Severity.CRITICAL):
-            return AlertEvent(
-                rule="network_layer_signal",
-                severity=Severity.RECOVERED,
-                key="network_layer_signal",
-                title="Network-layer signal rate normalized",
-                detail=(
-                    f"{count} network-layer event(s) in the last "
-                    f"{self.window_sec // 60} min "
-                    f"(was {prev.value})."
-                ),
-            )
 
         # CRITICAL -> WARN stays silent (still in alarm).
         return None

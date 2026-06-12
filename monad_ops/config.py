@@ -99,14 +99,19 @@ class NetworkLayerSignalRuleConfig(BaseModel):
 
     Watches three sparse-at-baseline event classes (RaptorCast decrypt
     fail + wireauth session timeout + consensus_state timestamp
-    validation fail) over a rolling 5-min window. Defaults calibrated
-    on this node 2026-05-03 — baseline ~0.07 events/min (calm hour),
-    burst ~6.7 events/min (this morning's reorg storm). 5/15 thresholds
-    give clean separation without firing on isolated stray events.
+    validation fail) over a rolling 5-min window. Arm thresholds sit at
+    p99.7 / p99.9 of the 30-day measured distribution (2026-06-12
+    audit); real incidents run 91–2582 events/5min, background p90 ≈ 1.
+    Explicit disarm levels (~0.5 × arm) plus a 600 s recovery
+    confirmation kill the boundary flap that made this rule 74% of all
+    Telegram volume at warn=10 (≈ p98).
     """
     window_sec: int = 300  # 5 minutes
-    warn_count: int = 10   # raised 2026-05-04: 5 was bouncing on healthy network noise
-    critical_count: int = 15
+    warn_count: int = 25       # raised 2026-06-12 audit (was 10, before that 5)
+    critical_count: int = 50   # restart-echo / novel-storm scale only
+    warn_disarm_count: int = 12
+    critical_disarm_count: int = 25
+    recovery_confirm_sec: float = 600.0  # 2× window; flap median gap was 4 min
     # Diversity gates. Single-peer storms (one chronically desynced
     # neighbour spamming RaptorCast) routinely cross the volume
     # thresholds — observed 2026-05-03 and 2026-05-06 — with zero

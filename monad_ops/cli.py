@@ -469,6 +469,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         critical_count=config.rules.network_layer_signal.critical_count,
         warn_min_unique_peers=config.rules.network_layer_signal.warn_min_unique_peers,
         critical_min_unique_peers=config.rules.network_layer_signal.critical_min_unique_peers,
+        warn_disarm_count=config.rules.network_layer_signal.warn_disarm_count,
+        critical_disarm_count=config.rules.network_layer_signal.critical_disarm_count,
+        recovery_confirm_sec=config.rules.network_layer_signal.recovery_confirm_sec,
     )
     process_restart_rule = ProcessRestartRule()
 
