@@ -26,6 +26,17 @@ window = 60
 warn_pct = 50.0
 critical_pct = 75.0
 
+[rules.network_layer_signal]
+# Aggregate rate of monad-bft network-layer errors (decrypt-fail +
+# session-timeout + timestamp-invalid) per rolling 5-min window.
+# Arm at p99.7/p99.9 of the 30d distribution (2026-06-12 audit);
+# disarm ~0.5x arm + 600s recovery confirmation to kill boundary flap.
+warn_count = 25
+critical_count = 50
+warn_disarm_count = 12
+critical_disarm_count = 25
+recovery_confirm_sec = 600.0
+
 [rules.dedup]
 cooldown_sec = 300
 
