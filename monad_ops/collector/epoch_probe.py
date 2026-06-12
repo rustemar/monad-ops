@@ -214,8 +214,19 @@ async def probe_epoch(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
+    except FileNotFoundError as e:
+        return EpochSample(epoch=0, seq_num=0, checked_ms=now_ms, error=f"probe: {e}")
+    try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-    except (FileNotFoundError, asyncio.TimeoutError) as e:
+    except asyncio.TimeoutError as e:
+        # Kill on timeout or the subprocess outlives us blocked on a
+        # full pipe — a journal flood (2026-06-12: waltrace, ~250
+        # lines/s) left 34 stuck journalctl readers this way.
+        proc.kill()
+        try:
+            await proc.wait()
+        except ProcessLookupError:
+            pass
         return EpochSample(epoch=0, seq_num=0, checked_ms=now_ms, error=f"probe: {e}")
     text = out.decode("utf-8", errors="replace")
     last_seq: int | None = None
