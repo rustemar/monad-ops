@@ -6,12 +6,14 @@ lives in monad-bft journal entries like:
   "message":"generated expected system calls",
   "block_seq_num":"26633357","block_epoch":"533"
 
-Rather than add a second full tail subprocess, we pull the last ~30s of
-monad-bft output every ``probe_interval_sec`` (default 15s) and scan
-for the most recent epoch/seq pair. Cheap (short output, <50ms), rare
-(4/min), and keeps the probe path completely separate from the hot
-execution-journal tailer so a journald hiccup on one doesn't starve
-the other.
+Rather than add a second full tail subprocess, we pull the last few
+thousand journal lines of monad-bft (``journalctl -n``) every
+``probe_interval_sec`` (default 15s) and scan for the most recent
+epoch/seq pair. Tail reads stay cheap and constant-time even when a log
+flood balloons the journal (the v0.14.5 waltrace bug), unlike a
+``--since`` window whose seek cost grows with volume. Rare (4/min), and
+keeps the probe path completely separate from the hot execution-journal
+tailer so a journald hiccup on one doesn't starve the other.
 
 Empirical epoch length on Monad testnet as of 2026-04-20: ~50,042
 blocks per epoch (observed epoch 532). We don't hardcode that number —
@@ -196,21 +198,31 @@ async def find_current_epoch_first_seq(
 
 async def probe_epoch(
     unit: str = "monad-bft",
-    since: str = "30 seconds ago",
-    timeout_sec: float = 4.0,
+    tail_lines: int = 4000,
+    timeout_sec: float = 6.0,
 ) -> EpochSample:
-    """Scan recent ``unit`` journal output for the latest epoch tuple.
+    """Scan the tail of ``unit`` journal for the latest epoch tuple.
 
-    Returns the newest (seq_num, epoch) pair in the window. If the
-    subprocess times out, the unit isn't found, or the window has no
-    matching lines, the sample carries an ``error`` and the numerics
-    are 0 — consumer should ignore in that case.
+    Reads the last ``tail_lines`` lines via ``journalctl -n`` — which
+    seeks from the end and returns near-instantly regardless of journal
+    size — instead of a ``--since`` time window, whose start-of-window
+    seek scales with journal volume. The v0.14.5 waltrace flood
+    (~220 lines/s) blew that up: a 30s ``--since`` window grew to ~10k
+    lines / ~4.8s to dump, over the old 4s timeout, so every probe timed
+    out and the epoch tile went blank. Tail reads are immune to volume.
+    Epoch markers land ~2.4/s, so 4000 lines carry dozens of them even
+    when the flood drowns ~99% of output; the last match is the newest.
+
+    Returns the newest (seq_num, epoch) pair. If the subprocess times
+    out, the unit isn't found, or the tail has no matching lines, the
+    sample carries an ``error`` and the numerics are 0 — consumer should
+    ignore in that case.
     """
     now_ms = int(time.time() * 1000)
     try:
         proc = await asyncio.create_subprocess_exec(
             "journalctl", "-u", unit, "-o", "cat", "--no-pager",
-            "--since", since,
+            "-n", str(tail_lines),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -239,7 +251,7 @@ async def probe_epoch(
     if last_epoch is None:
         return EpochSample(
             epoch=0, seq_num=0, checked_ms=now_ms,
-            error="no epoch markers in window",
+            error="no epoch markers in tail",
         )
     return EpochSample(
         epoch=last_epoch, seq_num=last_seq or 0, checked_ms=now_ms, error=None,
