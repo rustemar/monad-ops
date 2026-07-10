@@ -11,7 +11,7 @@ warn/critical alerts while the node actually kept producing blocks
 every ~400ms.
 
 Clock-based design stays deliberate: healthy testnet produces one
-block every ~0.4s; a gap of 10s is 25x healthy interval — confident
+block every ~0.3s (post-MIP-12); a gap of 10s is 30x+ healthy interval — confident
 signal. Same node+server host means clock skew is negligible. If
 ever run on separate hosts, a small negative gap simply silences
 the rule (correct fail-quiet).
@@ -51,20 +51,19 @@ _TAILER_LIVENESS_WINDOW_SEC = 2.0
 _RECOVERY_CONFIRM_SEC = 60.0
 
 # Empirical Monad testnet block cadence — used by the RECOVERED message
-# to differentiate chain-side from OPS-side stalls. ~2.5 blk/s holds
-# from iter-1 measurements onward; if Foundation re-tunes block time
-# this should be re-derived from production data, not hard-coded
-# elsewhere as a magic constant.
-_HEALTHY_CHAIN_RATE_BPS = 2.5
+# to differentiate chain-side from OPS-side stalls. Re-derived after the
+# 2026-07-09 MIP-12 hard fork (vote pace 400ms→300ms): production now
+# runs ~3.3 blk/s (was ~2.5). Re-derive from production data on any
+# future block-time change, not hard-coded elsewhere as a magic constant.
+_HEALTHY_CHAIN_RATE_BPS = 3.3
 
 # Multiplier above the healthy rate at which we classify a recovery
 # burst as "tailer catch-up" (OPS side) rather than "chain back
-# online" (chain side). 1.2× = >3 blk/s in the recovery window —
-# calibrated against the 2026-04-23 20:29 UTC FP where 180 blocks
-# closed in 60 s = 3.0 blk/s = exactly 1.2× the healthy rate. Setting
-# the threshold at 1.2 catches that canonical case while staying above
-# normal cadence jitter (rolling 60 s avg rarely exceeds 1.05×
-# healthy rate on quiet testnet).
+# online" (chain side). 1.2× the ~3.3 blk/s healthy rate = ~4 blk/s in
+# the recovery window. Kept at 1.2 across the MIP-12 re-derivation (the
+# canonical 2026-04-23 FP was 1.2× the then-2.5 rate); 1.2 stays above
+# normal cadence jitter while still catching a real tailer catch-up,
+# which scales up with the faster post-fork cadence.
 _CATCHUP_RATE_OPS_FACTOR = 1.2
 
 
@@ -89,7 +88,7 @@ class StallRule:
     # Last block_number observed at the moment this rule armed
     # (CLEAR → WARN/CRITICAL). Used by RECOVERED to compute how many
     # blocks the tailer caught up during recovery — a high
-    # caught-up-rate (well above chain's natural ~2.5 blk/s) means the
+    # caught-up-rate (well above chain's natural ~3.3 blk/s) means the
     # apparent "stall" was OPS-side (tailer freeze), not chain-side.
     # Surfaced in the RECOVERED detail so a public-dashboard viewer
     # can tell the difference post-hoc, since the WARN text is
@@ -200,11 +199,11 @@ class StallRule:
 
         # Chain-vs-OPS differential. If many blocks landed during the
         # confirm window, the tailer was catching up — chain itself was
-        # producing throughout. Healthy testnet cadence is ~2.5 blk/s,
-        # so a catch-up rate well above that flags an OPS-side
-        # false-positive shape (the dominant failure mode after iter-15
-        # write-amplification, see memory project_stall_fp_pattern.md).
-        # Threshold _CATCHUP_RATE_OPS_FACTOR=2.0 — i.e. >5 blk/s during
+        # producing throughout. Healthy testnet cadence is ~3.3 blk/s
+        # (post-MIP-12), so a catch-up rate well above that flags an
+        # OPS-side false-positive shape (the dominant failure mode after
+        # iter-15 write-amplification, see memory project_stall_fp_pattern.md).
+        # Threshold _CATCHUP_RATE_OPS_FACTOR=1.2 — i.e. >~4 blk/s during
         # recovery is "tailer catch-up", not "chain back online".
         diagnostic = ""
         if arm_block is not None and last_block is not None:

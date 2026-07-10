@@ -215,9 +215,10 @@ class TestStallRule:
         short window, the dominant interpretation is 'monad-ops tailer
         was paused while chain produced normally'. The RECOVERED detail
         gains a diagnostic line so a public-dashboard viewer reads the
-        envelope as ops-side, not chain-side. Calibrated against the
-        canonical 2026-04-23 20:29 UTC FP — 180 blocks in 60s = 3.0
-        blk/s = 1.2× healthy rate, exactly at the threshold.
+        envelope as ops-side, not chain-side. Post-MIP-12 the threshold
+        is 1.2 × 3.3 = 3.96 blk/s; this burst does 240 blocks in 60s =
+        4.0 blk/s, just above it (the canonical 2026-04-23 FP was the
+        pre-fork analogue at 3.0 blk/s = 1.2× the then-2.5 rate).
         """
         rule = StallRule(warn_after_sec=10, critical_after_sec=30)
         # Baseline at block 100, T=0.
@@ -229,15 +230,15 @@ class TestStallRule:
         # land continuously (chain was producing throughout); their
         # chain timestamps track wall-clock so re-arm never triggers.
         # Anchor for confirm window = T=12 (first post-WARN block).
-        # Final block before confirmation: 280 with chain_ts=72 ≈ wall.
-        # Total caught up: 280-100 = 180 blocks across 60s = 3.0 blk/s.
-        # rate = 3.0 ≥ 1.2 × 2.5 = 3.0 → diagnostic appears.
-        for n, t in [(120, 12.0), (160, 24.0), (200, 36.0),
-                     (240, 48.0), (260, 60.0), (280, 72.0)]:
+        # Final block before confirmation: 340 with chain_ts=72 ≈ wall.
+        # Total caught up: 340-100 = 240 blocks across 60s = 4.0 blk/s.
+        # rate = 4.0 ≥ 1.2 × 3.3 = 3.96 → diagnostic appears.
+        for n, t in [(140, 12.0), (190, 24.0), (240, 36.0),
+                     (290, 48.0), (320, 60.0), (340, 72.0)]:
             rule.on_block(self._block_at(n, t), now_sec=t)
         rec = rule.on_tick(now_sec=72.0)
         assert rec is not None and rec.severity == Severity.RECOVERED
-        assert "Tailer caught up 180 blocks" in rec.detail
+        assert "Tailer caught up 240 blocks" in rec.detail
         assert "monad-ops processing pause" in rec.detail
 
     def test_recovered_message_silent_when_normal_recovery(self):
@@ -277,11 +278,11 @@ class TestStallRule:
         crit = rule.on_tick(now_sec=31.0)
         assert crit is not None and crit.severity == Severity.CRITICAL
         assert rule._arm_block == 100   # still the original arm-time block
-        # Recovery — tailer catches up. Counts (280-100), not (280-N_at_critical).
-        rule.on_block(self._block_at(280, 32.0), now_sec=32.0)
+        # Recovery — tailer catches up. Counts (340-100), not (340-N_at_critical).
+        rule.on_block(self._block_at(340, 32.0), now_sec=32.0)
         rec = rule.on_tick(now_sec=92.0)
         assert rec is not None and rec.severity == Severity.RECOVERED
-        assert "180 blocks" in rec.detail
+        assert "240 blocks" in rec.detail
         # Reset on confirmed recovery.
         assert rule._arm_block is None
 
