@@ -258,7 +258,7 @@ zcat reorg-27868954.jsonl.gz | head -3</code></pre>
                 <li><code>aggregate.peak_gps</code>, <code>avg_gps</code> — effective gas-per-sec.</li>
                 <li><code>aggregate.total_gas</code>, <code>total_tx</code>, <code>total_retried</code>, <code>retried_fraction</code> — cumulative volumes.</li>
                 <li><code>top_contracts[]</code> — <code>{to_addr, label, blocks_appeared, retried_blocks, retried_ratio, avg_rtp_of_blocks, tx_count, total_gas}</code>. Ranked by <code>retried_blocks</code>.</li>
-                <li><code>blocks[]</code> — only when <code>include_blocks=true</code>. Compact keys: <code>n</code> (block_number), <code>t</code> (timestamp_ms), <code>tx</code>, <code>rt</code> (retried count), <code>rtp</code>, <code>gas</code>, <code>tpse</code> (effective TPS), <code>gpse</code> (effective gas/s).</li>
+                <li><code>blocks[]</code> — only when <code>include_blocks=true</code>. Compact keys: <code>n</code> (block_number), <code>t</code> (timestamp_ms), <code>tx</code>, <code>rt</code> (retried count), <code>rtp</code>, <code>gas</code>, <code>tpse</code> (effective TPS), <code>gpse</code> (effective gas/s in mega-gas, raw as monad-execution logs it — unlike <code>aggregate.peak_gps</code>, which is absolute gas/s).</li>
             </ul>
 
             <h3 class="api-section"><code>/api/blocks/sampled</code></h3>

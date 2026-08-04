@@ -208,6 +208,9 @@ CREATE TABLE IF NOT EXISTS meta (
 
 _HOUR_MS = 3_600_000
 
+# gpse is logged in mega-gas/sec; scale on read so the stored column stays one unit.
+_GAS_PER_SEC_SCALE = 1_000_000
+
 # Minimum per-hour blocks_appeared for a (hour, to_addr) row to be kept
 # in the rollup. See contract_hour schema comment for the measurement
 # that justifies this threshold.
@@ -558,7 +561,7 @@ class Storage:
             "span_ms": span_ms,
             "peak_rtp": round(float(row["peak_rtp"] or 0), 2),
             "avg_rtp": round(float(row["avg_rtp"] or 0), 2),
-            "peak_gps": int(row["peak_gps"] or 0),
+            "peak_gps": int(row["peak_gps"] or 0) * _GAS_PER_SEC_SCALE,
             "avg_gps": int(total_gas / span_sec),
             "peak_tps": int(row["peak_tps"] or 0),
             "avg_tps": round(total_tx / span_sec, 2),
@@ -981,7 +984,7 @@ class Storage:
         bin_ms = max(1, span_ms // target_points)
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
                     MIN(block_number)          AS n_first,
                     MAX(block_number)          AS n_last,
@@ -993,7 +996,7 @@ class Storage:
                     MAX(retry_pct)             AS rtp_max,
                     MAX(tps_effective)         AS tps_eff_max,
                     AVG(tps_effective)         AS tps_eff_avg,
-                    MAX(gas_per_sec_effective) AS gas_max,
+                    MAX(gas_per_sec_effective) * {_GAS_PER_SEC_SCALE} AS gas_max,
                     AVG(state_reset_us)        AS state_reset_us,
                     AVG(tx_exec_us)            AS tx_exec_us,
                     AVG(commit_us)             AS commit_us,

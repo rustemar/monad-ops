@@ -589,6 +589,36 @@ def test_sampled_blocks_rtp_p95_between_avg_and_max(tmp_path: Path) -> None:
     storage.close()
 
 
+def test_block_metrics_aggregate_peak_and_avg_gps_share_units(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    # 100 blocks of 450276 gas over 39.6s average ~1.14M gas/sec, and each logs gpse=689.
+    for n in range(100):
+        storage.write_block(_mk_block(n))
+    from_ts, to_ts = 1776_000_000_000, 1776_000_100_000
+
+    agg = storage.block_metrics_aggregate(from_ts_ms=from_ts, to_ts_ms=to_ts)
+    assert agg["blocks"] == 100
+    assert agg["total_gas"] == 450276 * 100
+    assert agg["peak_gps"] == 689 * 1_000_000
+    assert agg["avg_gps"] == int(450276 * 100 / 39.6)
+    assert agg["peak_gps"] > agg["avg_gps"]
+
+    bins = storage.sampled_blocks(
+        from_ts_ms=from_ts, to_ts_ms=to_ts, target_points=1,
+    )
+    assert bins[0]["gas_max"] == 689 * 1_000_000
+    storage.close()
+
+
+def test_block_metrics_aggregate_empty_window_is_zeroed(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    agg = storage.block_metrics_aggregate(from_ts_ms=1000, to_ts_ms=2000)
+    assert agg["blocks"] == 0
+    assert agg["peak_gps"] == 0
+    assert agg["avg_gps"] == 0
+    storage.close()
+
+
 def test_prune_older_than_noop_when_keep_days_is_zero(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     storage.write_block(_mk_block(1))
