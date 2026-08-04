@@ -2940,6 +2940,7 @@ function _schedule(fn, interval) {
 _schedule(fetchState, STATE_INTERVAL);
 _schedule(fetchBlocks, BLOCKS_INTERVAL);
 _schedule(fetchBftSeries, BLOCKS_INTERVAL);
+_schedule(fetchReorgSeries, BLOCKS_INTERVAL);
 _schedule(fetchBaseFeeSeries, BLOCKS_INTERVAL);
 _schedule(fetchContracts, CONTRACTS_INTERVAL);
 _schedule(fetchIncidents, INCIDENTS_INTERVAL);
