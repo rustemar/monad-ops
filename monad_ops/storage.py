@@ -1991,6 +1991,8 @@ class Storage:
                 f"THEN 1 ELSE 0 END) AS count_dom_{t}"
             )
         dom_cols = ",\n                ".join(dom_case_exprs)
+        # CROSS JOIN pins blocks first: idx_txcb_to has no time bound, so the natural plan
+        # walks the contract's whole lifetime.
         sql_stats = f"""
             SELECT
                 COUNT(*)                                          AS blocks_appeared,
@@ -2003,10 +2005,11 @@ class Storage:
                 MIN(b.timestamp_ms)                               AS first_ts,
                 MAX(b.timestamp_ms)                               AS last_ts,
                 {dom_cols}
-            FROM tx_contract_block tcb
-            JOIN blocks b ON b.block_number = tcb.block_number
-            WHERE tcb.to_addr = ?
-              AND b.timestamp_ms BETWEEN ? AND ?
+            FROM blocks b
+            CROSS JOIN tx_contract_block tcb
+                 ON tcb.block_number = b.block_number
+                AND tcb.to_addr = ?
+            WHERE b.timestamp_ms BETWEEN ? AND ?
         """
         with self._lock:
             stat_row = self._conn.execute(
@@ -2016,10 +2019,11 @@ class Storage:
             peak_row = self._conn.execute(
                 """SELECT tcb.block_number, tcb.tx_count, tcb.total_gas,
                           b.tx_count AS block_tx, b.retry_pct, b.timestamp_ms
-                   FROM tx_contract_block tcb
-                   JOIN blocks b ON b.block_number = tcb.block_number
-                   WHERE tcb.to_addr = ?
-                     AND b.timestamp_ms BETWEEN ? AND ?
+                   FROM blocks b
+                   CROSS JOIN tx_contract_block tcb
+                        ON tcb.block_number = b.block_number
+                       AND tcb.to_addr = ?
+                   WHERE b.timestamp_ms BETWEEN ? AND ?
                    ORDER BY tcb.tx_count DESC, tcb.total_gas DESC
                    LIMIT 1""",
                 (addr, from_ts, to_ts),
@@ -2033,10 +2037,11 @@ class Storage:
                 """WITH my AS (
                      SELECT SUM(tcb.tx_count)   AS my_tx,
                             SUM(tcb.total_gas)  AS my_gas
-                     FROM tx_contract_block tcb
-                     JOIN blocks b ON b.block_number = tcb.block_number
-                     WHERE tcb.to_addr = ?
-                       AND b.timestamp_ms BETWEEN ? AND ?
+                     FROM blocks b
+                     CROSS JOIN tx_contract_block tcb
+                          ON tcb.block_number = b.block_number
+                         AND tcb.to_addr = ?
+                     WHERE b.timestamp_ms BETWEEN ? AND ?
                    ),
                    peers AS (
                      SELECT tcb.to_addr,
