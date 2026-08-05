@@ -36,6 +36,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from monad_ops.parser import drift
+
 _EXEC_BLOCK_MARKER = "__exec_block,"
 # Match "<key>=<value>" where value runs until comma or end of string.
 # Values can contain unit suffixes (µs, %) and leading whitespace.
@@ -95,8 +97,10 @@ def parse_exec_block(line: str) -> ExecBlock | None:
     required = {"bl", "id", "ts", "tx", "rt", "rtp", "sr", "txe", "cmt", "tot",
                 "tpse", "tps", "gas", "gpse", "gps"}
     if not required.issubset(fields):
+        drift.record_drift(drift.EXEC_BLOCK, line)
         return None
 
+    drift.record_ok(drift.EXEC_BLOCK)
     return ExecBlock(
         block_number=int(fields["bl"]),
         block_id=fields["id"],

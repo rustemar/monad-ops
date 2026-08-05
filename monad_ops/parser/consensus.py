@@ -40,6 +40,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from monad_ops.parser import drift
+
 
 class ConsensusEventKind(StrEnum):
     """Classes of consensus log line we surface."""
@@ -210,7 +212,9 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     if has_local_timeout:
         m = _LOCAL_TIMEOUT_RX.search(line)
         if m is None:
+            drift.record_drift(drift.CONSENSUS_LOCAL_TIMEOUT, line)
             return None
+        drift.record_ok(drift.CONSENSUS_LOCAL_TIMEOUT)
         return ConsensusEvent(
             kind=ConsensusEventKind.LOCAL_TIMEOUT,
             round=int(m.group(1)),
@@ -223,6 +227,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     # advancing round: try TC first (rarer, more specific prefix).
     m = _ADVANCING_ROUND_TC_RX.search(line)
     if m is not None:
+        drift.record_ok(drift.CONSENSUS_ADVANCING_ROUND)
         return ConsensusEvent(
             kind=ConsensusEventKind.ROUND_ADVANCE_TC,
             round=int(m.group(2)),
@@ -232,6 +237,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
 
     m = _ADVANCING_ROUND_QC_RX.search(line)
     if m is not None:
+        drift.record_ok(drift.CONSENSUS_ADVANCING_ROUND)
         return ConsensusEvent(
             kind=ConsensusEventKind.ROUND_ADVANCE_QC,
             round=int(m.group(2)),
@@ -242,6 +248,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
     if has_proposal:
         m = _PROPOSAL_RX.search(line)
         if m is not None:
+            drift.record_ok(drift.CONSENSUS_PROPOSAL)
             return ConsensusEvent(
                 kind=ConsensusEventKind.PROPOSAL,
                 round=int(m.group(1)),
@@ -250,10 +257,14 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
                 block_seq=int(m.group(2)),
                 base_fee=int(m.group(3)),
             )
+        drift.record_drift(drift.CONSENSUS_PROPOSAL, line)
+        return None
 
     # Marker matched but neither extractor did — schema drift (e.g.
     # monad-bft renamed a field). Skip rather than raise; the caller
-    # tails forever and would be fragile if we threw.
+    # tails forever and would be fragile if we threw; the counter is
+    # what makes the loss visible.
+    drift.record_drift(drift.CONSENSUS_ADVANCING_ROUND, line)
     return None
 
 
