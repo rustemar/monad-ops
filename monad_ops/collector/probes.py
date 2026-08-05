@@ -120,37 +120,73 @@ async def probe_services(services: list[str]) -> ProbeResult:
 
 async def probe_key_backups(
     paths: list[Path] | None = None,
-    warn_after_days: int = 30,
+    warn_after_days: int | None = None,
 ) -> ProbeResult:
+    """Are the key backups present, non-empty, and readable only by their owner?
+
+    Age is deliberately not a health signal by default. A keystore that
+    never rotates keeps its original mtime for the life of the node, so
+    a staleness threshold sits at WARN forever — this node ran 113 days
+    of it — and a permanent WARN is one the operator stops reading.
+    ``warn_after_days`` stays available for anyone who does rotate.
+
+    What does carry a real signal is exposure. The monad keygen writes
+    the plaintext private keys and the keystore password into this
+    directory as mode 644, world-readable, and nothing tells you.
+
+    The summary names files only when they are missing or empty. Which
+    file is over-permissive is not something a public dashboard should
+    announce, so that detail lives in ``details``, which the API strips.
+    """
     paths = paths or [_MONAD_SECP_BACKUP, _MONAD_BLS_BACKUP]
     details: dict = {}
     missing: list[str] = []
+    empty: list[str] = []
+    exposed: list[str] = []
     stale: list[str] = []
+    unknown: list[str] = []
     now = time.time()
 
     for p in paths:
         try:
             st = p.stat()
             age_days = (now - st.st_mtime) / 86400.0
+            mode = st.st_mode & 0o777
             details[str(p)] = {
                 "exists": True,
                 "size": st.st_size,
+                "mode": f"{mode:04o}",
                 "mtime": int(st.st_mtime),
                 "age_days": round(age_days, 1),
             }
-            if age_days > warn_after_days:
+            if st.st_size == 0:
+                empty.append(p.name)
+            elif mode & 0o077:
+                exposed.append(p.name)
+            if warn_after_days is not None and age_days > warn_after_days:
                 stale.append(f"{p.name} ({age_days:.0f}d)")
         except FileNotFoundError:
             details[str(p)] = {"exists": False}
             missing.append(p.name)
         except PermissionError as e:
             details[str(p)] = {"exists": "unknown", "error": str(e)}
+            unknown.append(p.name)
 
-    if missing:
+    if missing or empty:
+        broken = [f"missing: {', '.join(missing)}"] if missing else []
+        if empty:
+            broken.append(f"empty: {', '.join(empty)}")
         return ProbeResult(
             name="key_backups",
             status="critical",
-            summary=f"missing: {', '.join(missing)}",
+            summary="; ".join(broken),
+            details=details,
+        )
+    if exposed:
+        return ProbeResult(
+            name="key_backups",
+            status="warn",
+            summary=f"{len(exposed)} of {len(paths)} backup(s) readable beyond owner",
             details=details,
         )
     if stale:
@@ -160,10 +196,17 @@ async def probe_key_backups(
             summary=f"stale (> {warn_after_days}d): {', '.join(stale)}",
             details=details,
         )
+    if unknown:
+        return ProbeResult(
+            name="key_backups",
+            status="unknown",
+            summary=f"cannot stat {len(unknown)} of {len(paths)} backup(s)",
+            details=details,
+        )
     return ProbeResult(
         name="key_backups",
         status="ok",
-        summary=f"{len(paths)} backup(s) present",
+        summary=f"{len(paths)} backup(s) present, owner-only",
         details=details,
     )
 
