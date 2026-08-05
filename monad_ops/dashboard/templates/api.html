@@ -128,6 +128,10 @@
                         <td>Sanitized host-probe status (service/key/disk/fd) — name, status, summary.</td>
                     </tr>
                     <tr>
+                        <td><code>GET /api/status/errors</code></td>
+                        <td>Self-check counters since process start: HTTP responses <code>&ge; 400</code> grouped by status code, plus <code>parse_drift</code> — per log-line kind, lines whose marker matched but whose extractor did not (<code>drift</code>, zero on a supported node release) against lines that parsed (<code>ok</code>, which goes flat if a record type is renamed away). Non-zero <code>drift</code> or a flat <code>ok</code> means this node's release moved the log schema and the numbers on this dashboard are incomplete.</td>
+                    </tr>
+                    <tr>
                         <td><code>GET /healthz</code></td>
                         <td>Liveness — returns <code>{"ok": true}</code>.</td>
                     </tr>

@@ -645,6 +645,28 @@ async def test_api_probes_shape(client: httpx.AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_api_status_errors_reports_parse_drift(client: httpx.AsyncClient) -> None:
+    from monad_ops.parser import drift
+
+    drift.reset()
+    try:
+        drift.record_ok(drift.EXEC_BLOCK)
+        drift.record_drift(drift.CONSENSUS_PROPOSAL, "line", now=lambda: 1_780_000_000.0)
+        r = await client.get("/api/status/errors")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["parse_drift"]["total"] == 1
+        kinds = body["parse_drift"]["kinds"]
+        assert set(kinds) == set(drift.KINDS)
+        assert kinds[drift.EXEC_BLOCK] == {"ok": 1, "drift": 0, "last_drift_ms": None}
+        assert kinds[drift.CONSENSUS_PROPOSAL] == {
+            "ok": 0, "drift": 1, "last_drift_ms": 1_780_000_000_000,
+        }
+    finally:
+        drift.reset()
+
+
+@pytest.mark.asyncio
 async def test_api_probes_public_alias_returns_same_payload(
     client: httpx.AsyncClient,
 ) -> None:

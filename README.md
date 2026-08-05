@@ -184,6 +184,9 @@ instance. In brief:
 - `GET /api/window_summary?from_ts_ms=&to_ts_ms=&include_blocks=`
   — single-call post-event report.
 - `GET /api/probes` — sanitized host-probe status.
+- `GET /api/status/errors` — HTTP error counters plus `parse_drift`:
+  log lines the parser recognised but could not extract, per kind.
+  Non-zero means the node release moved the log schema.
 
 All JSON routes ship `Access-Control-Allow-Origin: *` so external
 dashboards can pull from the browser. The HTML dashboard itself stays

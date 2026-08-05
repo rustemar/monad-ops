@@ -28,6 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
+from monad_ops.parser import drift
 from monad_ops.reorg_capture import find_artifact
 from monad_ops.rules.events import code_color_for
 from monad_ops.state import State
@@ -1187,12 +1188,19 @@ def build_app(
 
     @app.api_route("/api/status/errors", methods=["GET", "HEAD"])
     async def api_status_errors() -> JSONResponse:
-        """Error counters since process start, grouped by status code."""
+        """Error counters since process start, grouped by status code.
+
+        ``parse_drift`` covers the other silent failure: per log-line
+        kind, how many lines the parser recognised but could not extract
+        (``drift``, zero at steady state) against how many it did parse
+        (``ok``, which goes flat if a marker disappears entirely).
+        """
         return JSONResponse({
             "since_ms": int(_error_since * 1000),
             "uptime_sec": round(time.time() - _error_since, 1),
             "counts": dict(_error_counts),
             "total": sum(_error_counts.values()),
+            "parse_drift": drift.snapshot(),
         })
 
     @app.api_route("/api/enrichment/status", methods=["GET", "HEAD"])
