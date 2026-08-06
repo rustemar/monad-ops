@@ -18,10 +18,12 @@ dependency for the core view.
 
 - **Live dashboard** at `/` — recent blocks, retry rate, TPS, gas,
   epoch progress, top retried contracts.
-- **Alerts** for block stalls, retry-rate spikes, chain reorgs,
-  reference-RPC lag, and assertion-like log patterns
-  (`CXX_ASSERT`, `RUST_PANIC`, `QC_OVERSHOOT`, `CHUNK_EXHAUSTION`).
-  Telegram by default, dedup + hysteresis so you don't get flapping.
+- **Alerts** — ten rules covering block stalls, retry-rate spikes,
+  execution-layer divergence, reference-RPC lag, assertion/panic log
+  patterns, per-block processing slowdown, monad-bft network-layer
+  errors, service restarts, the v0.14.5 waltrace flood, and new package
+  releases. Telegram by default, dedup + hysteresis so you don't get
+  flapping. Full reference in [docs/rules.md](docs/rules.md).
 - **Host probes** — systemd state of monad services, key-backup age,
   TrieDB disk health, UDP config, filesystem usage, `fd_limits`.
 - **Alerts history** at `/alerts` — persisted across restarts,
@@ -51,6 +53,26 @@ event loop so a slow aggregate query can't stall live ingestion. The
 public `/alerts` page and JSON API are read-only — the dashboard
 cannot write back to the node.
 
+## Rules
+
+| Rule | Fires on | Severities |
+| --- | --- | --- |
+| `stall` | no new block for N seconds | WARN, CRITICAL |
+| `retry_spike` | sustained high `retry_pct` | WARN, CRITICAL |
+| `reorg` | same height, different execution `block_id` | INFO, WARN |
+| `reference_lag` | local tip behind a public reference RPC | WARN, CRITICAL |
+| `assertion` | assertion / panic / FATAL log lines | WARN, CRITICAL |
+| `block_processing_slowdown` | rolling median `total_us` in stress territory | WARN, CRITICAL |
+| `network_layer_signal` | monad-bft network-layer error rate | WARN, CRITICAL |
+| `process_restart` | a tracked systemd unit's `InvocationID` changed | WARN |
+| `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL |
+| `version_watch` | a newer stable package appeared in the apt repo | INFO |
+
+[docs/rules.md](docs/rules.md) documents each one: what it fires on, the
+field evidence behind its defaults, and every config key. Worth reading
+before you tune thresholds — most of them were moved in response to
+specific alert-noise audits, and the reasoning is recorded there.
+
 ## Requirements
 
 - A Monad validator or full node on the same host, running under
@@ -79,11 +101,18 @@ cp config.example.toml config.toml
 
 Key sections of `config.toml`:
 
-- `[node]` — display name, RPC URL, list of systemd services to probe.
+- `[node]` — display name, RPC URL, list of systemd services to probe,
+  and the public reference RPC used for the lag comparison.
 - `[alerts.telegram]` — bot token (from `@BotFather`) and chat ID.
   Blank `bot_token` (or omitting the section) routes alerts to stdout.
+- `[rules.*]` — one section per rule; see [docs/rules.md](docs/rules.md).
 - `[persistence]` — SQLite database path. Default is `data/state.db`.
 - `[enrichment]` — receipts-enrichment worker settings.
+- `[retention]` — background pruning. Off by default, so the database
+  accrues forever until you turn it on.
+
+Every section has working defaults except `[node].name`. `config.example.toml`
+carries the full set with the defaults spelled out.
 
 The user running monad-ops must be in the `systemd-journal` group.
 Add it once and re-login:
@@ -210,8 +239,7 @@ monad_ops/
 ├── dashboard/          # Jinja templates, static JS/CSS/Chart.js
 ├── enricher/           # eth_getBlockReceipts worker
 ├── parser/             # __exec_block / assertion line parsers
-├── rules/              # stall, retry_spike, reorg, reference_lag,
-│                       # assertion — alert-emitting rules
+├── rules/              # the ten alert-emitting rules (docs/rules.md)
 ├── alerts/             # sinks (Telegram, stdout, deduping)
 ├── state.py            # in-memory snapshot + EpochTracker
 ├── storage.py          # SQLite schema, migrations, aggregates
