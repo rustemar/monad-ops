@@ -22,7 +22,6 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
-
 # Staking precompile address
 _STAKING_PRECOMPILE = "0x0000000000000000000000000000000000001000"
 _SEL_GET_EPOCH = "0x757991a8"

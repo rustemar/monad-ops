@@ -45,7 +45,6 @@ from dataclasses import dataclass, field
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # Gap between arm and disarm thresholds. 5 percentage points is wide enough
 # to kill noise from avg hovering at the boundary while still letting a
 # genuine recovery be visible within one window.

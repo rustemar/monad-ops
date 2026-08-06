@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import gzip
 from pathlib import Path
 
@@ -16,7 +15,6 @@ from monad_ops.reorg_capture import (
     journal_dir_for,
     sanitize_text,
 )
-
 
 # ---------------------------------------------------------------------------
 # Sanitizer

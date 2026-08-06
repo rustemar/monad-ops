@@ -22,7 +22,6 @@ from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
 from monad_ops.storage import Storage
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -595,6 +594,7 @@ async def test_api_reorgs_marks_has_journal(
     """`/api/reorgs` annotates each row with has_journal based on which
     artifacts exist on disk."""
     import gzip
+
     from monad_ops.rules.events import AlertEvent, Severity
 
     # Two reorgs in storage; one has an artifact, one doesn't.
@@ -851,8 +851,8 @@ async def test_api_contract_detail_suppresses_pattern_for_system(
     # storage would flag pattern; API should suppress it.
     from monad_ops.api.app import build_app
     from monad_ops.labels import ContractLabels, Label
-    from monad_ops.storage import ContractBlockAgg
     from monad_ops.parser import ExecBlock
+    from monad_ops.storage import ContractBlockAgg
 
     sys_addr = "0x" + "ab" * 20
     labels = ContractLabels({sys_addr: Label(name="Test System", category="system")})

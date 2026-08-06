@@ -26,7 +26,6 @@ from dataclasses import dataclass, field
 
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # Hysteresis band (blocks). Once armed, the lag must drop this many
 # blocks below the arm threshold before disarming. Block time on
 # testnet is ~400 ms, so 5 blocks ≈ 2 s of headroom.

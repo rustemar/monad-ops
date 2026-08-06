@@ -27,7 +27,7 @@ import asyncio
 import os
 import subprocess
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
@@ -39,7 +39,6 @@ from monad_ops.reorg_capture import (
     sanitize_text,
 )
 
-
 log = structlog.stdlib.get_logger()
 
 
@@ -49,7 +48,7 @@ def waltrace_dir_for(persistence_path: str | Path) -> Path:
 
 
 def _iso(epoch_sec: float) -> str:
-    return datetime.fromtimestamp(epoch_sec, tz=timezone.utc).isoformat()
+    return datetime.fromtimestamp(epoch_sec, tz=UTC).isoformat()
 
 
 def list_wal_dir(wal_dir: str | Path) -> str:

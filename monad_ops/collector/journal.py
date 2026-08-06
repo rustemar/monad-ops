@@ -127,7 +127,7 @@ async def tail_raw_lines(
                         raw = await asyncio.wait_for(
                             proc.stdout.readline(), idle_timeout_sec
                         )
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Follow went silent while the node is live —
                         # the handle stopped following. Drop to the
                         # respawn path (kill happens in `finally`).
@@ -155,7 +155,7 @@ async def tail_raw_lines(
                 proc.terminate()
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=3)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     proc.kill()
 
         # Only reached via the idle-timeout `break` (follow mode). Record

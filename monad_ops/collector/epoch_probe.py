@@ -29,7 +29,6 @@ import re
 import time
 from dataclasses import dataclass
 
-
 # Regex walks a single JSON log line — cheap, no JSON parse. Pins
 # block_seq_num and block_epoch as adjacent fields, which is the
 # layout monad-bft emits for "generated expected system calls" and
@@ -105,7 +104,7 @@ async def scan_epoch_history(
                 if m:
                     results.append((int(m.group(1)), int(m.group(2))))
         await asyncio.wait_for(_drain(), timeout=timeout_sec)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         # Return whatever we got; don't block the caller forever.
         pass
     finally:
@@ -113,7 +112,7 @@ async def scan_epoch_history(
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
-            except (ProcessLookupError, asyncio.TimeoutError):
+            except (TimeoutError, ProcessLookupError):
                 try: proc.kill()
                 except ProcessLookupError: pass
     return results
@@ -183,14 +182,14 @@ async def find_current_epoch_first_seq(
                 if smallest is None or seq < smallest:
                     smallest = seq
         await asyncio.wait_for(_drain(), timeout=timeout_sec)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
     finally:
         if proc.returncode is None:
             try:
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
-            except (ProcessLookupError, asyncio.TimeoutError):
+            except (TimeoutError, ProcessLookupError):
                 try: proc.kill()
                 except ProcessLookupError: pass
     return smallest
@@ -230,7 +229,7 @@ async def probe_epoch(
         return EpochSample(epoch=0, seq_num=0, checked_ms=now_ms, error=f"probe: {e}")
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-    except asyncio.TimeoutError as e:
+    except TimeoutError as e:
         # Kill on timeout or the subprocess outlives us blocked on a
         # full pipe — a journal flood (2026-06-12: waltrace, ~250
         # lines/s) left 34 stuck journalctl readers this way.

@@ -19,7 +19,6 @@ from pathlib import Path
 
 import structlog
 
-
 log = structlog.stdlib.get_logger()
 
 
@@ -40,7 +39,7 @@ class ContractLabels:
         self._labels = labels
 
     @classmethod
-    def load(cls, path: Path | str | None) -> "ContractLabels":
+    def load(cls, path: Path | str | None) -> ContractLabels:
         """Load labels from a JSON file. Missing/unreadable file → empty map."""
         if path is None:
             return cls({})

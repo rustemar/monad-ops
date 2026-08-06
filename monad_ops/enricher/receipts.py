@@ -16,7 +16,6 @@ import structlog
 
 from monad_ops.storage import ContractBlockAgg, Storage, TxEnrichment
 
-
 log = structlog.stdlib.get_logger()
 
 

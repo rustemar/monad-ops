@@ -55,7 +55,6 @@ from dataclasses import dataclass, field
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # Disarm threshold is `arm_threshold * (1 - HYSTERESIS_FACTOR)`. 0.20
 # means the median must drop to 80% of the arm threshold before
 # RECOVERED fires. Wide enough to kill boundary flap, narrow enough that

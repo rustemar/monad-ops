@@ -25,7 +25,6 @@ from dataclasses import dataclass
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # If our last on_block call happened within this many seconds, the
 # tailer is actively processing — whatever the block's own timestamp
 # says, we are NOT in a stall. This guards against the "tailer catch-up"

@@ -473,6 +473,7 @@ def test_prune_older_than_removes_old_rows_keeps_recent(tmp_path: Path) -> None:
     """Retention pass deletes rows in blocks/tx_contract_block/alerts
     whose timestamp predates the cutoff, and leaves newer rows intact."""
     import time
+
     from monad_ops.storage import ContractBlockAgg
 
     storage = Storage(tmp_path / "state.db")

@@ -37,7 +37,7 @@ from __future__ import annotations
 import html
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from monad_ops.storage import Storage
@@ -126,7 +126,7 @@ def render_static_html(
 
 
 def _iso_utc(ts_ms: int) -> str:
-    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
 

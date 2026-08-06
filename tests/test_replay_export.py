@@ -9,14 +9,12 @@ with both Chart.js and the JSON payload inlined.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
 from monad_ops.replay_export import assemble_window_data, render_static_html
 from monad_ops.storage import BftBaseFee, BftMinute, Storage
-
 
 _T0_MS = 1_777_003_200_000
 _MIN_MS = 60_000
