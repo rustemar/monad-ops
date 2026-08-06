@@ -53,12 +53,12 @@ class ReorgRule:
 
     # Maps block_number -> first-seen block_id. OrderedDict so we can evict
     # the oldest entries in O(1) when we exceed track_window.
-    _seen: "OrderedDict[int, str]" = field(default_factory=OrderedDict)
+    _seen: OrderedDict[int, str] = field(default_factory=OrderedDict)
     # Wall-clock-ish timestamps (seconds) of reorgs inside the cluster
     # window. Bounded by cluster_threshold * 4 so a long-lived process
     # under sustained reorg load doesn't accumulate state forever; the
     # window-prune in on_block keeps it correct regardless.
-    _recent_ts: "deque[float]" = field(default_factory=lambda: deque(maxlen=64))
+    _recent_ts: deque[float] = field(default_factory=lambda: deque(maxlen=64))
     # True while inside an open cluster envelope — keeps repeat WARNs silent.
     _cluster_armed: bool = False
     # Observability for the /api/state integrity panel.

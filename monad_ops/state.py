@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 
 from monad_ops.collector.probes import ProbeResult
@@ -23,7 +23,6 @@ from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
 from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
 from monad_ops.storage import BftBaseFee, BftMinute, Storage
-
 
 # Keep ~1 hour of blocks (testnet cadence ~2.5 blk/s → 9000 blocks/hr).
 # Round up for bursty periods.
@@ -723,8 +722,8 @@ class State:
         w5m = _window(300)
 
         bps_1m = len(w1m) / 60.0 if w1m else 0.0
-        rtp_1m = _avg((b.retry_pct for b in w1m)) if w1m else 0.0
-        rtp_5m = _avg((b.retry_pct for b in w5m)) if w5m else 0.0
+        rtp_1m = _avg(b.retry_pct for b in w1m) if w1m else 0.0
+        rtp_5m = _avg(b.retry_pct for b in w5m) if w5m else 0.0
         rtp_max_1m = max((b.retry_pct for b in w1m), default=0.0)
         tx_1m = sum(b.tx_count for b in w1m) / 60.0 if w1m else 0.0
         gas_1m = sum(b.gas_used for b in w1m) / 60.0 if w1m else 0.0

@@ -27,7 +27,6 @@ from threading import Lock
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS blocks (
     block_number          INTEGER PRIMARY KEY,
@@ -637,7 +636,7 @@ class Storage:
             ).fetchall()
         return [float(r["ts"]) for r in rows]
 
-    def load_reorg_history(self) -> tuple[int, "StoredAlert | None"]:
+    def load_reorg_history(self) -> tuple[int, StoredAlert | None]:
         """Return (total reorg count, latest reorg alert) for ReorgRule bootstrap.
 
         Used at startup so counters survive process restarts — the live

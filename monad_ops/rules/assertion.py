@@ -10,7 +10,6 @@ from __future__ import annotations
 from monad_ops.parser import AssertionEvent, AssertionKind
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # Severity policy. Assertions and panics are always CRITICAL —
 # monad-execution/bft don't recover from these without a restart.
 # Chunk-exhaustion crosses from WARN to CRITICAL at 0.95, because

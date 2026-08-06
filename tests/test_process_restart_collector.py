@@ -12,7 +12,6 @@ import pytest
 
 from monad_ops.collector import process_restart as pr_mod
 from monad_ops.collector.process_restart import (
-    InvocationSnapshot,
     poll_invocation,
     poll_invocations,
 )

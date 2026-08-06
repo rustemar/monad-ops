@@ -24,11 +24,10 @@ import re
 import subprocess
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import structlog
-
 
 log = structlog.stdlib.get_logger()
 
@@ -83,7 +82,7 @@ def artifact_path(out_dir: Path, block_number: int, block_ts_ms: int) -> Path:
 def _format_journal_ts(epoch_sec: float) -> str:
     """Format a UTC timestamp the way journalctl --since/--until expects."""
     return (
-        datetime.fromtimestamp(epoch_sec, tz=timezone.utc)
+        datetime.fromtimestamp(epoch_sec, tz=UTC)
         .strftime("%Y-%m-%d %H:%M:%S")
     )
 

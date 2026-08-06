@@ -12,6 +12,7 @@ import asyncio
 import json
 import sys
 import time
+from datetime import UTC
 from pathlib import Path
 
 import structlog
@@ -21,13 +22,14 @@ from monad_ops.alerts import DedupingSink, StdoutSink, TelegramSink
 from monad_ops.alerts.sink import AlertSink
 from monad_ops.api import build_app
 from monad_ops.collector.bft_journal import tail_consensus_events
-from monad_ops.collector.journal import TailError, tail_execution_blocks
-from monad_ops.collector.probes import run_all_probes
 from monad_ops.collector.epoch_probe import (
     find_current_epoch_first_seq,
     probe_epoch,
     scan_epoch_history,
 )
+from monad_ops.collector.journal import TailError, tail_execution_blocks
+from monad_ops.collector.probes import run_all_probes
+from monad_ops.collector.process_restart import poll_invocations
 from monad_ops.collector.reference_rpc import fetch_reference_block
 from monad_ops.collector.validator_set import fetch_validator_set
 from monad_ops.collector.version import fetch_version_status
@@ -42,7 +44,6 @@ from monad_ops.reorg_capture import (
     journal_dir_for,
 )
 from monad_ops.replay_export import assemble_window_data, render_static_html
-from monad_ops.collector.process_restart import poll_invocations
 from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
@@ -57,10 +58,9 @@ from monad_ops.rules import (
     VersionRule,
     WaltraceFloodRule,
 )
-from monad_ops.waltrace_capture import capture_waltrace_evidence, waltrace_dir_for
 from monad_ops.state import State
 from monad_ops.storage import Storage
-
+from monad_ops.waltrace_capture import capture_waltrace_evidence, waltrace_dir_for
 
 log = structlog.stdlib.get_logger()
 
@@ -1040,13 +1040,13 @@ def _parse_ts(s: str) -> int:
     s = s.strip()
     if s.isdigit():
         return int(s)
-    from datetime import datetime, timezone
+    from datetime import datetime
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S",
                 "%Y-%m-%dT%H:%M", "%Y-%m-%d"):
         try:
             return int(
                 datetime.strptime(s, fmt)
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=UTC)
                 .timestamp() * 1000
             )
         except ValueError:

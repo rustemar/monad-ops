@@ -12,11 +12,9 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-
 
 _TRIEDB_DEVICE = Path("/dev/triedb")
 _MONAD_CONFIG = Path("/home/monad/monad-bft/config/node.toml")
@@ -62,7 +60,7 @@ async def _run(cmd: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
         )
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
-    except (FileNotFoundError, asyncio.TimeoutError) as e:
+    except (TimeoutError, FileNotFoundError) as e:
         return 127, "", str(e)
 
 

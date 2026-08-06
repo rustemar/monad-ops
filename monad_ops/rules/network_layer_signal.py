@@ -94,7 +94,6 @@ from dataclasses import dataclass, field
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind
 from monad_ops.rules.events import AlertEvent, Severity
 
-
 # Disarm threshold = arm × (1 - HYSTERESIS_FACTOR). Wide enough to
 # kill boundary flap; narrow enough that real recovery is visible
 # within roughly one window.

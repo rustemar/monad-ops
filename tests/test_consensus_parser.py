@@ -14,7 +14,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from monad_ops.parser import (
-    ConsensusEvent,
     ConsensusEventKind,
     parse_consensus,
 )

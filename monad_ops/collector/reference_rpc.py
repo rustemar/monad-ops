@@ -20,7 +20,6 @@ from dataclasses import dataclass
 
 import httpx
 
-
 _DEFAULT_TIMEOUT_SEC = 4.0
 
 

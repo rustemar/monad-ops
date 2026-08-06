@@ -25,7 +25,6 @@ import structlog
 from monad_ops.enricher.receipts import EnrichmentError, ReceiptsClient, enrich_block
 from monad_ops.storage import Storage
 
-
 log = structlog.stdlib.get_logger()
 
 

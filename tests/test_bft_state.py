@@ -15,12 +15,9 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind
 from monad_ops.state import State
 from monad_ops.storage import BftBaseFee, BftMinute, Storage
-
 
 # Fixed reference timestamp inside a known minute boundary so tests
 # don't depend on wall-clock drift. 2026-04-24T06:00:00Z = 1777003200000.

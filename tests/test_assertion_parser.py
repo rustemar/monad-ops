@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 
 from monad_ops.parser.assertion import (
-    AssertionEvent,
     AssertionKind,
     parse_assertion,
 )
