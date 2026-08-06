@@ -1,5 +1,12 @@
 # Example configuration for monad-ops.
 # Copy to config.toml (which is gitignored) and fill in your credentials.
+#
+# Every value below is the built-in default except [node].name, which is
+# required. Omitting a key or a whole section keeps the default, so you
+# can delete anything you don't want to override.
+#
+# The [rules.*] sections are documented in full — what each rule fires
+# on and why its defaults are what they are — in docs/rules.md.
 
 [node]
 # Display name shown on the dashboard and in Telegram alerts.
@@ -8,6 +15,11 @@
 name = "monad-testnet"
 rpc_url = "http://127.0.0.1:8080"
 services = ["monad-bft", "monad-execution", "monad-rpc"]
+# Public reference RPC, compared against the local tip to answer "is the
+# whole network halted or just my node?". Empty string disables both the
+# probe and the reference_lag rule.
+reference_rpc_url = "https://testnet-rpc.monad.xyz"
+reference_poll_sec = 15
 
 [alerts.telegram]
 # Optional. Leave bot_token empty to send alerts to stdout only — handy
@@ -16,29 +28,99 @@ bot_token = ""
 chat_id = 0
 topic_id = 0  # 0 or omit if the group has no topics
 source_tag = "monad-ops"
+# Severities that never reach Telegram. INFO events still show on the
+# dashboard, in /alerts and in the API — this is why a single reorg
+# divergence is visible without paging you.
+drop_severities = ["info"]
 
 [rules.stall]
+# Gap measured against the block's own produced timestamp, not our
+# receive time, so a slow tailer cannot fake a stall.
 warn_after_sec = 10
 critical_after_sec = 30
 
 [rules.retry_spike]
 window = 60
-warn_pct = 50.0
+warn_pct = 65.0
 critical_pct = 75.0
+# Quiet-period gate: suppress arming while the window's average tx per
+# block is below this. On an idle network one retried tx of three is 33%
+# retry_pct, which is noise. Gates arming only — RECOVERED still fires.
+min_window_tx_avg = 50.0
+
+[rules.reference_lag]
+# Blocks behind the reference RPC needed to arm. Testnet block time is
+# ~400 ms, so 15 blocks ≈ 6 s and 60 ≈ 24 s — both well above jitter.
+warn_blocks = 15
+critical_blocks = 60
+# Consecutive samples needed to confirm a state change.
+window = 2
+
+[rules.reorg]
+# A single execution-layer divergence is INFO; cluster_threshold of them
+# inside cluster_window_sec arms WARN. See docs/rules.md — this measures
+# pre-finalization re-execution, not a chain rollback.
+cluster_window_sec = 1800
+cluster_threshold = 3
+# Drives the dashboard's "recent reorgs" count. Deliberately decoupled
+# from the cluster window: you want a 24h overview with no cluster open.
+recent_window_sec = 86400
+
+[rules.block_processing_slowdown]
+# Predictive: fires while blocks still flow but median total_us has
+# shifted into stress territory. Calibrated on the 2026-04-20 stress
+# test (1.2 ms quiet -> 24.6 ms mid-stress -> 81.3 ms peak).
+window = 120
+warn_us = 10000
+critical_us = 50000
 
 [rules.network_layer_signal]
 # Aggregate rate of monad-bft network-layer errors (decrypt-fail +
-# session-timeout + timestamp-invalid) per rolling 5-min window.
+# session-timeout + timestamp-invalid) per rolling window.
 # Arm at p99.7/p99.9 of the 30d distribution (2026-06-12 audit);
 # disarm ~0.5x arm + 600s recovery confirmation to kill boundary flap.
+window_sec = 300
 warn_count = 25
 critical_count = 50
 warn_disarm_count = 12
 critical_disarm_count = 25
 recovery_confirm_sec = 600.0
+# Peer-diversity gates. One chronically desynced neighbour can cross the
+# volume thresholds alone with no chain-side stress behind it. Set a
+# tier to 1 to disable its gate.
+warn_min_unique_peers = 2
+critical_min_unique_peers = 3
+
+[rules.process_restart]
+# Watches the InvocationID of each unit in [node].services and fires
+# WARN the moment one restarts. First sight is silent.
+poll_interval_sec = 60
+
+[rules.waltrace_flood]
+# monad-bft v0.14.5 "waltrace thread stopped" flood — WAL persistence
+# silently off while every other metric looks healthy. Fixed in v0.15.0;
+# keep enabled if you run an affected release.
+window_sec = 60
+warn_count = 10
+critical_after_sec = 900
+# Snapshot the WAL dir + journal pre-context when the rule arms, before
+# the hourly cleanup deletes the 0-byte chunk that proves it.
+capture = true
+wal_dir = "/home/monad/monad-bft/wal"
 
 [rules.dedup]
+# Repeat alerts on the same key are suppressed for this long.
+# RECOVERED bypasses it so the all-clear is never delayed.
 cooldown_sec = 300
+
+[tailer]
+# journalctl-follow self-heal. A live `journalctl -f` can stop
+# delivering lines after a rotation with no EOF and no error, which is
+# what froze ingestion for 30h on 2026-06-05. Reads are bounded and the
+# child is respawned on silence; repeated respawns escalate to CRITICAL.
+idle_timeout_sec = 30.0
+max_respawns = 10
+respawn_window_sec = 300.0
 
 [persistence]
 # Persist blocks and alerts to SQLite so they survive restarts and can
@@ -60,22 +142,48 @@ rpc_timeout_sec = 5.0
 # Path to the contract label registry JSON. Missing file = empty map.
 path = "labels.json"
 
-# [validator_set]
-# Active validator-set snapshot from the staking precompile (powers
-# the "active validator set" tile on the dashboard). Default enabled,
-# 5-min poll cadence — set itself only changes on epoch boundaries.
-# enabled = true
-# poll_interval_sec = 300
-# timeout_sec = 10.0
+[retention]
+# Background pruning of historical rows. OFF by default, meaning the
+# database accrues forever — safe for a fresh deployment where the full
+# stress-test archive matters. Turn it on once you're past the events
+# you care about; testnet writes ~216K blocks/day plus aggregates.
+enabled = false
+keep_days = 14
+interval_hours = 24
 
-# [operator]
-# Public identity surface for /profile/<handle> — operator-readiness
-# profile page aggregating uptime, version compliance, reorg counts,
+[version_watch]
+# Hourly check that the installed monad package is current. Reads the
+# apt repo's Packages.gz directly and compares against dpkg-query, so it
+# needs neither `apt-get update` nor sudo. Emits INFO on a new stable
+# release plus a daily reminder while the upgrade is outstanding.
+# Set enabled = false if the package wasn't installed via apt.
+enabled = true
+package = "monad"
+poll_interval_sec = 3600
+reminder_interval_sec = 86400
+timeout_sec = 20.0
+# Pre-release tags that never count as an available upgrade.
+skip_substrings = ["-debug", "-preview", "~preview", "~rc", "-rc"]
+# Only override if you mirror the apt repo.
+# packages_url = "https://pkg.category.xyz/dists/noble/main/binary-amd64/Packages.gz"
+
+[validator_set]
+# Active validator-set snapshot from the staking precompile (powers
+# the "active validator set" tile on the dashboard). The set changes on
+# epoch boundaries, so a 5-min poll is generous.
+enabled = true
+poll_interval_sec = 300
+timeout_sec = 10.0
+
+[operator]
+# Public identity surface for /profile/<handle> — an operator-readiness
+# page aggregating uptime, version compliance, reorg counts,
 # validator-timeout %, base-fee response and links to public artefacts.
-# Fill in the handle to render the page; leave empty to disable.
-# enabled = true
-# handle = ""
-# region = ""
-# chain = "testnet"
-# since_date = ""
-# public_repo = ""
+# The route exists whenever enabled, but the page only renders once
+# handle is filled in. Set enabled = false to remove the route.
+enabled = true
+handle = ""
+region = ""
+chain = "testnet"
+since_date = ""
+public_repo = ""
