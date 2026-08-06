@@ -145,10 +145,11 @@ class BlockProcessingSlowdownRuleConfig(BaseModel):
 class ReorgRuleConfig(BaseModel):
     """Cluster-based severity for the reorg detector.
 
-    Default behaviour: a single reorg is WARN. Three reorgs inside a
-    30-minute window escalate to CRITICAL. Tuned against the 23-reorg
-    multi-day window from 2026-04-19, where five clusters carried the
-    operationally-interesting signal and isolated events were noise.
+    Post-2026-05-03 reframe: a single divergence is INFO (visible on the
+    dashboard, dropped by the Telegram sink); three inside a 30-minute
+    window arm WARN. Tuned against the 23-reorg multi-day window from
+    2026-04-19, where five clusters carried the operationally
+    interesting signal and isolated events were noise.
     """
     cluster_window_sec: int = 30 * 60
     cluster_threshold: int = 3
