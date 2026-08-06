@@ -59,7 +59,9 @@ class AssertionRule:
             AssertionKind.RUST_PANIC: "monad process panicked",
             AssertionKind.QC_OVERSHOOT: "consensus QC overshoot (statesync needed)",
             AssertionKind.CHUNK_EXHAUSTION: "TrieDB chunk exhaustion",
-            AssertionKind.IO_URING_INIT: "io_uring init failure (kernel / sysctl / container config)",
+            AssertionKind.IO_URING_INIT: (
+                "io_uring init failure (kernel / sysctl / container config)"
+            ),
             AssertionKind.EVENT_RING_MMAP: "event-ring mmap failure on startup (intermittent)",
             AssertionKind.GENERIC_FATAL: "FATAL log line",
         }

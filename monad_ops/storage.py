@@ -45,7 +45,9 @@ CREATE TABLE IF NOT EXISTS blocks (
     gas_per_sec_effective INTEGER NOT NULL,
     gas_per_sec_avg       INTEGER NOT NULL,
     active_chunks         INTEGER NOT NULL,
-    storage_cache_size    INTEGER NOT NULL  -- formerly `slow_chunks`; renamed 2026-05-19 after source dive confirmed sc=storage LRU cache size, not chunks
+    -- formerly `slow_chunks`; renamed 2026-05-19 after a source dive
+    -- confirmed sc = storage LRU cache size, not chunks
+    storage_cache_size    INTEGER NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_blocks_ts ON blocks (timestamp_ms);
@@ -818,11 +820,14 @@ class Storage:
         where = []
         params: list = []
         if from_ts is not None:
-            where.append("ts >= ?"); params.append(float(from_ts))
+            where.append("ts >= ?")
+            params.append(float(from_ts))
         if to_ts is not None:
-            where.append("ts <= ?"); params.append(float(to_ts))
+            where.append("ts <= ?")
+            params.append(float(to_ts))
         if severity:
-            where.append("severity = ?"); params.append(severity)
+            where.append("severity = ?")
+            params.append(severity)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         params.append(max(1, min(int(limit), 5000)))
         sql = (
@@ -912,7 +917,9 @@ class Storage:
         for e in envelopes:
             if merged:
                 prev = merged[-1]
-                prev_end = prev["to_ts_ms"] if prev["to_ts_ms"] is not None else int(time.time() * 1000)
+                prev_end = (
+                    prev["to_ts_ms"] if prev["to_ts_ms"] is not None else int(time.time() * 1000)
+                )
                 gap_ms = e["from_ts_ms"] - prev_end
                 if gap_ms < merge_gap_sec * 1000:
                     prev["to_ts_ms"] = e["to_ts_ms"]

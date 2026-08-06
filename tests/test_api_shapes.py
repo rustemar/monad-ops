@@ -428,7 +428,9 @@ async def test_alert_endpoints_carry_code_color(
         "info": "green",
     }
     for payload_name, payload in (
-        ("live", live), ("history", history), ("state.current_alerts", state_body["current_alerts"]),
+        ("live", live),
+        ("history", history),
+        ("state.current_alerts", state_body["current_alerts"]),
     ):
         assert payload, f"{payload_name} empty — test setup issue"
         for a in payload:
@@ -757,9 +759,13 @@ async def test_api_block_detail_shape_with_data(
         )
     # Seed blocks 100..104 and a per-(block, contract) row for block 102.
     for n in range(100, 105):
-        state_with_storage.storage.write_block(mk(n, rtp=50.0 if n == 102 else 0.0, tx=10, retried=5 if n == 102 else 0))
+        state_with_storage.storage.write_block(
+            mk(n, rtp=50.0 if n == 102 else 0.0, tx=10, retried=5 if n == 102 else 0)
+        )
     state_with_storage.storage.write_tx_contract_block([
-        ContractBlockAgg(block_number=102, to_addr="0x" + "ab" * 20, tx_count=7, total_gas=1_000_000),
+        ContractBlockAgg(
+            block_number=102, to_addr="0x" + "ab" * 20, tx_count=7, total_gas=1_000_000
+        ),
         ContractBlockAgg(block_number=102, to_addr="0x" + "cd" * 20, tx_count=3, total_gas=500_000),
     ])
     r = await client.get("/api/blocks/102", params={"neighbor_window": 2, "top_contracts_limit": 5})
@@ -805,7 +811,10 @@ async def test_api_contract_detail_shape_empty_window(client: httpx.AsyncClient)
     )
     assert r.status_code == 200
     body = r.json()
-    for k in ("to_addr", "window", "stats", "dominance", "peak_block", "rank", "hourly", "label", "category"):
+    for k in (
+        "to_addr", "window", "stats", "dominance", "peak_block", "rank", "hourly",
+        "label", "category",
+    ):
         assert k in body
     assert body["to_addr"] == "0x" + "0" * 40
     assert body["stats"]["blocks_appeared"] == 0

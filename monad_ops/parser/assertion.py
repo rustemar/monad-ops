@@ -9,7 +9,8 @@ failure the community has actually hit, not speculation.
 Reference incidents (see wiki/pains/validator.md for attribution):
   * ProofLine stall 2026-04-16: ``Assertion 'block_cache.emplace(...).second' failed``
   * Karlo Endorphine 2026-03-02: ``monad-execution/category/core/io/ring.cpp:45: ... Assertion ...``
-  * Unit410 consensus panic 2025-12-04: ``thread 'main' panicked at ... high qc too far ahead of block tree root``
+  * Unit410 consensus panic 2025-12-04:
+    ``thread 'main' panicked at ... high qc too far ahead of block tree root``
   * Nodes.Guru halt 2026-04-14: ``Disk usage: 0.9999. Chunks: 8100 fast, 73 slow, 1 free``
 
 This module only detects and classifies. Dedup and alerting happen in

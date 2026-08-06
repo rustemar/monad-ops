@@ -28,7 +28,7 @@ def _load_fixture() -> list[str]:
 def test_parses_qc_round_advance() -> None:
     """A normal QC-decided round closure carries epoch + round."""
     lines = _load_fixture()
-    qc_lines = [l for l in lines if '"advancing round","certificate":"Qc' in l]
+    qc_lines = [ln for ln in lines if '"advancing round","certificate":"Qc' in ln]
     assert qc_lines, "fixture has no Qc-certificate lines — fixture corrupted"
 
     ev = parse_consensus(qc_lines[0])
@@ -48,7 +48,7 @@ def test_parses_tc_round_advance() -> None:
     window — verified against the source fixture.
     """
     lines = _load_fixture()
-    tc_lines = [l for l in lines if '"advancing round","certificate":"Tc' in l]
+    tc_lines = [ln for ln in lines if '"advancing round","certificate":"Tc' in ln]
     assert len(tc_lines) == 1, "fixture should have exactly one TC line"
 
     ev = parse_consensus(tc_lines[0])
@@ -62,7 +62,7 @@ def test_parses_local_timeout() -> None:
     """Local pacemaker fire carries round + leader + next_leader,
     but NOT epoch (the message simply doesn't include it)."""
     lines = _load_fixture()
-    lt_lines = [l for l in lines if '"local timeout"' in l]
+    lt_lines = [ln for ln in lines if '"local timeout"' in ln]
     assert len(lt_lines) == 1, "fixture should have exactly one local-timeout line"
 
     ev = parse_consensus(lt_lines[0])
@@ -154,7 +154,7 @@ def test_extracted_ts_ms_is_monotonic_in_fixture() -> None:
     """Sanity: parsing the whole fixture in order yields ts_ms that
     never goes backwards — guards against ts extraction silently
     pulling the wrong field."""
-    parsed = [parse_consensus(l) for l in _load_fixture()]
+    parsed = [parse_consensus(ln) for ln in _load_fixture()]
     parsed = [p for p in parsed if p is not None]
     assert len(parsed) >= 70, "fixture should yield at least 70 events"
     timestamps = [p.ts_ms for p in parsed]
@@ -231,7 +231,7 @@ def test_full_fixture_yields_expected_distribution() -> None:
     """End-to-end: count of TC vs QC vs local timeout matches what we
     captured. If this breaks, either the regex drifted or the fixture
     file got corrupted."""
-    parsed = [parse_consensus(l) for l in _load_fixture()]
+    parsed = [parse_consensus(ln) for ln in _load_fixture()]
     parsed = [p for p in parsed if p is not None]
 
     qc = sum(1 for p in parsed if p.kind is ConsensusEventKind.ROUND_ADVANCE_QC)

@@ -118,7 +118,7 @@ def build_app(
     _BLOCKS_TTL = 2.0         # in-memory recent-blocks tail
     _ALERTS_TTL = 5.0         # in-memory recent-alerts tail
     _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
-    _VERSION_TTL = 30.0       # version_watch loop runs hourly; cache short so a fresh upgrade clears fast
+    _VERSION_TTL = 30.0       # version_watch runs hourly; short cache surfaces an upgrade fast
     _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
     _STRESS_EVENTS_TTL = 10.0 # alerts table append-only; live envelope updates need fresh reads
     _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable

@@ -127,7 +127,12 @@ def test_get_contract_detail_dominance_buckets(tmp_path: Path) -> None:
     for n, tx_total, my_tx, rtp in cfg:
         storage.write_block(_mk_block(n, rtp=rtp, tx=tx_total, retried=0))
         storage.write_tx_contract_block([
-            ContractBlockAgg(block_number=n, to_addr="0x" + "ab" * 20, tx_count=my_tx, total_gas=1000 * my_tx),
+            ContractBlockAgg(
+                block_number=n,
+                to_addr="0x" + "ab" * 20,
+                tx_count=my_tx,
+                total_gas=1000 * my_tx,
+            ),
         ])
     d = storage.get_contract_detail(
         "0x" + "ab" * 20,
@@ -666,7 +671,10 @@ def _seed_reorg(
             severity=Severity.CRITICAL,
             key=f"reorg:{block_number}:{new_id}",
             title="Chain reorg detected",
-            detail=f"Block #{block_number} id changed: {old_id[:10]}… → {new_id[:10]}…. Total reorgs observed: 1.",
+            detail=(
+                f"Block #{block_number} id changed: {old_id[:10]}… → {new_id[:10]}…. "
+                "Total reorgs observed: 1."
+            ),
         ),
         ts=ts,
     )

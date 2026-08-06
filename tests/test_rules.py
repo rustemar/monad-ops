@@ -710,7 +710,9 @@ class TestBlockProcessingSlowdownRule:
     still keeping up but per-block ``total_us`` has shifted into a
     danger zone — gives operators time to react before cadence drops."""
 
-    def _rule(self, window: int = 5, warn_us: int = 10_000, critical_us: int = 50_000) -> BlockProcessingSlowdownRule:
+    def _rule(
+        self, window: int = 5, warn_us: int = 10_000, critical_us: int = 50_000
+    ) -> BlockProcessingSlowdownRule:
         # Tiny window so the tests don't have to feed 120 blocks each.
         return BlockProcessingSlowdownRule(
             window=window, warn_us=warn_us, critical_us=critical_us
@@ -934,7 +936,9 @@ class TestNetworkLayerSignalRule:
     disagreement. Rule is per-event for the count and per-tick for
     natural de-arming as events fall out of the rolling window."""
 
-    def _ev(self, kind: ConsensusEventKind, ts_sec: float, peer: str | None = None) -> ConsensusEvent:
+    def _ev(
+        self, kind: ConsensusEventKind, ts_sec: float, peer: str | None = None
+    ) -> ConsensusEvent:
         return ConsensusEvent(
             kind=kind, round=0, epoch=None, ts_ms=int(ts_sec * 1000), peer=peer,
         )

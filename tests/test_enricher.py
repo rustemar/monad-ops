@@ -150,10 +150,9 @@ def test_top_retried_contracts_aggregation(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
 
     # five clean blocks: 100, 200 (A); 500, 600, 700 (B)
-    # three retried blocks: 300, 400, 800 (A in each; also 400 has B)
+    # three retried blocks: 300, 400, 800 — A in each, B in none
     clean = [(100, "A"), (200, "A"), (500, "B"), (600, "B"), (700, "B")]
     retried = [(300, "A"), (400, "A"), (800, "A")]
-    also_in_400 = ("400", "B")
 
     blocks_seen: dict[int, float] = {}
     for bn, _ in clean:

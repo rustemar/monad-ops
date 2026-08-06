@@ -321,9 +321,12 @@ class NetworkLayerSignalRule:
         )
 
     def _per_class_breakdown(self) -> str:
-        decrypt = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_DECRYPT_FAIL)
-        session = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_SESSION_TIMEOUT)
-        ts_inv = sum(1 for _, k, _ in self._events if k == ConsensusEventKind.NETWORK_TIMESTAMP_INVALID)
+        def _count(kind: ConsensusEventKind) -> int:
+            return sum(1 for _, k, _ in self._events if k == kind)
+
+        decrypt = _count(ConsensusEventKind.NETWORK_DECRYPT_FAIL)
+        session = _count(ConsensusEventKind.NETWORK_SESSION_TIMEOUT)
+        ts_inv = _count(ConsensusEventKind.NETWORK_TIMESTAMP_INVALID)
         return (
             f"By class: decrypt-fail={decrypt}, "
             f"session-timeout={session}, "
