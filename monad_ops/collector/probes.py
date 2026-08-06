@@ -332,7 +332,10 @@ async def probe_udp_config() -> ProbeResult:
             return ProbeResult(
                 name="udp_config",
                 status="warn",
-                summary="node.toml missing authenticated_bind_address_port (2026-03-25 deprecation)",
+                summary=(
+                    "node.toml missing authenticated_bind_address_port "
+                    "(2026-03-25 deprecation)"
+                ),
                 details={"source": "node.toml"},
             )
     except PermissionError:
@@ -348,13 +351,22 @@ async def probe_udp_config() -> ProbeResult:
             name="udp_config",
             status="ok",
             summary="authenticated UDP port :8001 is listening (config not readable)",
-            details={"auth_port": 8001, "clear_port": 8000 if has_8000 else None, "source": "socket-fallback"},
+            details={
+                "auth_port": 8001,
+                "clear_port": 8000 if has_8000 else None,
+                "source": "socket-fallback",
+            },
         )
     return ProbeResult(
         name="udp_config",
         status="unknown",
         summary="node.toml not readable and :8001 not detected",
-        details={"hint": "grant group read to node.toml or align the service user with the file's owner/group"},
+        details={
+            "hint": (
+                "grant group read to node.toml or align the service user "
+                "with the file's owner/group"
+            )
+        },
     )
 
 
@@ -476,7 +488,10 @@ async def probe_fd_limits(service: str = "monad-execution") -> ProbeResult:
         return ProbeResult(
             name="fd_limits",
             status="critical",
-            summary=f"{service} nofile soft={soft} < {_FD_LIMIT_CRITICAL} — EMFILE imminent under load",
+            summary=(
+                f"{service} nofile soft={soft} < {_FD_LIMIT_CRITICAL} "
+                "— EMFILE imminent under load"
+            ),
             details=details,
         )
     if soft < _FD_LIMIT_WARN:

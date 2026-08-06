@@ -76,9 +76,9 @@ def test_multiple_bracketed_uses_median() -> None:
         557: (27_849_877, 27_900_000),  # bracketed (556+558 in map)
         558: (27_900_001, 27_910_000),  # current
     }
-    for ep, (f, l) in sizes.items():
-        s.observe_epoch(epoch=ep, seq_num=f)
-        s.observe_epoch(epoch=ep, seq_num=l)
+    for ep, (lo, hi) in sizes.items():
+        s.observe_epoch(epoch=ep, seq_num=lo)
+        s.observe_epoch(epoch=ep, seq_num=hi)
     cur, blocks_in, typical, _ = s._epoch_progress()
     assert cur == 558
     # Bracketed: 556 (49,877) and 557 (50,124). Median index = 1 (sorted).

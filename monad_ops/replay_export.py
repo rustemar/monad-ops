@@ -288,18 +288,23 @@ const REPLAY = {data_json};
   const vtp = c.validator_timeout_pct;
   $("k-vtp").textContent = fmtPct(vtp);
   $("k-vtp").className = "kpi-value " +
-    (vtp == null ? "" : (vtp < 1 ? "val-ok" : vtp < 3 ? "val-mid" : vtp < 5 ? "val-warn" : "val-crit"));
+    (vtp == null
+      ? ""
+      : vtp < 1 ? "val-ok" : vtp < 3 ? "val-mid" : vtp < 5 ? "val-warn" : "val-crit");
   $("k-vtp-sub").textContent =
-    `Foundation target <3% · ${{fmtInt(c.rounds_total)}} rounds, ${{fmtInt(c.rounds_tc)}} closed by TC`;
+    `Foundation target <3% · ${{fmtInt(c.rounds_total)}} rounds, ` +
+    `${{fmtInt(c.rounds_tc)}} closed by TC`;
 
   $("k-basefee").textContent = bf.base_fee_gwei_avg != null
     ? `${{bf.base_fee_gwei_avg.toFixed(1)}} gwei` : "—";
   $("k-basefee-sub").textContent =
-    `min ${{bf.base_fee_gwei_min ?? "—"}} · max ${{bf.base_fee_gwei_max ?? "—"}} · ${{fmtInt(bf.samples)}} blocks sampled`;
+    `min ${{bf.base_fee_gwei_min ?? "—"}} · max ${{bf.base_fee_gwei_max ?? "—"}} · ` +
+    `${{fmtInt(bf.samples)}} blocks sampled`;
 
   $("k-blocks").textContent = fmtInt(a.blocks);
   $("k-blocks-sub").textContent =
-    `peak tps ${{fmtCompact(a.peak_tps)}} · total tx ${{fmtCompact(a.total_tx)}} · avg rtp ${{fmtPct(a.avg_rtp)}}`;
+    `peak tps ${{fmtCompact(a.peak_tps)}} · total tx ${{fmtCompact(a.total_tx)}} · ` +
+    `avg rtp ${{fmtPct(a.avg_rtp)}}`;
 
   $("k-lt").textContent = fmtInt(c.local_timeouts);
   $("k-lt-sub").textContent =

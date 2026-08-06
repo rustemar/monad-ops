@@ -46,7 +46,7 @@ from monad_ops.parser import drift
 class ConsensusEventKind(StrEnum):
     """Classes of consensus log line we surface."""
     ROUND_ADVANCE_QC = "round_advance_qc"   # round closed by QuorumCertificate (normal)
-    ROUND_ADVANCE_TC = "round_advance_tc"   # round closed by TimeoutCertificate (chain-wide timeout)
+    ROUND_ADVANCE_TC = "round_advance_tc"   # round closed by TimeoutCertificate (chain-wide)
     LOCAL_TIMEOUT = "local_timeout"         # this node's pacemaker fired
     PROPOSAL = "proposal"                    # proposal message with base_fee for the fee curve
     # Network-layer signals from monad-bft. RaptorCast UDP-auth decrypt
@@ -133,7 +133,8 @@ _LOCAL_TIMEOUT_RX = re.compile(
 # determined by the OUTER prefix; nested Qc inside a Tc (TimeoutCert
 # carries the high_extend QC) does not flip the classification.
 _ADVANCING_ROUND_QC_RX = re.compile(
-    r'"advancing round","certificate":"Qc\(QC \{ info: Vote \{ id: [0-9a-f.]+, epoch: (\d+), round: (\d+) \}'
+    r'"advancing round","certificate":"Qc\(QC \{ info: Vote \{ id: [0-9a-f.]+, '
+    r'epoch: (\d+), round: (\d+) \}'
 )
 _ADVANCING_ROUND_TC_RX = re.compile(
     r'"advancing round","certificate":"Tc\(TimeoutCertificate \{ epoch: (\d+), round: (\d+),'

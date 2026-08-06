@@ -19,7 +19,10 @@ from monad_ops.parser.assertion import (
 
 # ── ProofLine stall 2026-04-16 (monad-execution) ──────────────────────
 def test_cxx_assertion_proofline() -> None:
-    line = "monad-execution crashed with an internal assertion: Assertion 'block_cache.emplace(...).second' failed"
+    line = (
+        "monad-execution crashed with an internal assertion: "
+        "Assertion 'block_cache.emplace(...).second' failed"
+    )
     ev = parse_assertion(line)
     assert ev is not None
     assert ev.kind is AssertionKind.CXX_ASSERT

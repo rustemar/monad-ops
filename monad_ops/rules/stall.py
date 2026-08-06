@@ -109,11 +109,13 @@ class StallRule:
         # If we were armed (WARN/CRITICAL), arm the recovery countdown
         # instead of firing RECOVERED immediately. on_tick will fire
         # RECOVERED once the confirm window elapses with no new arm.
-        if prev_state in (Severity.WARN, Severity.CRITICAL):
-            if self._recovery_pending_since is None:
-                self._recovery_pending_since = self._last_seen_wall
-                if self._peak_severity is None:
-                    self._peak_severity = prev_state
+        if (
+            prev_state in (Severity.WARN, Severity.CRITICAL)
+            and self._recovery_pending_since is None
+        ):
+            self._recovery_pending_since = self._last_seen_wall
+            if self._peak_severity is None:
+                self._peak_severity = prev_state
         return None
 
     def on_tick(self, now_sec: float | None = None) -> AlertEvent | None:

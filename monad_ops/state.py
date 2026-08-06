@@ -256,8 +256,8 @@ class State:
             # report given the same map state.
             epochs_set = set(self._epochs)
             bracketed = [
-                (l - f + 1)
-                for ep, (f, l) in self._epochs.items()
+                (hi - lo + 1)
+                for ep, (lo, hi) in self._epochs.items()
                 if (ep - 1) in epochs_set and (ep + 1) in epochs_set
             ]
             if bracketed:
@@ -420,8 +420,8 @@ class State:
             blocks_in = last - first + 1
             epochs_set = set(self._epochs)
             bracketed_sizes = [
-                (l - f + 1)
-                for ep, (f, l) in self._epochs.items()
+                (hi - lo + 1)
+                for ep, (lo, hi) in self._epochs.items()
                 if (ep - 1) in epochs_set and (ep + 1) in epochs_set
             ]
             carried = self._carried_typical_length
@@ -748,8 +748,12 @@ class State:
         # unit consistent with `tps_effective` (absolute tx/sec) and
         # lets the UI format compactly (3211 Mgas/s → "3.2B gas/sec").
         # Caught by iter-5 audit §A1.
-        gas_eff_peak_block = max(w1m, key=lambda b: b.gas_per_sec_effective, default=None) if w1m else None
-        gas_eff_peak = (gas_eff_peak_block.gas_per_sec_effective if gas_eff_peak_block else 0) * 1_000_000
+        gas_eff_peak_block = max(
+            w1m, key=lambda b: b.gas_per_sec_effective, default=None
+        )
+        gas_eff_peak = (
+            gas_eff_peak_block.gas_per_sec_effective if gas_eff_peak_block else 0
+        ) * 1_000_000
 
         with self._lock:
             alerts_tail = list(zip(self._alerts, self._alert_ts, strict=True))[-10:]

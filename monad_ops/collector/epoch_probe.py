@@ -25,6 +25,7 @@ rotation cadence.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from dataclasses import dataclass
@@ -113,8 +114,8 @@ async def scan_epoch_history(
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
             except (TimeoutError, ProcessLookupError):
-                try: proc.kill()
-                except ProcessLookupError: pass
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
     return results
 
 
@@ -190,8 +191,8 @@ async def find_current_epoch_first_seq(
                 proc.terminate()
                 await asyncio.wait_for(proc.wait(), timeout=3)
             except (TimeoutError, ProcessLookupError):
-                try: proc.kill()
-                except ProcessLookupError: pass
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
     return smallest
 
 
@@ -234,10 +235,8 @@ async def probe_epoch(
         # full pipe — a journal flood (2026-06-12: waltrace, ~250
         # lines/s) left 34 stuck journalctl readers this way.
         proc.kill()
-        try:
+        with contextlib.suppress(ProcessLookupError):
             await proc.wait()
-        except ProcessLookupError:
-            pass
         return EpochSample(epoch=0, seq_num=0, checked_ms=now_ms, error=f"probe: {e}")
     text = out.decode("utf-8", errors="replace")
     last_seq: int | None = None

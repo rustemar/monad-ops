@@ -93,7 +93,9 @@ async def _staking_call(rpc_url: str, selector_and_args: str, timeout_sec: float
     return await asyncio.to_thread(_do)
 
 
-async def _fetch_set_count(rpc_url: str, selector: str, timeout_sec: float) -> tuple[int | None, int | None]:
+async def _fetch_set_count(
+    rpc_url: str, selector: str, timeout_sec: float
+) -> tuple[int | None, int | None]:
     """Page through ``get*ValidatorSet`` until ``is_done``.
 
     Returns ``(total_count, last_id)`` where ``last_id`` is the lowest-

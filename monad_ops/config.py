@@ -16,7 +16,9 @@ from pydantic import BaseModel, Field
 class NodeConfig(BaseModel):
     name: str
     rpc_url: str = "http://127.0.0.1:8080"
-    services: list[str] = Field(default_factory=lambda: ["monad-bft", "monad-execution", "monad-rpc"])
+    services: list[str] = Field(
+        default_factory=lambda: ["monad-bft", "monad-execution", "monad-rpc"]
+    )
     # Public reference RPC used to answer "is the whole network halted
     # or just my node?" — compared against local tip in the dashboard.
     # Empty string disables the reference probe.
@@ -200,7 +202,9 @@ class RulesConfig(BaseModel):
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
     reference_lag: ReferenceLagRuleConfig = ReferenceLagRuleConfig()
     reorg: ReorgRuleConfig = ReorgRuleConfig()
-    block_processing_slowdown: BlockProcessingSlowdownRuleConfig = BlockProcessingSlowdownRuleConfig()
+    block_processing_slowdown: BlockProcessingSlowdownRuleConfig = (
+        BlockProcessingSlowdownRuleConfig()
+    )
     network_layer_signal: NetworkLayerSignalRuleConfig = NetworkLayerSignalRuleConfig()
     process_restart: ProcessRestartRuleConfig = ProcessRestartRuleConfig()
     waltrace_flood: WaltraceFloodRuleConfig = WaltraceFloodRuleConfig()
