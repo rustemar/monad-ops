@@ -29,8 +29,10 @@ import structlog
 
 from monad_ops.parser import (
     AssertionEvent,
+    DualRoot,
     ExecBlock,
     parse_assertion,
+    parse_dual_root,
     parse_exec_block,
 )
 
@@ -189,12 +191,13 @@ async def tail_execution_blocks(
     max_respawns: int = DEFAULT_MAX_RESPAWNS,
     respawn_window_sec: float = DEFAULT_RESPAWN_WINDOW_SEC,
     spawn=asyncio.create_subprocess_exec,
-) -> AsyncIterator[ExecBlock | AssertionEvent | TailError]:
+) -> AsyncIterator[ExecBlock | DualRoot | AssertionEvent | TailError]:
     """Yield records from journalctl: per-block summaries + critical incidents.
 
     Parsers tried in order: ``parse_exec_block`` first (by far the most
-    frequent line type), then ``parse_assertion``. Lines matching
-    neither are silently skipped.
+    frequent line type), then ``parse_dual_root`` (same block cadence,
+    and only present during the MIP-8 migration), then
+    ``parse_assertion``. Lines matching none are silently skipped.
 
     Modes:
       * ``follow=True, lookback=None``       — tail live from now (default).
@@ -216,6 +219,10 @@ async def tail_execution_blocks(
         block = parse_exec_block(line)
         if block is not None:
             yield block
+            continue
+        dual = parse_dual_root(line)
+        if dual is not None:
+            yield dual
             continue
         event = parse_assertion(line)
         if event is not None:

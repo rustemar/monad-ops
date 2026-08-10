@@ -108,6 +108,21 @@ critical_after_sec = 900
 capture = true
 wal_dir = "/home/monad/monad-bft/wal"
 
+
+[rules.dual_write]
+# MIP-8 dual-write liveness — TEMPORARY, for the page-storage migration
+# window only. Alerts when exec blocks keep arriving without the
+# per-block state-root line that proves both timelines are being
+# written. Off by default: after phase C that line stops for good, which
+# is indistinguishable from the failure this watches for. Turn it off
+# BEFORE running phase C, then delete this section.
+enabled = false
+# Exec blocks received since the last dual-root line before WARN. The
+# line precedes its own block, so healthy is 1, not 0; minimum is 2.
+# 200 is ~60 s at 3.3 blk/s. WARN only by design.
+warn_after_blocks = 200
+recovery_confirm_blocks = 200
+
 [rules.dedup]
 # Repeat alerts on the same key are suppressed for this long.
 # RECOVERED bypasses it so the all-clear is never delayed.

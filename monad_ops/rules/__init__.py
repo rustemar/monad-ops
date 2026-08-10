@@ -1,5 +1,6 @@
 from monad_ops.rules.assertion import AssertionRule
 from monad_ops.rules.block_processing_slowdown import BlockProcessingSlowdownRule
+from monad_ops.rules.dual_write import DualWriteRule
 from monad_ops.rules.events import AlertEvent, CodeColor, Severity, code_color_for
 from monad_ops.rules.network_layer_signal import NetworkLayerSignalRule
 from monad_ops.rules.process_restart import ProcessRestartRule
@@ -15,6 +16,7 @@ __all__ = [
     "AssertionRule",
     "BlockProcessingSlowdownRule",
     "CodeColor",
+    "DualWriteRule",
     "NetworkLayerSignalRule",
     "ProcessRestartRule",
     "ReferenceLagRule",

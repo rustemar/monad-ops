@@ -18,11 +18,12 @@ dependency for the core view.
 
 - **Live dashboard** at `/` — recent blocks, retry rate, TPS, gas,
   epoch progress, top retried contracts.
-- **Alerts** — ten rules covering block stalls, retry-rate spikes,
+- **Alerts** — eleven rules covering block stalls, retry-rate spikes,
   execution-layer divergence, reference-RPC lag, assertion/panic log
   patterns, per-block processing slowdown, monad-bft network-layer
-  errors, service restarts, the v0.14.5 waltrace flood, and new package
-  releases. Telegram by default, dedup + hysteresis so you don't get
+  errors, service restarts, the v0.14.5 waltrace flood, MIP-8 dual-write
+  liveness, and new package releases. Telegram by default, dedup +
+  hysteresis so you don't get
   flapping. Full reference in [docs/rules.md](docs/rules.md).
 - **Host probes** — systemd state of monad services, key-backup age,
   TrieDB disk health, UDP config, filesystem usage, `fd_limits`.
@@ -239,7 +240,7 @@ monad_ops/
 ├── dashboard/          # Jinja templates, static JS/CSS/Chart.js
 ├── enricher/           # eth_getBlockReceipts worker
 ├── parser/             # __exec_block / assertion line parsers
-├── rules/              # the ten alert-emitting rules (docs/rules.md)
+├── rules/              # the eleven alert-emitting rules (docs/rules.md)
 ├── alerts/             # sinks (Telegram, stdout, deduping)
 ├── state.py            # in-memory snapshot + EpochTracker
 ├── storage.py          # SQLite schema, migrations, aggregates
