@@ -33,12 +33,18 @@ EXEC_BLOCK = "exec_block"
 CONSENSUS_ADVANCING_ROUND = "consensus_advancing_round"
 CONSENSUS_LOCAL_TIMEOUT = "consensus_local_timeout"
 CONSENSUS_PROPOSAL = "consensus_proposal"
+# Only emitted while the node runs both MIP-8 timelines. Registered
+# unconditionally so ``ok: 0`` is the visible answer on a node that has
+# not migrated, rather than a missing key — and so the counter is a
+# backstop for the dual-write watch even with that rule switched off.
+DUAL_ROOT = "dual_root"
 
 KINDS: tuple[str, ...] = (
     EXEC_BLOCK,
     CONSENSUS_ADVANCING_ROUND,
     CONSENSUS_LOCAL_TIMEOUT,
     CONSENSUS_PROPOSAL,
+    DUAL_ROOT,
 )
 
 # Drift arrives in floods when it arrives at all (every block, every

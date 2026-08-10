@@ -36,7 +36,13 @@ from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
 from monad_ops.enricher import EnrichmentWorker, ReceiptsClient
 from monad_ops.labels import ContractLabels
-from monad_ops.parser import AssertionEvent, ConsensusEvent, ConsensusEventKind, ExecBlock
+from monad_ops.parser import (
+    AssertionEvent,
+    ConsensusEvent,
+    ConsensusEventKind,
+    DualRoot,
+    ExecBlock,
+)
 from monad_ops.reorg_capture import (
     CaptureRequest,
     capture_reorg_journal,
@@ -48,6 +54,7 @@ from monad_ops.rules import (
     AlertEvent,
     AssertionRule,
     BlockProcessingSlowdownRule,
+    DualWriteRule,
     NetworkLayerSignalRule,
     ProcessRestartRule,
     ReferenceLagRule,
@@ -125,6 +132,11 @@ async def _collector_loop(
         critical_us=config.rules.block_processing_slowdown.critical_us,
     )
     assertion = AssertionRule()
+    dual_write = DualWriteRule(
+        enabled=config.rules.dual_write.enabled,
+        warn_after_blocks=config.rules.dual_write.warn_after_blocks,
+        recovery_confirm_blocks=config.rules.dual_write.recovery_confirm_blocks,
+    )
     reorg = ReorgRule(
         cluster_window_sec=config.rules.reorg.cluster_window_sec,
         cluster_threshold=config.rules.reorg.cluster_threshold,
@@ -219,6 +231,10 @@ async def _collector_loop(
                 await sink.deliver(assertion.on_event(item))
                 continue
 
+            if isinstance(item, DualRoot):
+                dual_write.on_dual_root(item)
+                continue
+
             block: ExecBlock = item
             await state.add_block_async(block)
             log.debug("block", n=block.block_number, tx=block.tx_count,
@@ -230,7 +246,8 @@ async def _collector_loop(
             retry_ev = retry.on_block(block)
             reorg_ev = reorg.on_block(block)
             bps_ev = bps.on_block(block)
-            for ev in _filter_none([stall_ev, retry_ev, reorg_ev, bps_ev]):
+            dual_ev = dual_write.on_block(block)
+            for ev in _filter_none([stall_ev, retry_ev, reorg_ev, bps_ev, dual_ev]):
                 await sink.deliver(ev)
             # Schedule a deferred journal snapshot whenever the reorg
             # rule fires. Fire-and-forget: the capture coroutine sleeps
@@ -1080,6 +1097,8 @@ async def _cmd_replay(args: argparse.Namespace) -> int:
     async for item in tail_execution_blocks(lookback=args.since, follow=False):
         if isinstance(item, TailError):
             break
+        if not isinstance(item, ExecBlock):
+            continue
         count += 1
         total_tx += item.tx_count
         total_retried += item.retried

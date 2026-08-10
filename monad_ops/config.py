@@ -198,6 +198,30 @@ class WaltraceFloodRuleConfig(BaseModel):
     wal_dir: str = "/home/monad/monad-bft/wal"
 
 
+class DualWriteRuleConfig(BaseModel):
+    """MIP-8 dual-write liveness, for the migration window only.
+
+    OFF by default: the line this watches exists only between phase A
+    and phase C, and its permanent disappearance at phase C looks exactly
+    like the failure being watched for. The operator owns the switch —
+    turn it off *before* running phase C.
+
+    Baseline measured on this node 2026-08-10, the day after phase A:
+    36,170 dual-root lines against 36,170 ``__exec_block`` lines, a
+    maximum of 1 exec block between consecutive dual-root lines, zero
+    block-number skips. Healthy is a hard 1, so ``warn_after_blocks``
+    sits 200x above the observed maximum (~60 s at 3.3 blk/s) and there
+    is no arm/disarm band — healthy is exactly 1, sick is unbounded,
+    nothing to flap on. WARN only by design; see the rule docstring.
+    """
+    enabled: bool = False
+    # Floor of 2, not 1: the dual-root line precedes its own block, so the
+    # healthy steady-state counter is 1. A threshold of 1 arms on every
+    # block of a perfectly healthy node and flaps WARN/RECOVERED forever.
+    warn_after_blocks: int = Field(default=200, ge=2)
+    recovery_confirm_blocks: int = Field(default=200, ge=1)
+
+
 class RulesConfig(BaseModel):
     stall: StallRuleConfig = StallRuleConfig()
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
@@ -209,6 +233,7 @@ class RulesConfig(BaseModel):
     network_layer_signal: NetworkLayerSignalRuleConfig = NetworkLayerSignalRuleConfig()
     process_restart: ProcessRestartRuleConfig = ProcessRestartRuleConfig()
     waltrace_flood: WaltraceFloodRuleConfig = WaltraceFloodRuleConfig()
+    dual_write: DualWriteRuleConfig = DualWriteRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

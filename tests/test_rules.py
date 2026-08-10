@@ -1,8 +1,9 @@
 from monad_ops.collector.process_restart import InvocationSnapshot
-from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
+from monad_ops.parser import ConsensusEvent, ConsensusEventKind, DualRoot, ExecBlock
 from monad_ops.rules import (
     BlockProcessingSlowdownRule,
     CodeColor,
+    DualWriteRule,
     NetworkLayerSignalRule,
     ProcessRestartRule,
     ReferenceLagRule,
@@ -1516,3 +1517,144 @@ class TestWaltraceFloodRule:
         # 899s after arming: still WARN.
         rule.on_event(self._ev(1040.0), now_sec=1040.0)
         assert rule.on_tick(now_sec=1049.0) is None
+
+
+class TestDualWriteRule:
+    """MIP-8 dual-write liveness.
+
+    The rule counts exec blocks *received* since the last dual-root
+    line. The regression lock is ``test_journal_gap_does_not_arm``: a
+    seconds-based or block-number-delta design fires there, and that is
+    the false positive this repo has already paid for twice.
+    """
+
+    @staticmethod
+    def _rule(**kw):
+        opts = dict(enabled=True, warn_after_blocks=10, recovery_confirm_blocks=5)
+        opts.update(kw)
+        return DualWriteRule(**opts)
+
+    @staticmethod
+    def _dual(n: int) -> DualRoot:
+        return DualRoot(
+            block_number=n,
+            primary_root=f"0x{n:064x}",
+            secondary_root=f"0x{n + 1:064x}",
+        )
+
+    def _healthy(self, rule, start: int, count: int):
+        """Feed `count` blocks each preceded by its dual-root line."""
+        out = []
+        for n in range(start, start + count):
+            rule.on_dual_root(self._dual(n))
+            out.append(rule.on_block(_block(n)))
+        return out
+
+    def test_steady_state_is_silent(self):
+        rule = self._rule()
+        assert all(ev is None for ev in self._healthy(rule, 1, 200))
+
+    def test_arms_once_after_the_threshold(self):
+        rule = self._rule()
+        self._healthy(rule, 1, 5)
+
+        # Dual-root lines stop; blocks keep arriving.
+        events = [rule.on_block(_block(n)) for n in range(100, 130)]
+        fired = [e for e in events if e is not None]
+        assert len(fired) == 1, "must arm exactly once, not once per block"
+
+        ev = fired[0]
+        assert ev.severity is Severity.WARN
+        assert ev.rule == "dual_write"
+        assert ev.key == "dual_write:warn"
+        # Never describe this as divergence — the roots differ by design.
+        assert "diverge" not in ev.detail.lower()
+
+    def test_never_escalates_to_critical(self):
+        # CRITICAL would trip the dashboard's isCriticalIncident
+        # catch-all and paint the public page red for something that is
+        # not a node outage.
+        rule = self._rule()
+        self._healthy(rule, 1, 5)
+        events = [rule.on_block(_block(n)) for n in range(100, 1000)]
+        assert all(
+            e.severity is not Severity.CRITICAL for e in events if e is not None
+        )
+
+    def test_journal_gap_does_not_arm(self):
+        """The regression lock.
+
+        A tailer respawn drops both line types together, so the rule
+        sees no arrivals at all across the gap — then resumes hundreds
+        of block numbers later. Counting arrivals must stay quiet;
+        counting seconds or block-number deltas would fire here.
+        """
+        rule = self._rule()
+        self._healthy(rule, 1, 5)
+
+        # 30 s of journal lost: nothing was received. Block numbers jump
+        # by ~100, far past warn_after_blocks=10.
+        events = self._healthy(rule, 5_000, 20)
+        assert all(ev is None for ev in events)
+
+    def test_enabled_on_a_node_that_is_not_dual_writing_still_fires(self):
+        """There is deliberately no "armed" concept.
+
+        "Never saw a dual-root line" and "stopped seeing them" are the
+        same condition and the same code path. If the operator turns
+        this on, dual-write not happening at all is exactly what they
+        asked to be told about — silence would be the fail-silent
+        outcome, which is the worse one for a pre-fork check.
+        """
+        rule = self._rule()
+        events = [rule.on_block(_block(n)) for n in range(1, 30)]
+        fired = [e for e in events if e is not None]
+        assert len(fired) == 1
+        assert fired[0].severity is Severity.WARN
+
+    def test_recovers_once_after_the_confirm_window(self):
+        rule = self._rule()
+        self._healthy(rule, 1, 5)
+        armed = [rule.on_block(_block(n)) for n in range(100, 130)]
+        assert any(e is not None for e in armed)
+
+        events = self._healthy(rule, 200, 20)
+        greens = [e for e in events if e is not None]
+        assert len(greens) == 1, "exactly one RECOVERED per envelope"
+        assert greens[0].severity is Severity.RECOVERED
+        assert greens[0].key == "dual_write"
+
+    def test_no_recovery_before_the_confirm_window(self):
+        rule = self._rule(recovery_confirm_blocks=50)
+        self._healthy(rule, 1, 5)
+        [rule.on_block(_block(n)) for n in range(100, 130)]
+        # Fewer clean blocks than the confirm window -> still no green.
+        assert all(ev is None for ev in self._healthy(rule, 200, 40))
+
+    def test_a_relapse_restarts_the_recovery_count(self):
+        rule = self._rule(recovery_confirm_blocks=5)
+        self._healthy(rule, 1, 5)
+        [rule.on_block(_block(n)) for n in range(100, 130)]
+
+        # Three clean blocks, then the dual-root line drops out again.
+        assert all(ev is None for ev in self._healthy(rule, 200, 3))
+        assert rule.on_block(_block(300)) is None
+        # Only four clean blocks after the relapse: not yet recovered.
+        assert all(ev is None for ev in self._healthy(rule, 400, 4))
+
+    def test_threshold_of_one_is_rejected_by_config(self):
+        # healthy steady state is 1, so a threshold of 1 would arm on
+        # every block of a healthy node and flap forever.
+        import pytest
+        from pydantic import ValidationError
+
+        from monad_ops.config import DualWriteRuleConfig
+
+        DualWriteRuleConfig(warn_after_blocks=2)
+        with pytest.raises(ValidationError):
+            DualWriteRuleConfig(warn_after_blocks=1)
+
+    def test_disabled_rule_emits_nothing_and_keeps_no_state(self):
+        rule = self._rule(enabled=False)
+        rule.on_dual_root(self._dual(1))
+        assert all(rule.on_block(_block(n)) is None for n in range(1, 500))

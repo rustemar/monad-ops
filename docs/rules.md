@@ -1,6 +1,6 @@
 # Alerting rules
 
-monad-ops ships ten rules. Each one consumes a typed stream — parsed
+monad-ops ships eleven rules. Each one consumes a typed stream — parsed
 `__exec_block` records, parsed monad-bft consensus events, or a poller's
 snapshots — and emits `AlertEvent`s. This page documents what every rule
 fires on, why it exists, and which `config.toml` keys tune it.
@@ -41,6 +41,7 @@ Two delivery behaviours are worth knowing before you read the table:
 | `process_restart` | a tracked systemd unit's `InvocationID` changed | WARN | `[rules.process_restart]` |
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL | `[rules.waltrace_flood]` |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO | `[version_watch]` |
+| `dual_write` | MIP-8 dual-write state-root line stopped | WARN | `[rules.dual_write]` |
 
 ---
 
@@ -356,6 +357,80 @@ package = "monad"
 poll_interval_sec = 3600
 reminder_interval_sec = 86400
 timeout_sec = 20.0
+```
+
+## `dual_write`
+
+Temporary. Watches MIP-8 dual-write liveness during the page-storage
+migration, and is meant to be deleted once the migration is done.
+
+Between phase A and phase C a node commits every block to both timelines
+and logs one state-root line per block carrying both roots. The official
+engineering runbook makes "the secondary is tracking the primary
+block-for-block" the load-bearing check to run before the hard fork:
+past it the page root becomes the consensus `state_root`, and a node
+whose secondary quietly stopped advancing fail-stops, with recovery only
+forward — hard reset and rebuild as page-only.
+
+This watches liveness and nothing else. The two roots on one line are
+the same state under two encodings and are *expected* to differ, so the
+line carries no agreement signal at all. Read an alert here as
+"dual-write logging stopped", never as "the secondary diverged".
+Verifying that the page root agrees needs a comparison across nodes,
+which this cannot do.
+
+**It counts blocks, not seconds.** The obvious shape — "no dual-root
+line for N seconds while blocks keep arriving" — reproduces a false
+positive this repo has already paid for twice. The tailer kills its
+journalctl child on a 30 s idle timeout and respawns it live-only,
+dropping history with no in-stream marker; on the first block after the
+respawn, blocks are advancing again while a wall clock has been counting
+across the whole dropped interval. A block-number delta has the same
+flaw. Counting *arrivals* is immune: both line types come from one
+process through one iterator, so a freeze, a restart or a rotation takes
+both, and a counter of received blocks cannot advance across records
+that never arrived.
+
+Calibration on a testnet full node the day after phase A: 36,170
+dual-root lines against 36,170 `__exec_block` lines, at most 1 exec
+block between consecutive dual-root lines, no block-number skips.
+Healthy is a hard 1, so the default arms 200x above the observed
+maximum (~60 s at 3.3 blk/s). There is no hysteresis band because there
+is no boundary to flap on — healthy is exactly 1, sick is unbounded.
+Same reasoning as `waltrace_flood`.
+
+WARN only, deliberately: a stalled secondary is not a 3am action. The
+operator cannot repair the node's dual-write; the response is "report it
+and hold the upgrade", which is business hours.
+
+Off by default, because the alert condition and the *end of the
+migration* are the same observation. After phase C the slot timeline is
+decommissioned and the line stops for good, and nothing in the log can
+tell that apart from a failure. **Turn it off before running phase C**,
+not after, and delete the config section rather than leaving it off with
+stale docs. Switching it off while armed leaves a WARN with no green
+after it in `/api/alerts`.
+
+The `dual_root` parse-drift counter on `/api/status/errors` runs whether
+or not this rule is enabled. It is a *partial* backstop and the limit is
+worth knowing: `drift > 0` proves the record is still being logged and
+that our extraction broke. A flat-zero `ok` with no drift is ambiguous —
+the record being renamed upstream looks exactly like the node having
+stopped dual-writing. So confirm a WARN against the journal before
+acting on it.
+
+Re-arming is also quieter than recovering, which is house behaviour
+rather than something specific to this rule: WARN carries
+`dual_write:warn` and goes through the dedup cooldown, while RECOVERED
+carries the bare `dual_write` key and bypasses dedup by design. A
+flapping secondary therefore delivers every green but may suppress the
+repeat reds.
+
+```toml
+[rules.dual_write]
+enabled = false
+warn_after_blocks = 200
+recovery_confirm_blocks = 200
 ```
 
 ## Not a rule: host probes
