@@ -1,11 +1,12 @@
 """Parser for the MIP-8 dual-write state-root line.
 
 While a node runs both timelines (MIP-8 phase A through phase C) the
-`runloop_monad.cpp:364` logger emits one of these per committed block,
-carrying the state root computed by each encoding. Example, verbatim
-from a testnet full node on v0.15.2 (stripped of the journal prefix):
+node emits one of these per committed block, carrying the state root
+computed by each encoding. The source line moves between releases (364
+on 0.15.2, 370 on 0.16.0), so the marker keys on content only. Example,
+verbatim from a testnet full node (stripped of the journal prefix):
 
-    2026-08-10 08:26:45.656520016 [1713313] runloop_monad.cpp:364
+    2026-08-10 08:26:45.656520016 [1713313] runloop_monad.cpp:364  (0.15.2)
     LOG_INFO block=52470964,
     block_id=0xf991e436e6292b8468cff59d99106fef1e09c186add5c3823c2f0c39b44497ec
     state_root primary=0xf9b4709722f14511d1bbbb43a58ecc26f43b9aa6b7f967794f3e9d8e17153657
@@ -24,11 +25,10 @@ which this parser cannot do alone.
 
 Marker choice matters in both directions. Keying on ``block=`` would
 also claim the sibling `runloop_monad.cpp:99` "Run to block= …" line;
-keying on ``state_root primary=`` would claim the single-root
-`runloop_monad.cpp:372` record that the same binary logs *outside* the
-migration window. Both carry no pair of roots, so either mistake books
-drift on every block of a healthy node. The marker requires
-``secondary=``.
+keying on ``state_root primary=`` would claim the single-root record
+that the same binary logs *outside* the migration window. Neither carries
+a pair of roots, so either mistake books drift on every block of a
+healthy node. The marker requires ``secondary=``.
 
 Outside phases A through C only that single-root form is emitted, so a
 flat-zero ``dual_root`` ok-counter with zero drift is the normal reading

@@ -11,7 +11,7 @@ import pytest
 
 from monad_ops.parser import drift, parse_consensus, parse_exec_block
 
-EXEC_FIXTURE = Path(__file__).parent / "fixtures" / "execution_sample.log"
+EXEC_FIXTURE = Path(__file__).parent / "fixtures" / "execution_sample_0160.log"
 BFT_FIXTURE = Path(__file__).parent / "fixtures" / "bft_consensus_sample.log"
 PROPOSAL_FIXTURE = Path(__file__).parent / "fixtures" / "bft_proposal_sample.log"
 

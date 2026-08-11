@@ -268,3 +268,31 @@ def test_waltrace_phrase_inside_other_field_is_ignored() -> None:
         '"target":"monad_node"}'
     )
     assert parse_consensus(line) is None
+
+
+# ── current release (v0.16.0) ─────────────────────────────────────────
+# Small companion to the April fixture above. The consensus records did
+# not visibly change shape across the releases, but "did not change" is
+# a claim worth a test rather than an assumption — the execution log
+# changed three times in the same span without notice.
+
+FIXTURE_0160 = Path(__file__).parent / "fixtures" / "bft_consensus_sample_0160.log"
+
+
+def test_current_release_consensus_lines_parse():
+    lines = FIXTURE_0160.read_text().splitlines()
+    events = [parse_consensus(line) for line in lines]
+    assert all(e is not None for e in events)
+
+    rounds = [e for e in events if e.kind is ConsensusEventKind.ROUND_ADVANCE_QC]
+    proposals = [e for e in events if e.kind is ConsensusEventKind.PROPOSAL]
+    assert len(rounds) == 2
+    assert len(proposals) == 1
+
+    # Rounds advance monotonically and carry the epoch.
+    assert rounds[1].round == rounds[0].round + 1
+    assert rounds[0].epoch == 1057
+
+    # The proposal still yields a sequence number and a base fee.
+    assert proposals[0].block_seq == 52836035
+    assert proposals[0].base_fee == 100_000_000_000
