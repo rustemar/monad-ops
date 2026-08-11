@@ -138,8 +138,107 @@ state that bootstraps across process restarts lives in
 
 ---
 
+## 2026-07-04 — monad-execution livelock (~4.3 h, no alert fired)
+
+### Summary
+
+At **2026-07-04 01:18:33 UTC** this node stopped producing blocks at
+height **42250209** (epoch 845) on v0.15.0, and stayed stopped for
+**~4.3 h** until the operator noticed by eye and restarted the stack at
+05:44 UTC. Recovery was clean: it caught up roughly 39,000 blocks to
+the live tip in about a minute, with zero drift against the public RPC
+afterwards.
+
+`monad-execution` did not crash. It **livelocked** — the process stayed
+alive and burned CPU while making no progress. That distinction is the
+whole point of this entry, because it is what defeated every layer of
+monitoring in place at the time.
+
+### Why nothing alerted
+
+Three independent checks all reported a healthy node while the chain
+was dead for four hours:
+
+| check | what it saw | why it was wrong |
+| --- | --- | --- |
+| `systemd` unit state | all three services `active (running)`, `NRestarts=0`, `Result=success` | the process never exited, so `Restart=` had nothing to fire on |
+| RPC liveness | `eth_blockNumber` answered normally | it answered with a **frozen** height; the RPC layer was fine, the chain behind it was not |
+| journal ingestion | no errors, no panics, no `waltrace` | the log simply *stopped* mid-stream; absence of errors is not evidence of progress |
+
+The general lesson is worth stating plainly: **a hang is invisible to
+systemd, and "the RPC is up" is not "the chain is advancing."** Any
+liveness check that does not compare a height against itself over time
+will pass straight through this failure mode.
+
+### Signature, for anyone trying to recognise a repeat
+
+- Services `active`, restart counters at zero, nothing in the journal.
+- `eth_blockNumber` returns a constant height, indefinitely.
+- `monad-execution` last logged a perfectly ordinary `__exec_block`
+  record and then went silent mid-operation. `monad-bft` continued
+  logging network keepalives and committed blocks only up to the same
+  height, then stopped in lockstep — it cannot progress without
+  execution.
+- `top -H` on the execution process: the `ftpool 0-3`, `iou-sqp` and
+  `monad` threads pinned near 99.9 % CPU each (~618 % total) with zero
+  block progress.
+- `/proc/<tid>/stack` empty for the spinning threads, i.e. they were
+  spinning in userspace rather than blocked in the kernel.
+
+### What it was not
+
+Ruled out at the time, each by direct measurement rather than
+inference: not an OOM (`dmesg` clean, >1 TB RAM free), not a full disk
+(TrieDB at 65 %), not the `waltrace` flood (zero such lines), and not a
+poison block — the public chain passed height 42250209 without
+incident, so whatever happened was a transient local race and not a
+deterministic result of that block's contents.
+
+### Hypothesis (explicitly a hypothesis)
+
+A 1.5-second `perf record` on the spinning process was hot in the
+io_uring SQPOLL kernel thread (`io_sq_thread` / `io_run_task_work`)
+plus one execution worker in libc. v0.15.0 had added a
+`--disable-sq-thread-cpu` flag touching exactly that thread, which is
+suggestive.
+
+It is also **not a conclusion, and it may well be wrong.** A busy
+SQPOLL thread spins by design, so finding it hot proves very little on
+its own; the task-pool workers are at least as plausible a site. This
+is N=1 with no wedge-window snapshot of interrupt state, so causation
+is inferred rather than shown. Nothing was changed on the node on the
+strength of it. If it recurs, the things worth capturing *before* the
+recovery restart are a perf sample, `/proc/interrupts`, the affinity of
+the NIC and NVMe IRQs, and softirq state — that is what would confirm
+or kill the theory.
+
+### What changed as a result
+
+One monitoring change, deliberately alert-only: a tip-liveness check
+that polls RPC `eth_blockNumber` on a one-minute cadence and alerts if
+the height has not moved for 150 s while the services are still
+`active`.
+
+One implementation detail in that check is worth passing on, because
+the obvious approach is wrong. It is tempting to read the last block
+number out of the execution journal with `journalctl | tail -1`. Do not
+— the execution journal interleaves several streams, including a
+`statesync_server_context` stream that can sit tens of thousands of
+blocks behind while serving a peer. Tailing it both **masks** a genuine
+tip freeze and manufactures **false** ones. The RPC height is the only
+unambiguous answer to "what block is this node actually on".
+
+An automatic restart on a confirmed freeze is implemented but shipped
+switched off, pending enough quiet days to trust the detector first.
+
+---
+
 ## Log
 
+- 2026-08-11: added the 2026-07-04 monad-execution livelock. Raw
+  journal context for that event was captured before the recovery
+  restart and is retained locally; the perf sample is not published
+  because it carries unsymbolised host addresses.
 - 2026-04-21: file created. 23 reorgs from the 2026-04-19/20 window
   documented. Raw journal lines around these events are **not
   preserved** — `systemd-journald` rotation reclaimed them before they

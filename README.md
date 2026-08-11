@@ -40,8 +40,10 @@ dependency for the core view.
 ## Observations
 
 Field notes from running this against Monad testnet, with data and
-explicit hypotheses — see [OBSERVATIONS.md](OBSERVATIONS.md). First
-entry is the 23-reorg window observed 2026-04-19 / 2026-04-20.
+explicit hypotheses — see [OBSERVATIONS.md](OBSERVATIONS.md). Two
+entries so far: the 23-reorg window of 2026-04-19 / 2026-04-20, and a
+2026-07-04 `monad-execution` livelock that ran for 4.3 h while systemd,
+RPC liveness and journal ingestion all reported a healthy node.
 
 ## How it works (short version)
 
