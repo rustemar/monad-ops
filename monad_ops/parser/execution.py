@@ -1,8 +1,9 @@
 """Parser for monad-execution log lines.
 
-The monad-execution binary emits dense per-block summaries on the
-`runloop_monad.cpp:346` logger. Each summary is a comma-separated
-`__exec_block` record. Example (stripped of the log prefix):
+The monad-execution binary emits dense per-block summaries as a
+comma-separated `__exec_block` record. The source line it is logged
+from moves between releases — 346 on 0.14.2, 361 on 0.14.5, 389 on
+0.16.0 — so nothing here keys on it. Example (stripped of the prefix):
 
     __exec_block,bl=26243796,id=0xafe0...cee27,ts=1776517155390,
     tx=    3,rt=   1,rtp=33.33%,sr=   73µs,txe=   653µs,cmt=   448µs,
@@ -128,8 +129,10 @@ def _pct(s: str) -> float:
 
 
 def _micros(s: str) -> int:
-    # "1232µs" -> 1232
-    # The µ is a multi-byte character; strip by suffix length.
+    # "1232µs" -> 1232, "1232us" -> 1232.
+    # Both spellings are live: releases through 0.15.2 used the
+    # multi-byte µ, 0.16.0 switched to plain ASCII "us" with no notice.
+    # Dropping either one raises straight into the tailer loop.
     if s.endswith("µs"):
         return int(s[:-2])
     if s.endswith("us"):
