@@ -16,7 +16,14 @@ WorkingDirectory=/opt/monad-ops
 Environment=PYTHONUNBUFFERED=1
 Environment=MONAD_OPS_CONFIG=/opt/monad-ops/config.toml
 ExecStart=/opt/monad-ops/.venv/bin/python -m monad_ops.cli run
-Restart=on-failure
+# Restart=always, not on-failure. A clean SIGTERM is a *successful*
+# exit as far as systemd is concerned, so on-failure leaves the daemon
+# down after anything that terminates it politely from outside — a
+# stray pkill, a fat-fingered kill, a supervisor cleaning up. For a
+# monitoring sidecar that is the worst time to be down, and nothing
+# here ever exits cleanly on its own. An explicit `systemctl stop` is
+# still honoured: systemd does not restart after an operator stop.
+Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
