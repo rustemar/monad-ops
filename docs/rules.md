@@ -436,7 +436,22 @@ recovery_confirm_blocks = 200
 ## Not a rule: host probes
 
 The host probes (systemd service state, key-backup exposure, TrieDB disk
-health, UDP config, filesystem usage, fd limits) run on their own loop and
+health, MIP-8 migration phase, UDP config, filesystem usage, fd limits)
+run on their own loop and
 emit through the same sinks, but they are not rules and have no
 `[rules.*]` section. See `/api/probes` on a running instance for their
 current output.
+
+The `triedb_migration` probe is worth calling out because it answers a
+question nothing else can while the node is running: which TrieDB
+encoding is being written. `monad-mpt` takes the storage pool
+exclusively, so without this the only way to check is to stop the node.
+It reads `monad_triedb_migration_phase` from the node's Prometheus
+endpoint (`127.0.0.1:9143`, enabled by default from v0.16.0) and reports
+legacy / dual / page. It is informational — every phase is a state the
+operator moved the node into on purpose — so it only ever returns `ok`
+or `unknown`, and never reaches the alert path. On a release older than
+v0.16.0 the endpoint is absent and `unknown` is the correct reading.
+
+> The v0.16.0 metrics endpoint listens on `0.0.0.0` by default. If you
+> do not want it public, firewall it; this probe only needs loopback.

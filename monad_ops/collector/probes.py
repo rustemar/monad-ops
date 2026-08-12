@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
+
 _TRIEDB_DEVICE = Path("/dev/triedb")
 _MONAD_CONFIG = Path("/home/monad/monad-bft/config/node.toml")
 _MONAD_SECP_BACKUP = Path("/opt/monad/backup/secp-backup")
@@ -41,6 +43,18 @@ _DISK_CRITICAL_PCT = 0.95
 # compose uses 16384. We warn below 16k, critical below 4k.
 _FD_LIMIT_WARN = 16_384
 _FD_LIMIT_CRITICAL = 4_096
+
+# monad-bft exposes Prometheus metrics here from v0.16.0 (enabled by
+# default, hence the firewall note in the README). Earlier releases
+# either had it off or did not have it at all, so an unreachable
+# endpoint is an ordinary reading, not a fault.
+_METRICS_URL = "http://127.0.0.1:9143/metrics"
+_MIGRATION_METRIC = "monad_triedb_migration_phase"
+_MIGRATION_PHASES = {
+    0: "legacy — single slot-encoded timeline, MIP-8 migration not started",
+    1: "dual — slot and page timelines both being written (phase A through C)",
+    2: "page — single page-encoded timeline, migration complete",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +523,108 @@ async def probe_fd_limits(service: str = "monad-execution") -> ProbeResult:
     )
 
 
+# ─── MIP-8 migration phase ────────────────────────────────────────────
+
+async def probe_triedb_migration(
+    url: str = _METRICS_URL,
+    client: httpx.AsyncClient | None = None,
+    timeout_sec: float = 3.0,
+) -> ProbeResult:
+    """Report which TrieDB encoding the running node is writing.
+
+    Worth a probe because there is otherwise no way to ask a *running*
+    node this: ``monad-mpt`` takes the storage pool exclusively, so the
+    only alternative is stopping the node to look. During the MIP-8
+    migration that is the difference between confirming a phase change
+    from the dashboard and taking another outage to confirm it.
+
+    Informational by design — every phase is a legitimate state that the
+    operator moved the node into deliberately, so there is nothing here
+    to page on. Unreachable endpoint or absent metric reads ``unknown``,
+    which is the normal answer on any release before v0.16.0.
+    """
+    owns_client = client is None
+    client = client or httpx.AsyncClient(timeout=timeout_sec)
+    try:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        body = resp.text
+    except Exception as e:  # noqa: BLE001
+        # Deliberately broad. Every way this fetch can fail means the
+        # same thing here — we could not read the phase — and none of
+        # them says anything about the node's health. It also has to be
+        # airtight: run_all_probes gathers without return_exceptions, so
+        # anything escaping costs the whole probe cycle, not just this
+        # result. httpx.InvalidURL alone is neither an HTTPError nor an
+        # OSError, which is how a narrow clause would leak.
+        # CancelledError is a BaseException and still propagates.
+        return ProbeResult(
+            name="triedb_migration",
+            status="unknown",
+            summary=f"metrics endpoint unreadable ({type(e).__name__})",
+            details={"url": url},
+        )
+    finally:
+        if owns_client:
+            await client.aclose()
+
+    phase = _extract_metric_value(body, _MIGRATION_METRIC)
+    if phase is None:
+        return ProbeResult(
+            name="triedb_migration",
+            status="unknown",
+            summary=f"{_MIGRATION_METRIC} not exported (release older than v0.16.0?)",
+            details={"url": url},
+        )
+
+    described = _MIGRATION_PHASES.get(phase)
+    if described is None:
+        # A phase we do not have a name for is still worth surfacing
+        # verbatim rather than swallowing.
+        return ProbeResult(
+            name="triedb_migration",
+            status="unknown",
+            summary=f"unrecognised migration phase {phase}",
+            details={"phase": phase, "url": url},
+        )
+
+    return ProbeResult(
+        name="triedb_migration",
+        status="ok",
+        summary=described,
+        details={"phase": phase, "url": url},
+    )
+
+
+def _extract_metric_value(body: str, name: str) -> int | None:
+    """Pull a single gauge out of a Prometheus exposition body.
+
+    Deliberately tiny: the samples we want carry labels, so the match is
+    on the metric name followed by either a label block or whitespace,
+    and HELP/TYPE comment lines are skipped.
+    """
+    for line in body.splitlines():
+        # The prefix test also disposes of the HELP/TYPE comment lines:
+        # they start with "#", so they can never start with the metric
+        # name. No separate comment guard is needed or reachable.
+        if not line.startswith(name):
+            continue
+        rest = line[len(name):]
+        if rest[:1] not in ("{", " ", "\t"):
+            continue  # a longer metric name that merely shares the prefix
+        value = line.rsplit(maxsplit=1)[-1]
+        try:
+            return int(float(value))
+        except (ValueError, OverflowError):
+            # OverflowError, not just ValueError: "+Inf"/"-Inf"/"1e400" are
+            # legal exposition values and int(float(...)) overflows on them.
+            # This runs outside the fetch guard, so a bare ValueError clause
+            # lets it escape into run_all_probes' gather and discards every
+            # other probe's result for the cycle.
+            return None
+    return None
+
+
 # ─── run all probes ───────────────────────────────────────────────────
 
 async def run_all_probes(services: list[str]) -> list[ProbeResult]:
@@ -519,4 +635,5 @@ async def run_all_probes(services: list[str]) -> list[ProbeResult]:
         probe_udp_config(),
         probe_disk_usage(),
         probe_fd_limits(),
+        probe_triedb_migration(),
     ))

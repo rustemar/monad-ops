@@ -11,14 +11,20 @@ fail has to land on ``unknown`` rather than on ``ok``.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
 from unittest import mock
 
+import httpx
 import pytest
 
-from monad_ops.collector.probes import probe_fd_limits, probe_key_backups
+from monad_ops.collector.probes import (
+    probe_fd_limits,
+    probe_key_backups,
+    probe_triedb_migration,
+)
 
 
 def _backup(dir_: Path, name: str, *, mode: int = 0o600, age_days: float = 0.0) -> Path:
@@ -233,3 +239,141 @@ async def test_unparseable_limits_file_is_unknown() -> None:
         r = await probe_fd_limits()
     assert r.status == "unknown"
     assert "Max open files" in r.summary
+
+
+# ── probe_triedb_migration ────────────────────────────────────────────
+# Reports which TrieDB encoding a RUNNING node is writing. There is no
+# other way to ask: monad-mpt takes the storage pool exclusively, so the
+# alternative is stopping the node. Informational only — the probe alert
+# path in cli.py fires on "warn"/"critical", and this probe emits
+# neither, so it can never page anyone.
+
+_METRICS_BODY = """\
+# HELP monad_triedb_migration_phase Dual-DB migration phase: 0=legacy, 1=dual, 2=page
+# TYPE monad_triedb_migration_phase gauge
+monad_triedb_migration_phase{network="testnet",service_version="0.16.0"} 1
+monad_bft_round_total{network="testnet"} 53277653
+"""
+
+
+def _metrics_client(body: str = _METRICS_BODY, status: int = 200):
+    def handler(request):
+        return httpx.Response(status, text=body)
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("phase", "word"),
+    [(0, "legacy"), (1, "dual"), (2, "page")],
+)
+async def test_reports_each_migration_phase(phase: int, word: str) -> None:
+    body = _METRICS_BODY.replace(
+        'service_version="0.16.0"} 1', f'service_version="0.16.0"}} {phase}'
+    )
+    async with _metrics_client(body) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.name == "triedb_migration"
+    assert r.status == "ok"
+    assert r.details["phase"] == phase
+    assert r.summary.startswith(word)
+
+
+@pytest.mark.asyncio
+async def test_unreachable_endpoint_is_unknown_not_a_fault() -> None:
+    # The normal reading on any release before v0.16.0, where the
+    # metrics endpoint did not exist or was off by default.
+    def boom(request):
+        raise httpx.ConnectError("connection refused")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+    assert "unreadable" in r.summary
+
+
+@pytest.mark.asyncio
+async def test_http_error_status_is_unknown() -> None:
+    async with _metrics_client(status=503) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_missing_metric_is_unknown() -> None:
+    async with _metrics_client("monad_bft_round_total{a=\"b\"} 5\n") as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+    assert "not exported" in r.summary
+
+
+@pytest.mark.asyncio
+async def test_unrecognised_phase_is_surfaced_not_swallowed() -> None:
+    body = _METRICS_BODY.replace('service_version="0.16.0"} 1', 'service_version="0.16.0"} 7')
+    async with _metrics_client(body) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+    assert "7" in r.summary
+    assert r.details["phase"] == 7
+
+
+@pytest.mark.asyncio
+async def test_metric_with_a_shared_prefix_is_not_matched() -> None:
+    # A future monad_triedb_migration_phase_total counter must not be
+    # read as the gauge.
+    body = 'monad_triedb_migration_phase_total{network="testnet"} 42\n'
+    async with _metrics_client(body) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+    assert "not exported" in r.summary
+
+
+@pytest.mark.asyncio
+async def test_help_and_type_comment_lines_do_not_become_the_value() -> None:
+    # The HELP line mentions the metric name and the digits 0, 1 and 2,
+    # and the TYPE line ends in the word "gauge". Neither may be read as
+    # the sample.
+    async with _metrics_client(_METRICS_BODY) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.details["phase"] == 1
+
+
+@pytest.mark.asyncio
+async def test_infinite_value_does_not_escape_the_probe() -> None:
+    # int(float("+Inf")) raises OverflowError, which is not a ValueError.
+    # This path sits outside the fetch guard, so an escape here discards
+    # every other probe's result for the cycle.
+    body = _METRICS_BODY.replace('service_version="0.16.0"} 1', 'service_version="0.16.0"} +Inf')
+    async with _metrics_client(body) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_no_exception_escapes_to_poison_the_probe_batch() -> None:
+    """run_all_probes gathers without return_exceptions.
+
+    Anything this probe raises costs every other probe's result for that
+    cycle, so the fetch must swallow even the exceptions that are not
+    httpx.HTTPError — httpx.InvalidURL is neither that nor an OSError.
+    """
+    def boom(request):
+        raise httpx.InvalidURL("not a url")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(boom)) as c:
+        r = await probe_triedb_migration(client=c)
+    assert r.status == "unknown"
+    assert "InvalidURL" in r.summary
+
+
+@pytest.mark.asyncio
+async def test_cancellation_still_propagates() -> None:
+    # CancelledError is a BaseException; swallowing it would make the
+    # probe loop unkillable on shutdown.
+    def cancel(request):
+        raise asyncio.CancelledError()
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(cancel)) as c:
+        with pytest.raises(asyncio.CancelledError):
+            await probe_triedb_migration(client=c)
