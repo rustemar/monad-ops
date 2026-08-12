@@ -23,10 +23,12 @@ dependency for the core view.
   patterns, per-block processing slowdown, monad-bft network-layer
   errors, service restarts, the v0.14.5 waltrace flood, MIP-8 dual-write
   liveness, and new package releases. Telegram by default, dedup +
-  hysteresis so you don't get
-  flapping. Full reference in [docs/rules.md](docs/rules.md).
-- **Host probes** — systemd state of monad services, key-backup age,
-  TrieDB disk health, UDP config, filesystem usage, `fd_limits`.
+  hysteresis so you don't get flapping. Full reference in
+  [docs/rules.md](docs/rules.md).
+- **Host probes** — systemd state of monad services, MIP-8 migration
+  phase (which TrieDB encoding a *running* node is writing — otherwise
+  only answerable by stopping it), key-backup age, TrieDB disk health,
+  UDP config, filesystem usage, `fd_limits`.
 - **Alerts history** at `/alerts` — persisted across restarts,
   filterable by window / severity.
 - **JSON API** for everything, plus a single-call
@@ -70,6 +72,7 @@ cannot write back to the node.
 | `process_restart` | a tracked systemd unit's `InvocationID` changed | WARN |
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO |
+| `dual_write` | MIP-8 dual-write state-root line stopped | WARN |
 
 [docs/rules.md](docs/rules.md) documents each one: what it fires on, the
 field evidence behind its defaults, and every config key. Worth reading
