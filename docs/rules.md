@@ -361,8 +361,11 @@ timeout_sec = 20.0
 
 ## `dual_write`
 
-Temporary. Watches MIP-8 dual-write liveness during the page-storage
-migration, and is meant to be deleted once the migration is done.
+Watches MIP-8 dual-write liveness during the page-storage migration. The
+migration runs per network, so this rule has a window rather than an
+expiry: on at phase A, off before phase C, on whichever network is
+migrating. Testnet completed phase C on 2026-08-13; mainnet had not
+started MIP-8 as of that date.
 
 Between phase A and phase C a node commits every block to both timelines
 and logs one state-root line per block carrying both roots. The official
@@ -407,9 +410,17 @@ Off by default, because the alert condition and the *end of the
 migration* are the same observation. After phase C the slot timeline is
 decommissioned and the line stops for good, and nothing in the log can
 tell that apart from a failure. **Turn it off before running phase C**,
-not after, and delete the config section rather than leaving it off with
-stale docs. Switching it off while armed leaves a WARN with no green
+not after. Switching it off while armed leaves a WARN with no green
 after it in `/api/alerts`.
+
+Observed on this node at phase C, 2026-08-13: the dual line stopped
+mid-stream and the single-root form took over on the next block, moving
+from `runloop_monad.cpp:370` to `:378`. The `dual_root` drift counter
+froze at its last value while `exec_block` kept climbing, and drift
+stayed 0 — a vanished record is not drift. `__exec_block` did not move.
+If you grep to confirm your own phase C, match on `secondary=`: a
+pattern of `state_root primary=` matches both forms and will look like
+dual-write survived when it has not.
 
 The `dual_root` parse-drift counter on `/api/status/errors` runs whether
 or not this rule is enabled. It is a *partial* backstop and the limit is

@@ -35,6 +35,20 @@ _PRE_MIGRATION_LINE = (
     "primary=0xc40451c3038b66bfd090a3cd1eae560e5fb6fb46551a7fbbf95919770ca78a5d"
 )
 
+# The other single-root era, captured on this host 2026-08-13 half an
+# hour after phase C. Same shape as the pre-migration line but a
+# different source line (378, against 372 before phase A and 370 while
+# dual), which is the point of keeping both: the two eras that must not
+# be claimed sit on either side of the dual window and neither one's
+# line number can be relied on to identify it.
+_POST_PHASE_C_LINE = (
+    "2026-08-13 12:51:06.888805624 [429741] runloop_monad.cpp:378 LOG_INFO\t"
+    "block=53371760, "
+    "block_id=0x8d201ca78814ab84da8feb176cc64ec8ecc6e07cff51d2c56b800046628d18da "
+    "state_root "
+    "primary=0xf87b28d289eff55ce9d38b2fbd7cf000be91054d7bcfc491d9d2b692d6f02c4f"
+)
+
 # The sibling runloop_monad.cpp:99 record, which also carries a block
 # number and a block id but no roots. A marker keyed on "block=" would
 # claim this one and manufacture drift on every block.
@@ -110,14 +124,20 @@ def test_dual_root_is_a_registered_drift_kind() -> None:
     assert drift.DUAL_ROOT in drift.snapshot()["kinds"]
 
 
-def test_single_root_line_from_a_non_migrated_node_is_not_claimed() -> None:
+@pytest.mark.parametrize(
+    "line",
+    [_PRE_MIGRATION_LINE, _POST_PHASE_C_LINE],
+    ids=["before-phase-a", "after-phase-c"],
+)
+def test_single_root_line_outside_the_window_is_not_claimed(line: str) -> None:
     """The regression that matters most.
 
-    Every node outside phases A-C logs this on every block. Claiming it
-    would put the drift counter permanently off zero, which is the one
-    reading the whole counter exists to provide.
+    Every node outside phases A-C logs this on every block — one that
+    has not started the migration and one that has finished it alike.
+    Claiming it would put the drift counter permanently off zero, which
+    is the one reading the whole counter exists to provide.
     """
-    assert parse_dual_root(_PRE_MIGRATION_LINE) is None
+    assert parse_dual_root(line) is None
     snap = drift.snapshot()["kinds"][drift.DUAL_ROOT]
     assert snap == {"ok": 0, "drift": 0, "last_drift_ms": None}
 
