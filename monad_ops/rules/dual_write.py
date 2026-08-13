@@ -54,8 +54,12 @@ Off by default. This is a migration-window rule with a real end: after
 phase C the slot timeline is decommissioned and the line stops for good,
 which is indistinguishable from the failure it watches for. Nothing in
 the log can tell those apart, so the switch is the operator's. Turn it
-off *before* running phase C, and delete the config section afterwards
-rather than leaving it off with stale docs.
+off *before* running phase C, not after.
+
+The window is per network, which is why this module outlives any one
+migration. Testnet reached phase C on 2026-08-13; mainnet had not
+started MIP-8 as of that date, and runs the same three phases when it
+does.
 
 The ``dual_root`` parse-drift counter on ``/api/status/errors`` runs
 regardless of this switch. It is a partial backstop, and worth stating

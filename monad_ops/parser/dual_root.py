@@ -2,9 +2,11 @@
 
 While a node runs both timelines (MIP-8 phase A through phase C) the
 node emits one of these per committed block, carrying the state root
-computed by each encoding. The source line moves between releases (364
-on 0.15.2, 370 on 0.16.0), so the marker keys on content only. Example,
-verbatim from a testnet full node (stripped of the journal prefix):
+computed by each encoding. The source line moves between releases and
+between migration phases (364 on 0.15.2, 370 dual on 0.16.0, 372 and 378
+for the single-root form either side of the window), so the marker keys
+on content only. Example, verbatim from a testnet full node (stripped of
+the journal prefix):
 
     2026-08-10 08:26:45.656520016 [1713313] runloop_monad.cpp:364  (0.15.2)
     LOG_INFO block=52470964,
@@ -32,7 +34,11 @@ healthy node. The marker requires ``secondary=``.
 
 Outside phases A through C only that single-root form is emitted, so a
 flat-zero ``dual_root`` ok-counter with zero drift is the normal reading
-on most nodes.
+on most nodes. Confirmed on this host at phase C on 2026-08-13: the dual
+line stopped mid-stream, ``dual_root`` froze while ``exec_block`` kept
+climbing, and drift stayed 0. A vanished record is not drift — only a
+malformed one is — which is why a frozen counter needs the journal to
+interpret it.
 """
 
 from __future__ import annotations
@@ -49,10 +55,12 @@ _DUAL_ROOT_PREFILTER = "state_root"
 
 # The marker MUST require ``secondary=``. A node outside the migration
 # window logs the same record with a single root — verified on this host
-# before phase A:
+# on both sides of the window, before phase A and after phase C:
 #
 #   runloop_monad.cpp:372 … block=52206281, block_id=0x507b… \
-#   state_root primary=0xc404…
+#   state_root primary=0xc404…                                (pre-A)
+#   runloop_monad.cpp:378 … block=53371760, block_id=0x8d20… \
+#   state_root primary=0xf87b…                                (post-C)
 #
 # Gating on ``state_root primary=`` alone claims that line too, then
 # fails extraction and books drift on every block — 978 per five minutes

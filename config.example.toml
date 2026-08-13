@@ -110,12 +110,15 @@ wal_dir = "/home/monad/monad-bft/wal"
 
 
 [rules.dual_write]
-# MIP-8 dual-write liveness — TEMPORARY, for the page-storage migration
-# window only. Alerts when exec blocks keep arriving without the
-# per-block state-root line that proves both timelines are being
-# written. Off by default: after phase C that line stops for good, which
-# is indistinguishable from the failure this watches for. Turn it off
-# BEFORE running phase C, then delete this section.
+# MIP-8 dual-write liveness, for the page-storage migration window only.
+# Alerts when exec blocks keep arriving without the per-block state-root
+# line that proves both timelines are being written.
+#
+# Off by default, and the window is per-network: turn it ON when that
+# network enters phase A, OFF again before you run phase C. After phase C
+# the line stops for good, which is indistinguishable from the failure
+# this watches for. Testnet finished phase C on 2026-08-13; mainnet had
+# not started MIP-8 as of that date, so this stays in the file.
 enabled = false
 # Exec blocks received since the last dual-root line before WARN. The
 # line precedes its own block, so healthy is 1, not 0; minimum is 2.
