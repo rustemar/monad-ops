@@ -11,6 +11,7 @@ its log schema in a future release.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from monad_ops.parser import (
@@ -91,6 +92,45 @@ def test_parses_proposal_with_base_fee() -> None:
     assert ev.base_fee == 100_000_000_000   # 100 gwei × 1e9
     assert ev.round > 0                      # proposal_round captured
     assert ev.ts_ms > 0
+
+
+def test_proposal_captures_the_author() -> None:
+    """The proposer's key is on the line and used to be discarded.
+
+    Anchored on the quoted JSON ``"author"`` rather than the unquoted
+    ``author:`` inside the ProposalMessage Debug repr, which appears
+    later on the same line.
+    """
+    fixture = (
+        Path(__file__).parent / "fixtures" / "bft_proposal_sample.log"
+    ).read_text().splitlines()
+
+    ev = parse_consensus(fixture[0])
+    assert ev is not None
+    assert ev.author == (
+        "025f90fdc4f1ebe1a8939578d7f1ce53ecda08b18dda80aea9abe1e6a4546c3242"
+    )
+    # 33-byte compressed secp key: the validator identity, not a hash.
+    assert len(ev.author) == 66
+
+
+def test_proposal_without_an_author_still_parses() -> None:
+    """author is optional — losing it must not cost us the fee curve.
+
+    The matching "and it is not drift" assertion lives in
+    test_parse_drift.py, which owns the counter-reset fixture.
+    """
+    fixture = (
+        Path(__file__).parent / "fixtures" / "bft_proposal_sample.log"
+    ).read_text().splitlines()
+    stripped = re.sub(r'"author":"[0-9a-f]+",', "", fixture[0])
+    assert '"author"' not in stripped
+
+    ev = parse_consensus(stripped)
+    assert ev is not None
+    assert ev.kind is ConsensusEventKind.PROPOSAL
+    assert ev.author is None
+    assert ev.base_fee == 100_000_000_000        # the real field still read
 
 
 def test_proposal_without_base_fee_is_skipped() -> None:

@@ -570,6 +570,7 @@ class State:
                     block_seq=event.block_seq,
                     ts_ms=ts_ms,
                     base_fee_wei=event.base_fee,
+                    author=event.author,
                 ))
             return
         bucket = (ts_ms // _MINUTE_MS) * _MINUTE_MS
