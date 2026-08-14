@@ -63,6 +63,19 @@ active_state=$(systemctl show -p ActiveState --value "$SERVICE" 2>/dev/null || e
 sub_state=$(systemctl show -p SubState --value "$SERVICE" 2>/dev/null || echo "unknown")
 mem_current=$(systemctl show -p MemoryCurrent --value "$SERVICE" 2>/dev/null || echo "0")
 mem_max=$(systemctl show -p MemoryMax --value "$SERVICE" 2>/dev/null || echo "0")
+# The pressure check below wants anon, not MemoryCurrent: page cache is
+# reclaimable and cannot cause the OOM this is a leading indicator for.
+# The -n guard matters — an empty ControlGroup would resolve to the root
+# cgroup and report the whole host's anon instead of the service's.
+mem_cgroup=$(systemctl show -p ControlGroup --value "$SERVICE" 2>/dev/null || echo "")
+mem_anon=""
+if [[ -n "$mem_cgroup" ]]; then
+    mem_anon=$(awk '$1 == "anon" { print $2; exit }' \
+        "/sys/fs/cgroup${mem_cgroup}/memory.stat" 2>/dev/null || echo "")
+fi
+if [[ "$mem_anon" =~ ^[0-9]+$ ]]; then
+    mem_current="$mem_anon"
+fi
 
 # HTTP probe — capture body + status code in one request so we can also
 # inspect ingestion freshness, not just reachability. Body is single-line
