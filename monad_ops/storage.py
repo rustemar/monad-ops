@@ -186,10 +186,13 @@ CREATE TABLE IF NOT EXISTS bft_minute (
 -- Storing in wei (raw on-chain unit) so reads can downscale per
 -- consumer — wei → gwei (÷ 1e9) for the operator chart, wei → gas-
 -- price-equivalent for builder-side analysis.
+-- `author` is the proposer's secp key, nullable because it is a later
+-- addition and pre-existing rows have none.
 CREATE TABLE IF NOT EXISTS bft_base_fee (
     block_seq    INTEGER PRIMARY KEY,
     ts_ms        INTEGER NOT NULL,
-    base_fee_wei INTEGER NOT NULL
+    base_fee_wei INTEGER NOT NULL,
+    author       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_bft_base_fee_ts ON bft_base_fee (ts_ms);
@@ -290,6 +293,7 @@ class BftBaseFee:
     block_seq: int       # = block_number (matches blocks table)
     ts_ms: int           # parsed from the JSON envelope timestamp
     base_fee_wei: int    # raw on-chain unit; divide by 1e9 for gwei
+    author: str | None = None   # proposer's secp key; None on pre-migration rows
 
 
 class _PercentileAgg:
@@ -408,6 +412,16 @@ class Storage:
                 except sqlite3.OperationalError as e:
                     if "duplicate column" not in str(e).lower():
                         raise
+            # Forward-migration 2026-08-14: bft_base_fee gained `author`.
+            # Nullable, so existing rows stay valid and only proposals
+            # seen after this ships carry a proposer.
+            try:
+                self._conn.execute(
+                    "ALTER TABLE bft_base_fee ADD COLUMN author TEXT"
+                )
+            except sqlite3.OperationalError as e:
+                if "duplicate column" not in str(e).lower():
+                    raise
             # Forward-migration 2026-05-19: rename `slow_chunks` column.
             # The field stores the size of monad-execution's in-memory
             # storage-slot LRU cache (sourced from __exec_block `sc=`
@@ -1351,10 +1365,11 @@ class Storage:
                 if base_fees:
                     self._conn.executemany(
                         """INSERT OR IGNORE INTO bft_base_fee
-                           (block_seq, ts_ms, base_fee_wei) VALUES (?, ?, ?)""",
+                           (block_seq, ts_ms, base_fee_wei, author)
+                           VALUES (?, ?, ?, ?)""",
                         [
                             (int(b.block_seq), int(b.ts_ms),
-                             int(b.base_fee_wei))
+                             int(b.base_fee_wei), b.author)
                             for b in base_fees
                         ],
                     )
@@ -1376,10 +1391,10 @@ class Storage:
         with self._lock:
             self._conn.execute(
                 """INSERT OR IGNORE INTO bft_base_fee
-                   (block_seq, ts_ms, base_fee_wei)
-                   VALUES (?, ?, ?)""",
+                   (block_seq, ts_ms, base_fee_wei, author)
+                   VALUES (?, ?, ?, ?)""",
                 (int(sample.block_seq), int(sample.ts_ms),
-                 int(sample.base_fee_wei)),
+                 int(sample.base_fee_wei), sample.author),
             )
 
     def list_bft_base_fee(
@@ -1418,6 +1433,38 @@ class Storage:
             }
             for r in rows
         ]
+
+    def get_proposers(self, block_seqs: Iterable[int]) -> dict[int, str]:
+        """Map block_seq → proposer secp key for the blocks we saw proposed.
+
+        Deliberately a lookup rather than a column on ``list_bft_base_fee``:
+        the author is 66 characters and that reader feeds a 5000-row chart
+        payload, where it would be pure weight. The question this answers
+        is per-block ("who proposed the block that got reorged"), so the
+        access shape is a lookup.
+
+        Blocks with no row, or rows written before the author column
+        existed, are simply absent from the result.
+        """
+        seqs = [int(s) for s in block_seqs]
+        if not seqs:
+            return {}
+        out: dict[int, str] = {}
+        with self._lock:
+            # Chunked so a large reorg window cannot exceed SQLite's
+            # variable limit (999 by default).
+            for i in range(0, len(seqs), 500):
+                chunk = seqs[i:i + 500]
+                placeholders = ",".join("?" * len(chunk))
+                rows = self._conn.execute(
+                    f"""SELECT block_seq, author FROM bft_base_fee
+                        WHERE author IS NOT NULL
+                          AND block_seq IN ({placeholders})""",
+                    chunk,
+                ).fetchall()
+                for r in rows:
+                    out[int(r["block_seq"])] = str(r["author"])
+        return out
 
     def sampled_bft_base_fee(
         self,

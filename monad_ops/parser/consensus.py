@@ -84,6 +84,7 @@ class ConsensusEvent:
     block_seq: int | None = None     # populated for PROPOSAL (= block_number)
     base_fee: int | None = None      # populated for PROPOSAL, in wei
     peer: str | None = None          # populated for NETWORK_DECRYPT_FAIL — "ip:port" of offender
+    author: str | None = None        # populated for PROPOSAL — proposer's secp key
 
 
 # ── pre-filter substrings ─────────────────────────────────────────────
@@ -150,6 +151,14 @@ _PROPOSAL_RX = re.compile(
     r'"proposal message".*?proposal_round: (\d+).*?'
     r'seq_num: (\d+),\s*timestamp_ns: \d+,\s*id: [0-9a-f.]+,\s*base_fee: (\d+)'
 )
+
+# Who proposed this block. Present since at least 0.14.x and still there
+# on 0.16.0 (both fixtures carry it). Kept OPTIONAL and matched
+# separately from _PROPOSAL_RX on purpose: a miss must yield author=None,
+# never drift, because drift is reserved for a required field breaking.
+# Anchored on the quoted JSON form so it takes the envelope's `author`
+# and not the unquoted `author:` inside the ProposalMessage Debug repr.
+_PROPOSAL_AUTHOR_RX = re.compile(r'"author":"([0-9a-f]+)"')
 
 
 def parse_consensus(line: str) -> ConsensusEvent | None:
@@ -250,6 +259,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
         m = _PROPOSAL_RX.search(line)
         if m is not None:
             drift.record_ok(drift.CONSENSUS_PROPOSAL)
+            author = _PROPOSAL_AUTHOR_RX.search(line)
             return ConsensusEvent(
                 kind=ConsensusEventKind.PROPOSAL,
                 round=int(m.group(1)),
@@ -257,6 +267,7 @@ def parse_consensus(line: str) -> ConsensusEvent | None:
                 ts_ms=ts_ms,
                 block_seq=int(m.group(2)),
                 base_fee=int(m.group(3)),
+                author=author.group(1) if author else None,
             )
         drift.record_drift(drift.CONSENSUS_PROPOSAL, line)
         return None

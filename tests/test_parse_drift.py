@@ -5,6 +5,7 @@ from a log record, the parser drops every line, and nothing anywhere
 says so.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -97,6 +98,21 @@ def test_proposal_with_moved_seq_num_counts_as_drift():
 
     assert parse_consensus(line.replace("seq_num:", "sequence:")) is None
     assert _kind(drift.CONSENSUS_PROPOSAL)["drift"] == 1
+
+
+def test_missing_proposal_author_is_not_drift():
+    # author is an optional extra on the proposal line. drift is for a
+    # REQUIRED field breaking, so dropping this one must leave the
+    # counter at zero — otherwise the signal it exists to give is lost.
+    line = PROPOSAL_FIXTURE.read_text().splitlines()[0]
+    stripped = re.sub(r'"author":"[0-9a-f]+",', "", line)
+
+    ev = parse_consensus(stripped)
+    assert ev is not None
+    assert ev.author is None
+    assert _kind(drift.CONSENSUS_PROPOSAL) == {
+        "ok": 1, "drift": 0, "last_drift_ms": None,
+    }
 
 
 def test_keepalive_firehose_touches_no_counter():

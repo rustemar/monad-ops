@@ -11,6 +11,7 @@ Covers:
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -145,6 +146,73 @@ def test_bft_base_fee_round_trip(tmp_path: Path) -> None:
     assert len(rows) == 5
     assert rows[0]["block_seq"] == 27_470_000
     assert rows[0]["base_fee_gwei"] == 100.0
+    storage.close()
+
+
+def test_get_proposers_returns_only_blocks_we_saw_proposed(tmp_path: Path) -> None:
+    """Leader attribution: block_seq → proposer key.
+
+    The gap case is the one that matters — a reorged block we never saw
+    a proposal for must be absent, not guessed.
+    """
+    storage = Storage(tmp_path / "state.db")
+    key_a = "02" + "a" * 64
+    key_b = "03" + "b" * 64
+    storage.insert_bft_base_fee(BftBaseFee(500, _T0_MS, 100_000_000_000, key_a))
+    storage.insert_bft_base_fee(BftBaseFee(501, _T0_MS + 400, 100_000_000_000, key_b))
+    # Seen, but written before the author column existed.
+    storage.insert_bft_base_fee(BftBaseFee(502, _T0_MS + 800, 100_000_000_000))
+
+    got = storage.get_proposers([500, 501, 502, 999])
+    assert got == {500: key_a, 501: key_b}
+    assert storage.get_proposers([]) == {}
+    storage.close()
+
+
+def test_get_proposers_chunks_past_the_sqlite_variable_limit(tmp_path: Path) -> None:
+    """SQLite caps host variables at 999 by default; a wide reorg window
+    would blow straight past that as one IN clause."""
+    storage = Storage(tmp_path / "state.db")
+    for i in range(1200):
+        storage.insert_bft_base_fee(
+            BftBaseFee(i, _T0_MS + i, 100_000_000_000, f"02{i:064d}")
+        )
+
+    got = storage.get_proposers(range(1200))
+    assert len(got) == 1200
+    assert got[0] == f"02{0:064d}"
+    assert got[1199] == f"02{1199:064d}"
+    storage.close()
+
+
+def test_bft_base_fee_author_column_is_added_to_an_older_db(tmp_path: Path) -> None:
+    """Forward-migration: a DB created before the author column opens
+    cleanly and gains it, keeping the rows already there."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        """CREATE TABLE bft_base_fee (
+               block_seq    INTEGER PRIMARY KEY,
+               ts_ms        INTEGER NOT NULL,
+               base_fee_wei INTEGER NOT NULL
+           )"""
+    )
+    conn.execute(
+        "INSERT INTO bft_base_fee VALUES (?, ?, ?)",
+        (77, _T0_MS, 100_000_000_000),
+    )
+    conn.commit()
+    conn.close()
+
+    storage = Storage(db)
+    cols = {
+        r[1] for r in storage._conn.execute("PRAGMA table_info(bft_base_fee)")
+    }
+    assert "author" in cols
+    # The pre-existing row survived and simply has no proposer.
+    assert storage.get_proposers([77]) == {}
+    storage.insert_bft_base_fee(BftBaseFee(78, _T0_MS + 400, 1, "02" + "c" * 64))
+    assert storage.get_proposers([77, 78]) == {78: "02" + "c" * 64}
     storage.close()
 
 
