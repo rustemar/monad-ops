@@ -9,7 +9,7 @@ import pytest
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
-from monad_ops.storage import Storage
+from monad_ops.storage import BftBaseFee, Storage
 
 
 def _mk_block(n: int, rtp: float = 0.0, tx: int = 10, retried: int = 0) -> ExecBlock:
@@ -774,6 +774,42 @@ def test_get_reorg_trace_returns_neighbors(tmp_path: Path) -> None:
     assert [b["block_number"] for b in trace["blocks"]] == [97, 98, 99, 100, 101, 102, 103]
     # tx_count distinguishable — verify each row's data, not just shape.
     assert [b["tx_count"] for b in trace["blocks"]] == [97, 98, 99, 100, 101, 102, 103]
+    storage.close()
+
+
+def test_get_reorg_trace_carries_the_proposer_across_the_window(tmp_path: Path) -> None:
+    """Leader attribution on the trace.
+
+    The question a reorg trace has to answer is whether one validator
+    proposed both sides of the split, so the proposers of the
+    neighbours matter as much as the reorged block's own.
+    """
+    storage = Storage(tmp_path / "state.db")
+    for n in range(95, 105):
+        storage.write_block(_mk_block(n, tx=n))
+    storage.write_alert(
+        AlertEvent(
+            rule="reorg", severity=Severity.CRITICAL,
+            key=f"reorg:100:{'0x' + 'b' * 64}",
+            title="Chain reorg detected", detail="Block #100 id changed",
+        ),
+        ts=1776_000_000.0,
+    )
+    same = "02" + "1" * 64
+    other = "03" + "2" * 64
+    for n, who in ((99, same), (100, same), (101, other)):
+        storage.insert_bft_base_fee(BftBaseFee(n, 1776_000_000_000, 1, who))
+    # 102 was seen proposed but before the author column existed.
+    storage.insert_bft_base_fee(BftBaseFee(102, 1776_000_000_000, 1))
+
+    trace = storage.get_reorg_trace(100, window=2)
+    assert trace["proposer"] == same
+    by_num = {b["block_number"]: b["proposer"] for b in trace["blocks"]}
+    assert by_num[99] == same
+    assert by_num[100] == same        # same leader either side of the split
+    assert by_num[101] == other
+    assert by_num[102] is None        # seen, but no author recorded
+    assert by_num[98] is None         # never seen proposed at all
     storage.close()
 
 

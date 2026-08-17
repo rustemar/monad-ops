@@ -548,6 +548,57 @@ async def test_api_reorg_trace_partial_post_window_uses_short_ttl(
 
 
 @pytest.mark.asyncio
+async def test_api_reorg_trace_never_names_the_proposer_at_public_level(
+    state_with_storage: State,
+) -> None:
+    """The proposer is on-chain public, but a shareable trace that names
+    the validator behind a reorg reads as an accusation. level=full is
+    local analysis; level=public must not carry it anywhere."""
+    from monad_ops.parser import ExecBlock
+    from monad_ops.rules.events import AlertEvent, Severity
+    from monad_ops.storage import BftBaseFee
+
+    storage = state_with_storage.storage
+    def mk(n: int) -> ExecBlock:
+        return ExecBlock(
+            block_number=n, block_id=f"0x{n:064x}",
+            timestamp_ms=1_700_000_000_000 + n * 400,
+            tx_count=1, retried=0, retry_pct=0.0,
+            state_reset_us=0, tx_exec_us=0, commit_us=0, total_us=0,
+            tps_effective=0, tps_avg=0, gas_used=0,
+            gas_per_sec_effective=0, gas_per_sec_avg=0,
+            active_chunks=0, storage_cache_size=0,
+        )
+    for n in range(95, 106):
+        storage.write_block(mk(n))
+    storage.write_alert(AlertEvent(
+        rule="reorg", severity=Severity.CRITICAL,
+        key=f"reorg:100:{'0x' + 'a' * 64}",
+        title="Chain reorg detected", detail="Block #100 id changed",
+    ))
+    secret = "02" + "f" * 64
+    for n in range(95, 106):
+        storage.insert_bft_base_fee(BftBaseFee(n, 1_700_000_000_000, 1, secret))
+
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as c:
+        pub = await c.get("/api/reorgs/100", params={"window": 5, "level": "public"})
+        full = await c.get("/api/reorgs/100", params={"window": 5, "level": "full"})
+
+    assert pub.status_code == 200 and full.status_code == 200
+    # The blunt check: the key must not appear anywhere in the public
+    # payload, top level or per block. Asserting on the raw body rather
+    # than parsed fields so a future field carrying it also trips this.
+    assert secret not in pub.text
+    assert pub.json().get("proposer") is None
+    assert all("proposer" not in b for b in pub.json()["blocks"])
+    # …and full still has it, or the feature does nothing.
+    assert full.json()["proposer"] == secret
+    assert full.json()["blocks"][0]["proposer"] == secret
+
+
+@pytest.mark.asyncio
 async def test_api_reorg_trace_complete_window_uses_long_ttl(
     state_with_storage: State,
 ) -> None:

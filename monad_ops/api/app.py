@@ -772,6 +772,13 @@ def build_app(
                     **trace,
                     "blocks": [_sanitize_block_for_public(b) for b in trace["blocks"]],
                 }
+                # Proposer identity is public on-chain, but a shareable
+                # trace that names the validator behind a reorg reads as
+                # an accusation. Kept to level=full, which is local
+                # analysis. The per-block copies are already gone —
+                # _REORG_TRACE_PUBLIC_FIELDS is an allowlist — so this
+                # only has to drop the top-level one.
+                trace.pop("proposer", None)
             return trace
 
         def _ttl(trace) -> float:
