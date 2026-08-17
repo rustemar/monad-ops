@@ -803,6 +803,17 @@ class Storage:
         )
         block_id_before = reorged_block["block_id"] if reorged_block else None
 
+        # Leader attribution across the whole window, not just the
+        # reorged block: the forensic question is whether one validator
+        # proposed both sides of the split, or whether the neighbours
+        # changed hands around it. One batched lookup for the window.
+        blocks = [dict(r) for r in block_rows]
+        proposers = self.get_proposers(
+            [b["block_number"] for b in blocks] + [int(block_number)]
+        )
+        for b in blocks:
+            b["proposer"] = proposers.get(b["block_number"])
+
         return {
             "alert": {
                 "id": alert_row["id"],
@@ -813,8 +824,9 @@ class Storage:
             "block_number": int(block_number),
             "block_id_before": block_id_before,
             "block_id_after": block_id_after,
+            "proposer": proposers.get(int(block_number)),
             "window": window,
-            "blocks": [dict(r) for r in block_rows],
+            "blocks": blocks,
         }
 
     def load_alerts_range(
