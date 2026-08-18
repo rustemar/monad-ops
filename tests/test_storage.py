@@ -813,6 +813,84 @@ def test_get_reorg_trace_carries_the_proposer_across_the_window(tmp_path: Path) 
     storage.close()
 
 
+def test_reorg_proposer_stats_weighs_counts_against_block_share(tmp_path: Path) -> None:
+    """A raw reorg count per proposer means nothing without the share.
+
+    Here `heavy` proposes 80% of blocks and takes 2 reorgs, `light`
+    proposes 20% and takes 3 — so the small proposer is the one over
+    its expectation, which a bare count would hide.
+    """
+    storage = Storage(tmp_path / "state.db")
+    heavy = "02" + "1" * 64
+    light = "03" + "2" * 64
+    for n in range(80):
+        storage.insert_bft_base_fee(BftBaseFee(n, 1776_000_000_000 + n, 1, heavy))
+    for n in range(80, 100):
+        storage.insert_bft_base_fee(BftBaseFee(n, 1776_000_000_000 + n, 1, light))
+    for n in (1, 2, 85, 86, 87):
+        storage.write_alert(
+            AlertEvent(
+                rule="reorg", severity=Severity.INFO,
+                key=f"reorg:{n}:{'0x' + 'c' * 64}",
+                title="divergence", detail=f"Block #{n}",
+            ),
+            ts=1776_000_000.0 + n,
+        )
+
+    st = storage.reorg_proposer_stats()
+    assert st["window_blocks"] == 100
+    assert st["proposers"] == 2
+    assert st["reorgs_total"] == 5
+    assert st["reorgs_attributed"] == 5
+    # collision = 0.8^2 + 0.2^2
+    assert st["collision"] == pytest.approx(0.68)
+
+    by = {r["author"]: r for r in st["by_proposer"]}
+    assert by[light]["reorgs"] == 3
+    assert by[light]["share"] == pytest.approx(0.20)
+    assert by[light]["expected"] == pytest.approx(1.0)   # 5 × 0.20
+    assert by[heavy]["reorgs"] == 2
+    assert by[heavy]["expected"] == pytest.approx(4.0)   # 5 × 0.80
+    # Sorted by raw count, so the ordering alone would mislead — the
+    # caller has to compare against `expected`, which is the point.
+    assert st["by_proposer"][0]["author"] == light
+    storage.close()
+
+
+def test_reorg_proposer_stats_ignores_reorgs_it_cannot_attribute(tmp_path: Path) -> None:
+    """Reorgs older than proposer coverage must not be counted as
+    anyone's — attributing them to nobody is correct, silently dropping
+    them into a proposer's tally would not be."""
+    storage = Storage(tmp_path / "state.db")
+    who = "02" + "3" * 64
+    storage.insert_bft_base_fee(BftBaseFee(500, 1776_000_000_000, 1, who))
+    for n in (500, 9_999):        # 9999 predates any author record
+        storage.write_alert(
+            AlertEvent(
+                rule="reorg", severity=Severity.INFO,
+                key=f"reorg:{n}:{'0x' + 'd' * 64}",
+                title="divergence", detail=f"Block #{n}",
+            ),
+            ts=1776_000_000.0 + n,
+        )
+
+    st = storage.reorg_proposer_stats()
+    assert st["reorgs_total"] == 2
+    assert st["reorgs_attributed"] == 1
+    assert [r["reorgs"] for r in st["by_proposer"]] == [1]
+    storage.close()
+
+
+def test_reorg_proposer_stats_on_an_empty_db(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    st = storage.reorg_proposer_stats()
+    assert st == {
+        "window_blocks": 0, "proposers": 0, "collision": 0.0,
+        "reorgs_total": 0, "reorgs_attributed": 0, "by_proposer": [],
+    }
+    storage.close()
+
+
 def test_get_reorg_trace_returns_none_for_unknown(tmp_path: Path) -> None:
     storage = Storage(tmp_path / "state.db")
     assert storage.get_reorg_trace(12345) is None
