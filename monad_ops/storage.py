@@ -1478,6 +1478,75 @@ class Storage:
                     out[int(r["block_seq"])] = str(r["author"])
         return out
 
+    def reorg_proposer_stats(self) -> dict:
+        """Do observed reorgs concentrate on particular proposers?
+
+        Joins every reorg alert to the author recorded for that block and
+        weighs each proposer's reorg count against the share of blocks
+        they actually proposed. Without that denominator the answer is
+        meaningless — a validator proposing 5% of blocks should collect
+        5% of reorgs.
+
+        ``collision`` is ``sum(share_i^2)``: the chance two independently
+        chosen blocks share a proposer. It is the null hypothesis to
+        judge a run of same-proposer reorgs against.
+
+        Internal analysis only — no endpoint exposes this. A proposer key
+        is public on-chain, but a published "these validators cause
+        reorgs" table is an accusation, and the counts here are small
+        enough to mislead.
+        """
+        with self._lock:
+            shares = self._conn.execute(
+                """SELECT author, COUNT(*) AS n FROM bft_base_fee
+                   WHERE author IS NOT NULL GROUP BY author"""
+            ).fetchall()
+            keys = self._conn.execute(
+                "SELECT key FROM alerts WHERE rule = 'reorg'"
+            ).fetchall()
+
+        total_blocks = sum(r["n"] for r in shares)
+        if not total_blocks:
+            return {
+                "window_blocks": 0, "proposers": 0, "collision": 0.0,
+                "reorgs_total": 0, "reorgs_attributed": 0, "by_proposer": [],
+            }
+        share = {r["author"]: r["n"] / total_blocks for r in shares}
+        blocks = {r["author"]: r["n"] for r in shares}
+
+        # Reorg alert keys are "reorg:<block_number>:<new_id>".
+        numbers: list[int] = []
+        for (key,) in ((r["key"],) for r in keys):
+            parts = (key or "").split(":", 2)
+            if len(parts) >= 3 and parts[1].isdigit():
+                numbers.append(int(parts[1]))
+
+        attributed = self.get_proposers(numbers)
+        counts: dict[str, int] = {}
+        for author in attributed.values():
+            counts[author] = counts.get(author, 0) + 1
+
+        by_proposer = [
+            {
+                "author": a,
+                "reorgs": c,
+                "blocks_proposed": blocks.get(a, 0),
+                "share": share.get(a, 0.0),
+                # What this proposer "should" have collected if reorgs
+                # were independent of who proposed the block.
+                "expected": len(attributed) * share.get(a, 0.0),
+            }
+            for a, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        ]
+        return {
+            "window_blocks": total_blocks,
+            "proposers": len(share),
+            "collision": sum(s * s for s in share.values()),
+            "reorgs_total": len(numbers),
+            "reorgs_attributed": len(attributed),
+            "by_proposer": by_proposer,
+        }
+
     def sampled_bft_base_fee(
         self,
         from_ts_ms: int,
