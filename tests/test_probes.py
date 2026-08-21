@@ -23,6 +23,7 @@ import pytest
 from monad_ops.collector.probes import (
     probe_fd_limits,
     probe_key_backups,
+    probe_stale_deploy,
     probe_triedb_migration,
 )
 
@@ -377,3 +378,86 @@ async def test_cancellation_still_propagates() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(cancel)) as c:
         with pytest.raises(asyncio.CancelledError):
             await probe_triedb_migration(client=c)
+
+
+# ---------------------------------------------------------------------------
+# stale_deploy — "you pulled but did not restart"
+# ---------------------------------------------------------------------------
+
+def _mk_checkout(root: Path, sha: str, *, packed: bool = False) -> Path:
+    """Minimal .git that _resolve_git_head can read."""
+    git = root / ".git"
+    (git / "refs" / "heads").mkdir(parents=True, exist_ok=True)
+    (git / "HEAD").write_text("ref: refs/heads/main\n")
+    if packed:
+        (git / "packed-refs").write_text(
+            f"# pack-refs with: peeled fully-peeled sorted\n{sha} refs/heads/main\n"
+        )
+    else:
+        (git / "refs" / "heads" / "main").write_text(sha + "\n")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_ok_when_checkout_matches(tmp_path: Path) -> None:
+    sha = "a" * 40
+    repo = _mk_checkout(tmp_path, sha)
+    r = await probe_stale_deploy(repo_dir=repo, startup_head=sha)
+    assert r.status == "ok"
+    assert sha[:12] in r.summary
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_warns_after_a_pull(tmp_path: Path) -> None:
+    """The case this exists for: files moved, process did not."""
+    old, new = "a" * 40, "b" * 40
+    repo = _mk_checkout(tmp_path, new)
+    r = await probe_stale_deploy(repo_dir=repo, startup_head=old)
+    assert r.status == "warn"          # never critical — stale is not an outage
+    assert new[:12] in r.summary and old[:12] in r.summary
+    assert r.details == {"running": old, "checkout": new}
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_reads_packed_refs(tmp_path: Path) -> None:
+    # A fresh clone keeps refs packed, so a loose-file-only reader would
+    # report "unknown" on exactly the deployments most likely to be new.
+    sha = "c" * 40
+    repo = _mk_checkout(tmp_path, sha, packed=True)
+    assert not (repo / ".git" / "refs" / "heads" / "main").exists()
+    r = await probe_stale_deploy(repo_dir=repo, startup_head=sha)
+    assert r.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_follows_a_worktree_pointer(tmp_path: Path) -> None:
+    # In a worktree .git is a FILE pointing at the real gitdir.
+    sha = "d" * 40
+    real = _mk_checkout(tmp_path / "real", sha)
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (wt / ".git").write_text(f"gitdir: {real / '.git'}\n")
+    r = await probe_stale_deploy(repo_dir=wt, startup_head=sha)
+    assert r.status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_unknown_outside_a_checkout(tmp_path: Path) -> None:
+    """Installed from a wheel is a normal way to run, not a fault.
+
+    'I cannot tell' must never render as 'nothing changed'.
+    """
+    r = await probe_stale_deploy(repo_dir=tmp_path, startup_head="e" * 40)
+    assert r.status == "unknown"
+    r2 = await probe_stale_deploy(repo_dir=tmp_path, startup_head=None)
+    assert r2.status == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_stale_deploy_never_raises_on_a_broken_git_dir(tmp_path: Path) -> None:
+    # run_all_probes gathers without return_exceptions, so an escape here
+    # would discard every other probe's result for the cycle.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/gone\n")
+    r = await probe_stale_deploy(repo_dir=tmp_path, startup_head="f" * 40)
+    assert r.status == "unknown"
