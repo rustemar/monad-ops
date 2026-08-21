@@ -596,6 +596,105 @@ async def probe_triedb_migration(
     )
 
 
+def _resolve_git_head(repo_dir: Path) -> str | None:
+    """Resolve HEAD to a commit sha by reading ``.git``, without running git.
+
+    No subprocess on purpose: this runs on the probe loop, and shelling
+    out for something this small is cost the loop should not pay. It also
+    keeps the probe working where git is not installed at all.
+
+    Returns None whenever the answer is not knowable — not a checkout, a
+    layout we do not recognise, an unreadable file. "I cannot tell" is a
+    legitimate reading here and must never look like "nothing changed".
+    """
+    try:
+        dot_git = repo_dir / ".git"
+        # A worktree or submodule has .git as a FILE pointing elsewhere.
+        if dot_git.is_file():
+            pointer = dot_git.read_text(encoding="utf-8").strip()
+            if not pointer.startswith("gitdir:"):
+                return None
+            target = Path(pointer.split(":", 1)[1].strip())
+            dot_git = target if target.is_absolute() else (repo_dir / target)
+        if not dot_git.is_dir():
+            return None
+
+        head = (dot_git / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            # Detached HEAD stores the sha directly.
+            return head or None
+
+        ref = head.split(":", 1)[1].strip()
+        loose = dot_git / ref
+        if loose.is_file():
+            return loose.read_text(encoding="utf-8").strip() or None
+
+        # Freshly cloned or gc'd repos keep refs in packed-refs instead.
+        packed = dot_git / "packed-refs"
+        if packed.is_file():
+            for line in packed.read_text(encoding="utf-8").splitlines():
+                if line.startswith("#") or line.startswith("^"):
+                    continue
+                parts = line.split(None, 1)
+                if len(parts) == 2 and parts[1].strip() == ref:
+                    return parts[0].strip()
+        return None
+    except Exception:  # noqa: BLE001
+        # Same contract as the other probes: run_all_probes gathers
+        # without return_exceptions, so nothing may escape from here.
+        return None
+
+
+# The commit this process's code was imported from. Captured once, at
+# import, which is exactly the moment the running code was fixed.
+_REPO_DIR = Path(__file__).resolve().parents[2]
+_STARTUP_HEAD = _resolve_git_head(_REPO_DIR)
+
+
+async def probe_stale_deploy(
+    repo_dir: Path = _REPO_DIR,
+    startup_head: str | None = _STARTUP_HEAD,
+) -> ProbeResult:
+    """Has the checkout moved since this process started?
+
+    monad-ops runs from a checkout, so ``git pull`` changes the files on
+    disk and nothing else — the running process keeps serving the old
+    code until someone restarts it. That gap has bitten this project
+    twice: a local instance served six-day-old code for days, and a
+    second deployment silently parsed nothing for about ten weeks after
+    the node's log format moved underneath it.
+
+    Warn, never critical: stale code is not an outage, and the fix is a
+    restart at the operator's convenience. ``unknown`` when the answer
+    is not knowable (installed from a wheel rather than a checkout),
+    which is an ordinary way to run and not a fault.
+    """
+    current = _resolve_git_head(repo_dir)
+    if startup_head is None or current is None:
+        return ProbeResult(
+            name="stale_deploy",
+            status="unknown",
+            summary="not running from a readable git checkout",
+            details={"repo_dir": str(repo_dir)},
+        )
+    if current == startup_head:
+        return ProbeResult(
+            name="stale_deploy",
+            status="ok",
+            summary=f"running the checked-out commit ({startup_head[:12]})",
+            details={"running": startup_head, "checkout": current},
+        )
+    return ProbeResult(
+        name="stale_deploy",
+        status="warn",
+        summary=(
+            f"checkout moved to {current[:12]} since this process started "
+            f"on {startup_head[:12]} — restart to deploy"
+        ),
+        details={"running": startup_head, "checkout": current},
+    )
+
+
 def _extract_metric_value(body: str, name: str) -> int | None:
     """Pull a single gauge out of a Prometheus exposition body.
 
@@ -636,4 +735,5 @@ async def run_all_probes(services: list[str]) -> list[ProbeResult]:
         probe_disk_usage(),
         probe_fd_limits(),
         probe_triedb_migration(),
+        probe_stale_deploy(),
     ))
