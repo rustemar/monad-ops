@@ -222,6 +222,29 @@ class DualWriteRuleConfig(BaseModel):
     recovery_confirm_blocks: int = Field(default=200, ge=1)
 
 
+class EnrichmentHealthRuleConfig(BaseModel):
+    """Health of the receipts-enrichment worker.
+
+    Watches the worker's own counters, not the chain: a failing or
+    overflowing enricher leaves every node-side metric healthy while
+    per-tx contract data quietly stops being written.
+
+    Baseline on this node 2026-09-01 is zero — 3,077,696 attempts with
+    no failures and no drops over an 11-day process — so the 25% arm has
+    a wide margin over the 0.03% failure rate of the worst blip the
+    2026-08-04 audit recorded. WARN only; see the rule docstring.
+    """
+    poll_interval_sec: int = 60
+    # Samples retained for the failure ratio. 5 x 60 s = a 5-minute view,
+    # long enough that one slow RPC second cannot arm it.
+    window: int = 5
+    warn_fail_pct: float = 25.0
+    disarm_fail_pct: float = 10.0
+    # Below this many attempts in the window the ratio is noise.
+    min_window_attempts: int = 20
+    recovery_confirm_samples: int = 5
+
+
 class RulesConfig(BaseModel):
     stall: StallRuleConfig = StallRuleConfig()
     retry_spike: RetrySpikeRuleConfig = RetrySpikeRuleConfig()
@@ -234,6 +257,7 @@ class RulesConfig(BaseModel):
     process_restart: ProcessRestartRuleConfig = ProcessRestartRuleConfig()
     waltrace_flood: WaltraceFloodRuleConfig = WaltraceFloodRuleConfig()
     dual_write: DualWriteRuleConfig = DualWriteRuleConfig()
+    enrichment_health: EnrichmentHealthRuleConfig = EnrichmentHealthRuleConfig()
     dedup: DedupConfig = DedupConfig()
 
 

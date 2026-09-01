@@ -55,6 +55,7 @@ from monad_ops.rules import (
     AssertionRule,
     BlockProcessingSlowdownRule,
     DualWriteRule,
+    EnrichmentHealthRule,
     NetworkLayerSignalRule,
     ProcessRestartRule,
     ReferenceLagRule,
@@ -546,6 +547,40 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("process_restart_loop.error", exc=str(e))
             await asyncio.sleep(interval)
 
+    async def enrichment_health_loop():
+        """Sample the enrichment worker's counters and evaluate the rule.
+
+        Only started when the enricher exists, so no disabled-path guard
+        is needed here. Counters are in-process and cumulative; the rule
+        does its own delta arithmetic and stays silent on the first
+        sample while it takes a baseline.
+        """
+        rule = EnrichmentHealthRule(
+            warn_fail_pct=config.rules.enrichment_health.warn_fail_pct,
+            disarm_fail_pct=config.rules.enrichment_health.disarm_fail_pct,
+            min_window_attempts=config.rules.enrichment_health.min_window_attempts,
+            window=config.rules.enrichment_health.window,
+            recovery_confirm_samples=(
+                config.rules.enrichment_health.recovery_confirm_samples
+            ),
+        )
+        interval = max(15, int(config.rules.enrichment_health.poll_interval_sec))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                stats = enricher.stats
+                for ev in rule.on_sample(
+                    attempts=stats["attempts"],
+                    failed=stats["failed"],
+                    dropped=stats["dropped"],
+                    queue_size=stats["queue_size"],
+                ):
+                    await sink.deliver(ev)
+            except Exception as e:  # noqa: BLE001
+                # Reading in-memory counters cannot fail; anything here is
+                # a bug. Log and keep sampling — never let this loop die.
+                log.error("enrichment_health_loop.error", exc=str(e))
+
     async def consensus_loop():
         """Tail monad-bft for round advances + local timeouts.
 
@@ -964,6 +999,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     if enricher is not None:
         enricher_task = asyncio.create_task(enricher.run(), name="enricher")
         tasks.add(enricher_task)
+        tasks.add(asyncio.create_task(
+            enrichment_health_loop(), name="enrichment_health",
+        ))
 
     done, pending = await asyncio.wait(
         tasks,
