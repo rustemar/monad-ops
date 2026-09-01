@@ -126,6 +126,27 @@ enabled = false
 warn_after_blocks = 200
 recovery_confirm_blocks = 200
 
+[rules.enrichment_health]
+# Health of the receipts-enrichment worker, which is the one data path
+# here that can fail without changing anything you look at: blocks keep
+# arriving, every node metric stays green, and per-tx contract data
+# quietly stops being written. Two conditions — the RPC erroring
+# (failure rate) and the RPC too slow to keep up (queue overflow, which
+# discards blocks permanently). WARN only; the node is fine, our data
+# is not.
+poll_interval_sec = 60
+# Samples kept for the failure ratio. 5 x 60 s = a 5-minute view.
+window = 5
+# Baseline on a healthy node is zero failures, and the worst blip on
+# record was 0.03% of blocks, so 25% has a wide margin.
+warn_fail_pct = 25.0
+disarm_fail_pct = 10.0
+# Below this many attempts in the window the ratio is noise.
+min_window_attempts = 20
+# Clean samples before RECOVERED. The bad samples must also age out of
+# `window` first, so green lands ~10 min after the RPC returns.
+recovery_confirm_samples = 5
+
 [rules.dedup]
 # Repeat alerts on the same key are suppressed for this long.
 # RECOVERED bypasses it so the all-clear is never delayed.

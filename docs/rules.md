@@ -1,6 +1,6 @@
 # Alerting rules
 
-monad-ops ships eleven rules. Each one consumes a typed stream — parsed
+monad-ops ships twelve rules. Each one consumes a typed stream — parsed
 `__exec_block` records, parsed monad-bft consensus events, or a poller's
 snapshots — and emits `AlertEvent`s. This page documents what every rule
 fires on, why it exists, and which `config.toml` keys tune it.
@@ -42,6 +42,7 @@ Two delivery behaviours are worth knowing before you read the table:
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL | `[rules.waltrace_flood]` |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO | `[version_watch]` |
 | `dual_write` | MIP-8 dual-write state-root line stopped | WARN | `[rules.dual_write]` |
+| `enrichment_health` | receipt enrichment failing or shedding blocks | WARN | `[rules.enrichment_health]` |
 
 ---
 
@@ -442,6 +443,69 @@ repeat reds.
 enabled = false
 warn_after_blocks = 200
 recovery_confirm_blocks = 200
+```
+
+## `enrichment_health`
+
+Watches the receipts-enrichment worker's own counters. This is the one
+data path in monad-ops that can fail without changing anything an
+operator looks at: blocks keep arriving from the journal, `stall` and
+`retry_spike` stay quiet, the dashboard stays green — and the per-tx
+receipt fetch against the local RPC returns nothing, so contract
+attribution, the top-contracts tables and the `contract_hour` rollup go
+empty for as long as it lasts. Before this rule the only trace was an
+`enricher.fail` line in the journal.
+
+Two conditions, two alert keys, because they have different causes and
+different answers:
+
+- **`enrichment_health:failing`** — the RPC is erroring or unreachable.
+  Fires when the failure ratio over the rolling window crosses
+  `warn_fail_pct`, provided the window carries at least
+  `min_window_attempts` attempts. That gate matters: on a quiet window
+  three failures out of five attempts is 60% and means nothing.
+- **`enrichment_health:dropping`** — the RPC is *slow* rather than
+  broken. The queue backs up to `[enrichment] queue_size` and `submit`
+  discards the oldest pending block on each new one to keep live writes
+  moving. Those blocks are gone; nothing re-queues them, so the gap in
+  the tables is permanent unless you backfill.
+
+WARN for both, deliberately. The chain is fine and only our own data is
+affected, and CRITICAL would trip the dashboard's `isCriticalIncident`
+catch-all and paint the public page red for a sidecar problem — the
+same reasoning as `dual_write`.
+
+Calibration on a testnet full node, 2026-09-01: one uninterrupted
+process since 08-21 had 3,077,696 attempts, 0 failed, 0 dropped, with
+the queue empty at every observation; the retained journal carries one
+`enricher.fail` and no `enricher.queue_full` at all. The busiest
+failure class this path has produced was 0.03% of blocks, measured in
+the 2026-08-04 audit, so the 25% arm has roughly a 800x margin over the
+worst background on record.
+
+The drop condition has no threshold band. Its baseline is not low, it
+is zero, and the queue holds ~25 minutes of blocks at testnet cadence —
+reaching it takes a sustained backlog, never a blip. Same shape as
+`waltrace_flood`: no boundary, nothing to flap on, no hysteresis.
+
+Green is slow on purpose. The failure ratio stays above the disarm line
+until the bad samples age out of the rate window, so RECOVERED lands
+`window + recovery_confirm_samples` samples — about 10 minutes on the
+defaults — after the RPC comes back. Late is the safe direction for an
+all-clear that bypasses the dedup cooldown by design.
+
+The counters are cumulative for the life of the process and the rule
+reads deltas between samples, so the first sample after a restart only
+takes a baseline and never fires.
+
+```toml
+[rules.enrichment_health]
+poll_interval_sec = 60
+window = 5
+warn_fail_pct = 25.0
+disarm_fail_pct = 10.0
+min_window_attempts = 20
+recovery_confirm_samples = 5
 ```
 
 ## Not a rule: host probes

@@ -73,6 +73,7 @@ cannot write back to the node.
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO |
 | `dual_write` | MIP-8 dual-write state-root line stopped | WARN |
+| `enrichment_health` | receipt enrichment failing or shedding blocks | WARN |
 
 [docs/rules.md](docs/rules.md) documents each one: what it fires on, the
 field evidence behind its defaults, and every config key. Worth reading

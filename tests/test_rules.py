@@ -4,6 +4,7 @@ from monad_ops.rules import (
     BlockProcessingSlowdownRule,
     CodeColor,
     DualWriteRule,
+    EnrichmentHealthRule,
     NetworkLayerSignalRule,
     ProcessRestartRule,
     ReferenceLagRule,
@@ -1658,3 +1659,179 @@ class TestDualWriteRule:
         rule = self._rule(enabled=False)
         rule.on_dual_root(self._dual(1))
         assert all(rule.on_block(_block(n)) is None for n in range(1, 500))
+
+
+class TestEnrichmentHealthRule:
+    """Receipts-enrichment worker health.
+
+    The counters are cumulative for the life of the process, so every
+    test drives the rule with running totals, not per-sample deltas.
+    """
+
+    class _Worker:
+        """Running totals, advanced the way the real worker does."""
+
+        def __init__(self) -> None:
+            self.attempts = 0
+            self.failed = 0
+            self.dropped = 0
+            self.queue_size = 0
+
+        def work(self, ok: int, bad: int = 0, dropped: int = 0) -> dict[str, int]:
+            self.attempts += ok + bad
+            self.failed += bad
+            self.dropped += dropped
+            return {
+                "attempts": self.attempts,
+                "failed": self.failed,
+                "dropped": self.dropped,
+                "queue_size": self.queue_size,
+            }
+
+    def _feed(self, rule, worker, samples, ok, bad=0, dropped=0):
+        """Run N identical samples, return every event they produced."""
+        events = []
+        for _ in range(samples):
+            events.extend(rule.on_sample(**worker.work(ok, bad, dropped)))
+        return events
+
+    def test_first_sample_only_takes_a_baseline(self):
+        """Cumulative counters mean the first reading carries the whole
+        process history — firing on it would page on every restart."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        # A process that has already failed everything it ever tried.
+        assert rule.on_sample(**worker.work(0, bad=5_000)) == []
+
+    def test_healthy_traffic_never_fires(self):
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        assert self._feed(rule, worker, 50, ok=150) == []
+
+    def test_failing_rpc_arms_warn_once(self):
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        events = self._feed(rule, worker, 4, ok=0, bad=150)
+        assert len(events) == 1
+        ev = events[0]
+        assert ev.rule == "enrichment_health"
+        assert ev.severity == Severity.WARN
+        assert ev.key == "enrichment_health:failing"
+        assert "100.0%" in ev.detail
+
+    def test_quiet_window_cannot_arm(self):
+        """Three failures out of five attempts is 60% and means nothing.
+        Same gate as retry_spike's min_window_tx_avg."""
+        rule = EnrichmentHealthRule(min_window_attempts=20)
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=1)
+        assert self._feed(rule, worker, 10, ok=0, bad=1) == []
+
+    def test_background_failure_rate_stays_silent(self):
+        """The worst blip this path has produced was 0.03% of blocks."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        # One failure per 3000 attempts, sustained.
+        assert self._feed(rule, worker, 30, ok=2_999, bad=1) == []
+
+    def test_recovery_needs_the_window_to_flush_then_the_confirm_count(self):
+        """Green is deliberately slow: the ratio stays above the disarm
+        line until the failing samples age out of the rate window, and
+        only then do the clean samples start counting. With the defaults
+        that is 5 + 5 samples ≈ 10 minutes after the RPC comes back."""
+        rule = EnrichmentHealthRule(window=5, recovery_confirm_samples=5)
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        self._feed(rule, worker, 4, ok=0, bad=150)
+
+        # Four to push the failures out, then four of the five clean.
+        assert self._feed(rule, worker, 8, ok=150) == []
+        events = self._feed(rule, worker, 1, ok=150)
+        assert len(events) == 1
+        assert events[0].severity == Severity.RECOVERED
+        assert events[0].key == "enrichment_health:failing"
+
+    def test_partial_recovery_inside_the_band_does_not_disarm(self):
+        """Between disarm and arm the rule holds — that band is the
+        whole point of having two thresholds."""
+        rule = EnrichmentHealthRule(
+            warn_fail_pct=25.0, disarm_fail_pct=10.0, recovery_confirm_samples=2,
+        )
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=100)
+        self._feed(rule, worker, 5, ok=0, bad=100)
+        # 20% failures: below the arm point, above the disarm point.
+        assert self._feed(rule, worker, 10, ok=80, bad=20) == []
+
+    def test_a_relapse_restarts_the_recovery_count(self):
+        rule = EnrichmentHealthRule(window=5, recovery_confirm_samples=3)
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        self._feed(rule, worker, 4, ok=0, bad=150)
+
+        # Window flushed plus two of the three clean samples counted.
+        assert self._feed(rule, worker, 6, ok=150) == []
+        assert self._feed(rule, worker, 1, ok=0, bad=150) == []
+        # The count is back at zero: the single bad sample has to age
+        # out of the window again before any clean sample counts.
+        assert self._feed(rule, worker, 6, ok=150) == []
+        events = self._feed(rule, worker, 1, ok=150)
+        assert len(events) == 1
+        assert events[0].severity == Severity.RECOVERED
+
+    def test_dropped_blocks_arm_on_the_first_one(self):
+        """Baseline is zero and the queue holds ~25 minutes of blocks,
+        so reaching it is never a blip — no threshold band to cross."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        worker.queue_size = 5_000
+        events = self._feed(rule, worker, 1, ok=150, dropped=1)
+        assert len(events) == 1
+        assert events[0].severity == Severity.WARN
+        assert events[0].key == "enrichment_health:dropping"
+        assert "never re-queued" in events[0].detail
+
+    def test_continued_dropping_does_not_re_fire(self):
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        self._feed(rule, worker, 1, ok=150, dropped=1)
+        assert self._feed(rule, worker, 20, ok=150, dropped=40) == []
+
+    def test_drops_recover_on_their_own_envelope(self):
+        rule = EnrichmentHealthRule(recovery_confirm_samples=3)
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        self._feed(rule, worker, 1, ok=150, dropped=5)
+        assert self._feed(rule, worker, 2, ok=150) == []
+        events = self._feed(rule, worker, 1, ok=150)
+        assert len(events) == 1
+        assert events[0].severity == Severity.RECOVERED
+        assert events[0].key == "enrichment_health:dropping"
+
+    def test_both_conditions_report_separately(self):
+        """A slow RPC that also errors is one situation with two fixes.
+        Collapsing them into one event would drop one of them."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        events = self._feed(rule, worker, 4, ok=0, bad=150, dropped=3)
+        keys = {ev.key for ev in events}
+        assert keys == {"enrichment_health:failing", "enrichment_health:dropping"}
+
+    def test_counters_going_backwards_re_baseline_silently(self):
+        """Defensive: a worker re-created behind a rule that outlived it
+        would otherwise read as a huge negative delta."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 3, ok=150)
+        assert rule.on_sample(
+            attempts=1, failed=0, dropped=0, queue_size=0,
+        ) == []
+        # Baseline re-taken from the lower value: healthy traffic from
+        # there stays quiet instead of arming on the reset.
+        fresh = self._Worker()
+        fresh.attempts = 1
+        assert self._feed(rule, fresh, 10, ok=150) == []
