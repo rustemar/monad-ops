@@ -25,6 +25,9 @@ const VERSION_INTERVAL = 60000;
 // epoch ~5.5h on testnet). 60s client poll keeps the tile fresh after
 // any restart-driven cache miss without flooding the server.
 const VALIDATOR_SET_INTERVAL = 60000;
+// enrichment_health samples the worker once a minute server-side, so a
+// faster client poll would only re-read the same verdict.
+const ENRICHMENT_INTERVAL = 60000;
 
 // Inflight-dedup per endpoint: when setInterval fires while a previous
 // request is still in flight (slow network, backgrounded tab releasing
@@ -2564,6 +2567,71 @@ function renderVersion(d) {
     extrasEl.textContent = "";
 }
 
+// Receipts-enrichment health. The alert for this is edge-triggered and
+// scrolls out of /alerts, so the tile is the only surface that says
+// enrichment is *still* degraded rather than that it once was.
+async function fetchEnrichment() {
+    try {
+        const r = await pollFetch("enrichment", "/api/enrichment/status");
+        if (!r.ok) throw new Error(r.statusText);
+        renderEnrichment(await r.json());
+    } catch (e) { /* swallow */ }
+}
+
+function renderEnrichment(d) {
+    const statusEl = document.getElementById("enrichment-status");
+    const lineEl = document.getElementById("enrichment-line");
+    const extrasEl = document.getElementById("enrichment-extras");
+    if (!statusEl || !lineEl || !extrasEl) return;
+
+    if (!d || !d.enabled) {
+        statusEl.className = "status unknown";
+        statusEl.textContent = "off";
+        lineEl.textContent = "enrichment disabled in config";
+        extrasEl.textContent = "";
+        return;
+    }
+
+    const h = d.health || {};
+    // Lifetime totals, not the window: a recovered outage still left a
+    // permanent hole in the contract tables, so the counts stay worth
+    // showing after the status word goes back to green.
+    const enriched = `${fmtInt(d.succeeded)} blocks enriched`;
+    const queue = `queue ${fmtInt(d.queue_size)}`;
+
+    if (h.status === "dropping") {
+        statusEl.className = "status warn";
+        statusEl.textContent = "shedding";
+        lineEl.textContent = `${fmtInt(d.dropped)} block(s) dropped · ${queue}`;
+        extrasEl.textContent = "queue full — those blocks are not re-queued";
+        return;
+    }
+
+    if (h.status === "failing") {
+        statusEl.className = "status warn";
+        statusEl.textContent = "failing";
+        lineEl.textContent =
+            `${fmtPct(h.fail_pct)} of the last ${fmtInt(h.window_attempts)} attempts failed`;
+        extrasEl.textContent = "check monad-rpc";
+        return;
+    }
+
+    if (h.status === "healthy" || h.status === "idle") {
+        statusEl.className = "status ok";
+        statusEl.textContent = "ok";
+        lineEl.textContent = `${enriched} · ${queue}`;
+        extrasEl.textContent = (d.failed || d.dropped)
+            ? `${fmtInt(d.failed)} failed · ${fmtInt(d.dropped)} dropped since restart`
+            : "no failures since restart";
+        return;
+    }
+
+    statusEl.className = "status unknown";
+    statusEl.textContent = "unknown";
+    lineEl.textContent = `${enriched} · first sample pending`;
+    extrasEl.textContent = "";
+}
+
 // Active validator-set snapshot (staking precompile). Updates once per
 // epoch (~5.5h on testnet); tile shows current consensus/eligible counts
 // + cutoff stake at a glance, popup carries the full snapshot.
@@ -2923,6 +2991,7 @@ fetchIncidents();
 fetchProbes();
 fetchVersion();
 fetchValidatorSet();
+fetchEnrichment();
 fetchRecoveryPath();
 fetchStressEvents();
 // Throttle polling when the tab is hidden to save battery and reduce
@@ -2947,6 +3016,7 @@ _schedule(fetchIncidents, INCIDENTS_INTERVAL);
 _schedule(fetchProbes, PROBES_INTERVAL);
 _schedule(fetchVersion, VERSION_INTERVAL);
 _schedule(fetchValidatorSet, VALIDATOR_SET_INTERVAL);
+_schedule(fetchEnrichment, ENRICHMENT_INTERVAL);
 // recovery-path counter is curated (operator updates it on GitHub
 // issue confirmation); 10-min cadence is generous, the page itself
 // is the canonical surface.

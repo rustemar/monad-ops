@@ -1212,9 +1212,43 @@ def build_app(
 
     @app.api_route("/api/enrichment/status", methods=["GET", "HEAD"])
     async def api_enrichment_status() -> JSONResponse:
+        """Receipts-enrichment worker: lifetime counters plus the rule's
+        current verdict.
+
+        The counters are cumulative since process start and answer "has
+        this ever gone wrong"; ``health`` is the rolling-window view and
+        answers "is it wrong now". Both are needed — an outage that
+        recovered leaves a permanent gap in the contract tables, so the
+        lifetime ``failed``/``dropped`` totals stay operationally
+        interesting long after the alert cleared.
+
+        Public-safe: counts and a status word, no host metadata.
+        """
         if enricher is None:
             return JSONResponse({"enabled": False})
-        return JSONResponse({"enabled": True, **enricher.stats})
+        health, checked_at = state.enrichment_health()
+        return JSONResponse({
+            "enabled": True,
+            **enricher.stats,
+            "checked_at": checked_at,
+            "health": {
+                "status": "unknown",
+                "failing": False,
+                "dropping": False,
+                "window_attempts": 0,
+                "window_failed": 0,
+                "fail_pct": None,
+                "samples": 0,
+            } if health is None else {
+                "status": health.status,
+                "failing": health.failing,
+                "dropping": health.dropping,
+                "window_attempts": health.window_attempts,
+                "window_failed": health.window_failed,
+                "fail_pct": health.fail_pct,
+                "samples": health.samples,
+            },
+        })
 
     @app.api_route("/api/window_summary", methods=["GET", "HEAD"])
     async def api_window_summary(

@@ -498,6 +498,16 @@ The counters are cumulative for the life of the process and the rule
 reads deltas between samples, so the first sample after a restart only
 takes a baseline and never fires.
 
+Unlike the other rules this one also publishes its current verdict, as
+`health` on `GET /api/enrichment/status`, which is what the "receipt
+enrichment" tile on the dashboard renders. Alerts are edge-triggered
+and a WARN eventually scrolls out of `/alerts`, so without that block
+there is no surface that says enrichment is *still* degraded rather
+than that it once was. The lifetime `failed` and `dropped` counters sit
+alongside it and stay interesting after recovery: the blocks missed
+during an outage are never re-fetched, so the gap they left in the
+contract tables is permanent.
+
 ```toml
 [rules.enrichment_health]
 poll_interval_sec = 60

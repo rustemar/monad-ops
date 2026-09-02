@@ -121,7 +121,7 @@
                     </tr>
                     <tr>
                         <td><code>GET /api/enrichment/status</code></td>
-                        <td>Operator status of the receipts-enrichment worker — <code>enabled</code>, <code>attempts</code>/<code>succeeded</code>/<code>failed</code>/<code>dropped</code> counters.</td>
+                        <td>Operator status of the receipts-enrichment worker. Lifetime <code>attempts</code>/<code>succeeded</code>/<code>failed</code>/<code>dropped</code> counters since process start, plus <code>health</code> — the <code>enrichment_health</code> rule's rolling-window verdict (<code>status</code>, <code>fail_pct</code> over <code>window_attempts</code>). Counters answer "has this ever gone wrong", <code>health</code> answers "is it wrong now".</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/probes</code></td>
