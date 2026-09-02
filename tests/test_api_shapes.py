@@ -118,6 +118,58 @@ async def test_enrichment_status_disabled(client: httpx.AsyncClient) -> None:
     assert body["enabled"] is False
 
 
+class _StubEnricher:
+    """Only the attribute the endpoint reads."""
+
+    stats = {
+        "queue_size": 0, "attempts": 100, "succeeded": 98,
+        "failed": 2, "dropped": 0,
+    }
+
+
+def _enriched_client(state: State) -> httpx.AsyncClient:
+    app = build_app(state, _minimal_config(), enricher=_StubEnricher(), labels=None)
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+    )
+
+
+@pytest.mark.asyncio
+async def test_enrichment_status_unknown_until_the_rule_first_samples(
+    state_with_storage: State,
+) -> None:
+    """The worker starts before the rule's first tick, so the tile must
+    have a health block to render from on the very first fetch."""
+    async with _enriched_client(state_with_storage) as client:
+        body = (await client.get("/api/enrichment/status")).json()
+    assert body["enabled"] is True
+    assert body["attempts"] == 100
+    assert body["checked_at"] is None
+    assert body["health"]["status"] == "unknown"
+    assert body["health"]["fail_pct"] is None
+
+
+@pytest.mark.asyncio
+async def test_enrichment_status_carries_the_rule_verdict(
+    state_with_storage: State,
+) -> None:
+    from monad_ops.rules.enrichment import EnrichmentHealthRule
+
+    rule = EnrichmentHealthRule()
+    rule.on_sample(attempts=0, failed=0, dropped=0, queue_size=0)
+    rule.on_sample(attempts=100, failed=100, dropped=0, queue_size=0)
+    state_with_storage.set_enrichment_health(rule.health)
+
+    async with _enriched_client(state_with_storage) as client:
+        body = (await client.get("/api/enrichment/status")).json()
+    assert body["health"]["status"] == "failing"
+    assert body["health"]["failing"] is True
+    assert body["health"]["fail_pct"] == 100.0
+    assert body["checked_at"] is not None
+    # Lifetime counters keep coming from the worker, not the rule.
+    assert body["succeeded"] == 98
+
+
 @pytest.mark.asyncio
 async def test_api_validator_set_unknown_until_first_probe(
     client: httpx.AsyncClient,

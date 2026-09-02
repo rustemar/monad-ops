@@ -569,12 +569,16 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             await asyncio.sleep(interval)
             try:
                 stats = enricher.stats
-                for ev in rule.on_sample(
+                events = rule.on_sample(
                     attempts=stats["attempts"],
                     failed=stats["failed"],
                     dropped=stats["dropped"],
                     queue_size=stats["queue_size"],
-                ):
+                )
+                # Publish before delivering: the tile should already show
+                # the degraded state by the time the alert lands.
+                state.set_enrichment_health(rule.health)
+                for ev in events:
                     await sink.deliver(ev)
             except Exception as e:  # noqa: BLE001
                 # Reading in-memory counters cannot fail; anything here is

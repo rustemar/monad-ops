@@ -20,6 +20,7 @@ from monad_ops.collector.reference_rpc import ReferenceSample
 from monad_ops.collector.validator_set import ValidatorSetSnapshot
 from monad_ops.collector.version import VersionStatus
 from monad_ops.parser import ConsensusEvent, ConsensusEventKind, ExecBlock
+from monad_ops.rules.enrichment import EnrichmentHealth
 from monad_ops.rules.events import AlertEvent, code_color_for
 from monad_ops.rules.reorg import ReorgRule
 from monad_ops.storage import BftBaseFee, BftMinute, Storage
@@ -128,6 +129,11 @@ class State:
         # for the dashboard tile.
         self._validator_set: ValidatorSetSnapshot | None = None
         self._validator_set_checked_at: float | None = None
+        # Last assessment from EnrichmentHealthRule. The alert for it is
+        # edge-triggered, so this is the only place the dashboard can
+        # read that enrichment is *still* degraded rather than once was.
+        self._enrichment_health: EnrichmentHealth | None = None
+        self._enrichment_health_at: float | None = None
         self._started_at = time.time()
         self._blocks_seen_total = 0
         self._storage = storage
@@ -672,6 +678,15 @@ class State:
     def version(self) -> tuple[VersionStatus | None, float | None]:
         with self._lock:
             return self._version, self._version_checked_at
+
+    def set_enrichment_health(self, health: EnrichmentHealth) -> None:
+        with self._lock:
+            self._enrichment_health = health
+            self._enrichment_health_at = time.time()
+
+    def enrichment_health(self) -> tuple[EnrichmentHealth | None, float | None]:
+        with self._lock:
+            return self._enrichment_health, self._enrichment_health_at
 
     def set_validator_set(self, snapshot: ValidatorSetSnapshot) -> None:
         with self._lock:

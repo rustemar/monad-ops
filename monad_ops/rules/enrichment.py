@@ -62,6 +62,30 @@ from dataclasses import dataclass, field
 from monad_ops.rules.events import AlertEvent, Severity
 
 
+@dataclass(frozen=True, slots=True)
+class EnrichmentHealth:
+    """What the rule currently believes, for the API and the tile.
+
+    Alerts are edge-triggered and a WARN scrolls out of ``/alerts``,
+    so without this the dashboard has no way to show that enrichment is
+    *still* degraded — only that it once was.
+
+    ``status`` is one of ``healthy``, ``failing``, ``dropping``,
+    ``idle`` (too little traffic in the window to judge a ratio) or
+    ``unknown`` (no delta sampled yet). ``fail_pct`` is None whenever
+    the window is below ``min_window_attempts``, so a caller never
+    renders a ratio the rule itself refuses to act on.
+    """
+
+    status: str
+    failing: bool
+    dropping: bool
+    window_attempts: int
+    window_failed: int
+    fail_pct: float | None
+    samples: int
+
+
 @dataclass(slots=True)
 class EnrichmentHealthRule:
     """Fires when the receipts enricher is failing or shedding blocks.
@@ -129,6 +153,35 @@ class EnrichmentHealthRule:
         if drop_event is not None:
             events.append(drop_event)
         return events
+
+    @property
+    def health(self) -> EnrichmentHealth:
+        """Current assessment. Reads state, never changes it."""
+        window_attempts = sum(self._attempts)
+        window_failed = sum(self._failed)
+        judged = window_attempts >= self.min_window_attempts
+        fail_pct = 100.0 * window_failed / window_attempts if judged else None
+
+        if self._drop_armed:
+            status = "dropping"
+        elif self._fail_armed:
+            status = "failing"
+        elif not self._attempts:
+            status = "unknown"
+        elif not judged:
+            status = "idle"
+        else:
+            status = "healthy"
+
+        return EnrichmentHealth(
+            status=status,
+            failing=self._fail_armed,
+            dropping=self._drop_armed,
+            window_attempts=window_attempts,
+            window_failed=window_failed,
+            fail_pct=fail_pct,
+            samples=len(self._attempts),
+        )
 
     def _evaluate_failures(self, queue_size: int) -> list[AlertEvent]:
         window_attempts = sum(self._attempts)

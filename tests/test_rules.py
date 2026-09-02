@@ -1835,3 +1835,43 @@ class TestEnrichmentHealthRule:
         fresh = self._Worker()
         fresh.attempts = 1
         assert self._feed(rule, fresh, 10, ok=150) == []
+
+    def test_health_starts_unknown_and_turns_healthy(self):
+        """The tile renders from this, so it must have an honest answer
+        before the first delta exists."""
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        assert rule.health.status == "unknown"
+        assert rule.health.fail_pct is None
+
+        self._feed(rule, worker, 3, ok=150)
+        h = rule.health
+        assert h.status == "healthy"
+        assert h.failing is False and h.dropping is False
+        assert h.fail_pct == 0.0
+        # Three readings, two deltas — the first one only set a baseline.
+        assert h.window_attempts == 300
+        assert h.samples == 2
+
+    def test_health_reports_idle_when_the_window_is_too_thin(self):
+        """Below the arming gate the rule refuses to judge a ratio, so
+        it must not hand one to the dashboard either."""
+        rule = EnrichmentHealthRule(min_window_attempts=20)
+        worker = self._Worker()
+        self._feed(rule, worker, 3, ok=1)
+        h = rule.health
+        assert h.status == "idle"
+        assert h.fail_pct is None
+
+    def test_health_follows_the_armed_envelopes(self):
+        rule = EnrichmentHealthRule()
+        worker = self._Worker()
+        self._feed(rule, worker, 1, ok=150)
+        self._feed(rule, worker, 4, ok=0, bad=150)
+        assert rule.health.status == "failing"
+        assert rule.health.fail_pct == 100.0
+
+        # Dropping outranks failing: it is the condition that loses data
+        # permanently.
+        self._feed(rule, worker, 1, ok=0, bad=150, dropped=2)
+        assert rule.health.status == "dropping"
