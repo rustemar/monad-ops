@@ -918,3 +918,17 @@ def test_get_reorg_trace_window_zero_returns_only_reorged_block(tmp_path: Path) 
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_load_alerts_range_accepts_several_severities(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    for sev in (Severity.INFO, Severity.WARN, Severity.CRITICAL, Severity.RECOVERED):
+        storage.write_alert(AlertEvent(
+            rule="r", severity=sev, key=f"k-{sev.value}", title=sev.value, detail="",
+        ), ts=1_700_000_000.0)
+    one = storage.load_alerts_range(severity="warn")
+    assert [r.severity for r in one] == [Severity.WARN]
+    green = storage.load_alerts_range(severity=["info", "recovered"])
+    assert {r.severity for r in green} == {Severity.INFO, Severity.RECOVERED}
+    assert len(storage.load_alerts_range(severity=[])) == 4
+    storage.close()

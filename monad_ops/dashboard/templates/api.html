@@ -100,8 +100,8 @@
                         <td>Recent in-memory alerts.</td>
                     </tr>
                     <tr>
-                        <td><code>GET /api/alerts/history?from_ts_ms=&amp;to_ts_ms=&amp;severity=&amp;limit=</code></td>
-                        <td>Persisted alerts from SQLite. Filter by severity (<code>warn</code>/<code>critical</code>/<code>recovered</code>).</td>
+                        <td><code>GET /api/alerts/history?from_ts_ms=&amp;to_ts_ms=&amp;severity=&amp;code_color=&amp;limit=</code></td>
+                        <td>Persisted alerts from SQLite. Filter by severity (<code>warn</code>/<code>critical</code>/<code>info</code>/<code>recovered</code>) or by Foundation colour code (<code>red</code>/<code>orange</code>/<code>green</code>; green covers info and recovered). Not both.</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/reorgs?limit=N</code></td>

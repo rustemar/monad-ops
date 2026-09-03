@@ -830,6 +830,36 @@ async def test_alerts_history_bad_severity_returns_422(client: httpx.AsyncClient
     assert r.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_alerts_history_filters_by_code_color(
+    state_with_storage: State,
+) -> None:
+    """``code_color=`` is the filter an operator reaches for after reading
+    a Foundation announcement: CODE RED is one severity, CODE GREEN is
+    two, so it cannot be expressed through ``severity=`` alone.
+    """
+    for sev in (Severity.CRITICAL, Severity.WARN, Severity.INFO, Severity.RECOVERED):
+        state_with_storage.add_alert(AlertEvent(
+            rule="r", severity=sev, key=f"k-{sev.value}", title=sev.value, detail="",
+        ))
+    app = build_app(
+        state_with_storage, _minimal_config(), enricher=None, labels=None,
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        red = (await c.get("/api/alerts/history", params={"code_color": "red"})).json()
+        green = (await c.get("/api/alerts/history", params={"code_color": "green"})).json()
+        bad = await c.get("/api/alerts/history", params={"code_color": "blue"})
+        both = await c.get(
+            "/api/alerts/history", params={"code_color": "red", "severity": "warn"},
+        )
+    assert [a["severity"] for a in red["alerts"]] == ["critical"]
+    assert {a["severity"] for a in green["alerts"]} == {"info", "recovered"}
+    assert all(a["code_color"] == "green" for a in green["alerts"])
+    assert bad.status_code == 422
+    assert both.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Detail-popup endpoints
 # ---------------------------------------------------------------------------

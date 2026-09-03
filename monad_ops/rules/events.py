@@ -46,6 +46,15 @@ def code_color_for(severity: Severity) -> CodeColor:
     return _SEVERITY_TO_CODE[severity]
 
 
+def severities_for(code: CodeColor) -> list[Severity]:
+    """Inverse of ``code_color_for`` — every Severity a colour code covers.
+
+    GREEN spans two severities, so a colour-code filter cannot be
+    expressed as a single ``severity=`` value; callers get the list.
+    """
+    return [sev for sev, c in _SEVERITY_TO_CODE.items() if c is code]
+
+
 @dataclass(frozen=True, slots=True)
 class AlertEvent:
     """A single alert emitted by a rule.
