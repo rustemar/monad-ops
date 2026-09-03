@@ -211,7 +211,8 @@ instance. In brief:
 - `GET /api/blocks/sampled?from_ts_ms=&to_ts_ms=&points=300` —
   server-aggregated time-series for charts.
 - `GET /api/alerts/history?window=&severity=&limit=` — persisted
-  alerts.
+  alerts; `code_color=red|orange|green` filters by Foundation colour
+  code instead.
 - `GET /api/reorgs` — all observed reorgs, newest-first.
 - `GET /api/reorgs/{block_number}?window=N` — per-event forensic
   trace (reorged block + ±N neighbors).

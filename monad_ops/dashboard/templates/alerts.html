@@ -72,10 +72,17 @@
                     <label>severity
                         <select id="alerts-severity">
                             <option value="">all</option>
-                            <option value="critical">critical</option>
-                            <option value="warn">warn</option>
-                            <option value="info">info</option>
-                            <option value="recovered">recovered</option>
+                            <optgroup label="Foundation colour code">
+                                <option value="color:red">CODE RED</option>
+                                <option value="color:orange">CODE ORANGE</option>
+                                <option value="color:green">CODE GREEN</option>
+                            </optgroup>
+                            <optgroup label="severity">
+                                <option value="critical">critical</option>
+                                <option value="warn">warn</option>
+                                <option value="info">info</option>
+                                <option value="recovered">recovered</option>
+                            </optgroup>
                         </select>
                     </label>
                     <label>limit

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -834,14 +834,16 @@ class Storage:
         *,
         from_ts: float | None = None,
         to_ts: float | None = None,
-        severity: str | None = None,
+        severity: str | Sequence[str] | None = None,
         limit: int = 500,
     ) -> list[StoredAlert]:
         """Filtered historical alert query for the /alerts page.
 
         Complements ``load_recent_alerts`` (a simple tail read) with a
-        time-window + severity filter. Returns newest-first so the UI
-        can stream rows without a second reverse pass.
+        time-window + severity filter. ``severity`` may be one value or
+        several (a Foundation colour code maps onto more than one).
+        Returns newest-first so the UI can stream rows without a second
+        reverse pass.
         """
         where = []
         params: list = []
@@ -852,8 +854,9 @@ class Storage:
             where.append("ts <= ?")
             params.append(float(to_ts))
         if severity:
-            where.append("severity = ?")
-            params.append(severity)
+            sevs = [severity] if isinstance(severity, str) else list(severity)
+            where.append(f"severity IN ({','.join('?' * len(sevs))})")
+            params.extend(sevs)
         clause = (" WHERE " + " AND ".join(where)) if where else ""
         params.append(max(1, min(int(limit), 5000)))
         sql = (

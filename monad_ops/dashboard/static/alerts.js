@@ -110,11 +110,17 @@ async function refreshJournalIndex() {
 
 async function fetchHistory() {
     const windowSec = parseInt(document.getElementById("alerts-window").value, 10);
-    const severity = document.getElementById("alerts-severity").value;
+    const sevChoice = document.getElementById("alerts-severity").value;
     const limit = parseInt(document.getElementById("alerts-limit").value, 10);
     const qs = new URLSearchParams({ limit: String(limit) });
     if (windowSec > 0) qs.set("from_ts_ms", String(Date.now() - windowSec * 1000));
-    if (severity) qs.set("severity", severity);
+    // "color:red" presets map onto the Foundation colour code rather
+    // than one severity — GREEN is info + recovered together.
+    const colorPreset = sevChoice.startsWith("color:") ? sevChoice.slice(6) : "";
+    if (colorPreset) qs.set("code_color", colorPreset);
+    else if (sevChoice) qs.set("severity", sevChoice);
+    const sevLabel = colorPreset ? "CODE " + colorPreset.toUpperCase()
+                   : sevChoice ? "severity=" + sevChoice : "";
 
     const body = document.getElementById("history-body");
     const hint = document.getElementById("alerts-hint");
@@ -137,7 +143,7 @@ async function fetchHistory() {
                        windowSec === 21600 ? "last 6h" :
                        windowSec === 86400 ? "last 24h" :
                        windowSec === 604800 ? "last 7d" : `last ${windowSec}s`;
-        hint.textContent = `${wLabel}${severity ? " · severity=" + severity : ""} · saved in local database`;
+        hint.textContent = `${wLabel}${sevLabel ? " · " + sevLabel : ""} · saved in local database`;
 
         if (!d.alerts || d.alerts.length === 0) {
             body.innerHTML = '<tr class="empty"><td colspan="4">no alerts in window</td></tr>';
@@ -189,8 +195,8 @@ async function fetchHistory() {
 }
 
 // Pre-select dropdowns from URL query string so a link like
-//   /alerts?severity=critical&window=0
-// opens with those filters already applied. iter-5 audit §A7.
+//   /alerts?severity=critical&window=0   or   /alerts?code_color=red
+// opens with those filters already applied.
 function _setSelectIfValid(selectId, val) {
     if (val == null) return;
     const sel = document.getElementById(selectId);
@@ -202,6 +208,7 @@ function _setSelectIfValid(selectId, val) {
     const p = new URLSearchParams(window.location.search);
     _setSelectIfValid("alerts-window",   p.get("window"));
     _setSelectIfValid("alerts-severity", p.get("severity"));
+    if (p.get("code_color")) _setSelectIfValid("alerts-severity", "color:" + p.get("code_color"));
     _setSelectIfValid("alerts-limit",    p.get("limit"));
 })();
 

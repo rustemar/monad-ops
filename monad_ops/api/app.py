@@ -30,7 +30,7 @@ from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
 from monad_ops.parser import drift
 from monad_ops.reorg_capture import find_artifact
-from monad_ops.rules.events import code_color_for
+from monad_ops.rules.events import CodeColor, code_color_for, severities_for
 from monad_ops.state import State
 
 _THIS_DIR = Path(__file__).parent
@@ -588,20 +588,30 @@ def build_app(
         from_ts_ms: int | None = Query(None, ge=0),
         to_ts_ms: int | None = Query(None, ge=0),
         severity: str | None = Query(None, pattern="^(critical|warn|info|recovered)$"),
+        code_color: str | None = Query(None, pattern="^(red|orange|green)$"),
         limit: int = Query(500, ge=1, le=5000),
     ) -> JSONResponse:
         """Historical alerts from persistent storage, filterable.
 
         Unlike /api/alerts (in-memory tail, cleared on restart), this
         reads the sqlite `alerts` table with optional ts/severity
-        filters. Returns newest-first.
+        filters. ``code_color`` filters by the Foundation colour code
+        instead (GREEN covers both info and recovered) and cannot be
+        combined with ``severity``. Returns newest-first.
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
+        if severity and code_color:
+            raise StarletteHTTPException(
+                status_code=422, detail="use either severity or code_color, not both",
+            )
+        sev_filter: str | list[str] | None = severity
+        if code_color:
+            sev_filter = [s.value for s in severities_for(CodeColor(code_color))]
         rows = state.storage.load_alerts_range(
             from_ts=(from_ts_ms / 1000.0) if from_ts_ms is not None else None,
             to_ts=(to_ts_ms / 1000.0) if to_ts_ms is not None else None,
-            severity=severity,
+            severity=sev_filter,
             limit=limit,
         )
         return JSONResponse({
