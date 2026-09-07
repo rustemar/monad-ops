@@ -59,7 +59,7 @@
                 <li>Responses are JSON except where noted. All timestamps are milliseconds since Unix epoch in UTC unless suffixed with <code>_sec</code>.</li>
                 <li><code>retry_pct</code> / <code>rtp</code> — share of a block's transactions re-executed due to conflicts in Monad's parallel execution engine (reported by <code>monad-execution</code>).</li>
                 <li>UI renders timestamps in the viewer's local timezone; API returns UTC milliseconds.</li>
-                <li>Rate-limit: 50 requests / 10 s per IP at the edge. Cache your client if you poll.</li>
+                <li>Rate-limit: 50 requests / 10 s per IP at the edge on this instance{% if rate_limit %}, and the app itself allows {{ rate_limit.rate_limit_requests }} requests / {{ rate_limit.rate_limit_window_sec | int }} s per IP{% endif %}. Over the limit you get <code>429</code> with <code>Retry-After</code>; <code>X-RateLimit-Remaining</code> on every JSON response shows how close you are. Cache your client if you poll.</li>
                 <li>No auth. This is operational telemetry for one node — treat it as public data.</li>
             </ul>
         </section>
