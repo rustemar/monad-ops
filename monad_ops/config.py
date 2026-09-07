@@ -359,8 +359,22 @@ class RetentionConfig(BaseModel):
     interval_hours: int = 24
 
 
+class ApiConfig(BaseModel):
+    """Per-client limit on the JSON endpoints (``/api/...``).
+
+    The dashboard tab itself makes at most ~2 requests/s, so the default
+    leaves room for a handful of tabs behind one address while a
+    scraper that polls in a tight loop gets ``429`` with ``Retry-After``.
+    """
+
+    rate_limit_enabled: bool = True
+    rate_limit_requests: int = Field(default=100, ge=1)
+    rate_limit_window_sec: float = Field(default=10.0, gt=0)
+
+
 class Config(BaseModel):
     node: NodeConfig
+    api: ApiConfig = ApiConfig()
     alerts: AlertsConfig = AlertsConfig()
     rules: RulesConfig = RulesConfig()
     tailer: TailerConfig = TailerConfig()

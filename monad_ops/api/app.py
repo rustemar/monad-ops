@@ -25,6 +25,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from monad_ops.api.ratelimit import TokenBucketLimiter, client_key
 from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
@@ -95,6 +96,35 @@ def build_app(
     )
     templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+    # Registered before the error counter so a 429 is still counted. CORS
+    # sits inside this layer, hence the explicit allow-origin on the 429.
+    _api_cfg = config.api
+    _limiter = (
+        TokenBucketLimiter(_api_cfg.rate_limit_requests, _api_cfg.rate_limit_window_sec)
+        if _api_cfg.rate_limit_enabled else None
+    )
+
+    @app.middleware("http")
+    async def _rate_limit(request: Request, call_next):
+        if _limiter is None or not request.url.path.startswith("/api/"):
+            return await call_next(request)
+        verdict = _limiter.check(client_key(request))
+        if not verdict.allowed:
+            return JSONResponse(
+                {"error": "rate_limited", "retry_after_sec": verdict.retry_after_sec},
+                status_code=429,
+                headers={
+                    "Retry-After": str(verdict.retry_after_sec),
+                    "X-RateLimit-Limit": str(_api_cfg.rate_limit_requests),
+                    "X-RateLimit-Remaining": "0",
+                    "Access-Control-Allow-Origin": "*",
+                },
+            )
+        response = await call_next(request)
+        response.headers["X-RateLimit-Limit"] = str(_api_cfg.rate_limit_requests)
+        response.headers["X-RateLimit-Remaining"] = str(verdict.remaining)
+        return response
 
     # Error counter for /api/status/errors (G11).
     from collections import Counter
@@ -1639,6 +1669,7 @@ def build_app(
             {
                 "asset_version": _ASSET_VERSION,
                 "base_url": base_url,
+                "rate_limit": _api_cfg if _limiter is not None else None,
             },
         )
 

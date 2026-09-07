@@ -206,6 +206,10 @@ response.
 The full reference with curl examples lives at `/api` on any running
 instance. In brief:
 
+Every `/api/` endpoint is rate limited per client address, 100 requests
+per 10 s by default (`[api]` in the config). Over the limit you get
+`429` with `Retry-After`.
+
 - `GET /api/state` — live snapshot (blocks, rolling metrics, epoch,
   reorg counter, reference-RPC lag).
 - `GET /api/blocks/sampled?from_ts_ms=&to_ts_ms=&points=300` —

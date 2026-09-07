@@ -21,6 +21,15 @@ services = ["monad-bft", "monad-execution", "monad-rpc"]
 reference_rpc_url = "https://testnet-rpc.monad.xyz"
 reference_poll_sec = 15
 
+[api]
+# Per-client limit on the JSON endpoints (/api/...). A dashboard tab makes
+# about 2 requests/s, so 100 per 10 s leaves room for several tabs behind
+# one address. Over the limit: 429 with Retry-After. The client address is
+# taken from CF-Connecting-IP, then X-Forwarded-For, then the socket peer.
+rate_limit_enabled = true
+rate_limit_requests = 100
+rate_limit_window_sec = 10
+
 [alerts.telegram]
 # Optional. Leave bot_token empty to send alerts to stdout only — handy
 # for first-time setup before you decide whether you want push alerts.
