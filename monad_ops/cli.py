@@ -61,6 +61,7 @@ from monad_ops.rules import (
     ReferenceLagRule,
     ReorgRule,
     RetrySpikeRule,
+    ServiceFailureRule,
     Severity,
     StallRule,
     VersionRule,
@@ -492,6 +493,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         recovery_confirm_sec=config.rules.network_layer_signal.recovery_confirm_sec,
     )
     process_restart_rule = ProcessRestartRule()
+    service_failure_rule = ServiceFailureRule()
 
     waltrace_rule = WaltraceFloodRule(
         window_sec=config.rules.waltrace_flood.window_sec,
@@ -524,12 +526,16 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         await sink.deliver(ev)
 
     async def process_restart_loop():
-        """Periodic poll of systemd InvocationID for tracked services.
+        """Periodic poll of systemd unit state for tracked services.
 
-        Bootstrap is silent: the very first sample populates the rule's
-        last-seen map without firing — otherwise our own startup would
-        page on every service. Subsequent restarts emit WARN once each.
-        Service list shared with ``probe_services``.
+        One sample feeds two rules. ``process_restart`` answers "did it
+        restart" (WARN, either cause); ``service_failure`` answers "did
+        it fall over" (CRITICAL, crash or down). Bootstrap is silent for
+        the restart rule and for the crash counter — otherwise our own
+        startup would page on every service — but a unit already in
+        ``failed`` state fires on the first sample, because that is a
+        node that is down right now. Service list shared with
+        ``probe_services``.
         """
         services = config.node.services
         interval = max(15, int(config.rules.process_restart.poll_interval_sec))
@@ -537,9 +543,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             try:
                 snapshots = await poll_invocations(services)
                 for snap in snapshots:
-                    ev = process_restart_rule.on_snapshot(snap)
-                    if ev is not None:
-                        await sink.deliver(ev)
+                    for ev in (
+                        process_restart_rule.on_snapshot(snap),
+                        service_failure_rule.on_snapshot(snap),
+                    ):
+                        if ev is not None:
+                            await sink.deliver(ev)
             except Exception as e:  # noqa: BLE001
                 # Belt-and-suspenders. The collector swallows its own
                 # subprocess errors; anything reaching here is a bug.

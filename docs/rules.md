@@ -39,6 +39,7 @@ Two delivery behaviours are worth knowing before you read the table:
 | `block_processing_slowdown` | rolling median `total_us` in stress territory | WARN, CRITICAL | `[rules.block_processing_slowdown]` |
 | `network_layer_signal` | monad-bft network-layer error rate | WARN, CRITICAL | `[rules.network_layer_signal]` |
 | `process_restart` | a tracked systemd unit's `InvocationID` changed | WARN | `[rules.process_restart]` |
+| `service_failure` | a tracked systemd unit is `failed`, or crashed and auto-restarted | CRITICAL, RECOVERED | `[rules.process_restart]` |
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL | `[rules.waltrace_flood]` |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO | `[version_watch]` |
 | `dual_write` | MIP-8 dual-write state-root line stopped | WARN | `[rules.dual_write]` |
@@ -285,6 +286,61 @@ The tracked services are `[node].services`.
 [rules.process_restart]
 poll_interval_sec = 60
 ```
+
+## `service_failure`
+
+Fires CRITICAL when systemd says a node service fell over, rather than
+when the node's own output says something went wrong.
+
+Every other rule here reads what the node produced: the exec and bft
+journals, the RPC, the enricher's counters. That works right up until
+the node doesn't start — a bad config after an upgrade, a triedb the
+binary won't open, `io_uring_queue_init_params` answering `Invalid
+argument`, an OOM kill, a core dump. Nothing reaches the tailer, so the
+first thing you hear is `stall` 30 seconds later telling you the chain
+went quiet, which is the wrong diagnosis and points you at the wrong
+first action.
+
+Systemd knows straight away and costs nothing to ask, because
+`process_restart` already polls `systemctl show` every 60 s. This rule
+reads three more properties out of the same sample. The restart rule
+answers *did it restart*; this one answers *did it fall over, and what
+killed it*.
+
+Two conditions, shaped differently on purpose:
+
+- **The unit is down.** `ActiveState=failed`: systemd gave up, on a
+  start that never came up or after the restart limit. Nothing is coming
+  back without you. This one is an envelope — it stays open while the
+  unit is down and closes with a single RECOVERED when it is active
+  again.
+- **The unit crashed and came back.** `NRestarts` moved. That counter
+  only advances on an auto-restart *after a failure*; a planned
+  `systemctl restart` leaves it alone, which is exactly the distinction
+  `process_restart` cannot make. Reported as a point event, like `reorg`:
+  the service is already back by the time we see it, so there is no
+  state to recover from and a paired RECOVERED would be noise.
+
+CRITICAL for both, against the WARN of `process_restart`, because a node
+process that died on its own is a chain-impact event for this operator.
+`Result`, `ExecMainStatus` and `ExecMainCode` ride along in the detail
+line, so "signal, exit code, or OOM" is answered before you open the
+journal.
+
+Three policies keep it quiet:
+
+- **First sight baselines the counter but not the state.** `NRestarts`
+  needs a previous value to have a delta, so the first sample only
+  records it. A unit already `failed` when monad-ops starts fires
+  immediately — that is a node that is down right now, and staying quiet
+  to avoid a startup page would be the wrong trade.
+- **Probe errors are soft-ignored.** A timed-out or non-zero `systemctl`
+  leaves state untouched, same as `process_restart` and `reference_lag`.
+- **A flapping unit alerts once.** Restarts counted while the down
+  envelope is open belong to that incident and do not re-fire.
+
+No config of its own: it runs inside the `process_restart` poll loop,
+over `[node].services`, at `[rules.process_restart].poll_interval_sec`.
 
 ## `waltrace_flood`
 
