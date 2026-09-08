@@ -70,6 +70,7 @@ cannot write back to the node.
 | `block_processing_slowdown` | rolling median `total_us` in stress territory | WARN, CRITICAL |
 | `network_layer_signal` | monad-bft network-layer error rate | WARN, CRITICAL |
 | `process_restart` | a tracked systemd unit's `InvocationID` changed | WARN |
+| `service_failure` | a tracked systemd unit is `failed`, or crashed and auto-restarted | CRITICAL, RECOVERED |
 | `waltrace_flood` | `waltrace thread stopped` flood | WARN, CRITICAL |
 | `version_watch` | a newer stable package appeared in the apt repo | INFO |
 | `dual_write` | MIP-8 dual-write state-root line stopped | WARN |

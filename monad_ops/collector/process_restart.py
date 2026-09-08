@@ -1,13 +1,15 @@
-"""Periodic poll of systemd InvocationID per tracked service.
+"""Periodic poll of systemd unit state per tracked service.
 
 Used by ``ProcessRestartRule`` to detect when a service has restarted
 between polls — operator-triggered or auto-restart by systemd. The
 ``InvocationID`` is a UUID systemd issues on each unit start; comparing
 against the last-seen value is a clean change detector.
 
-Why not ``NRestarts``: that counter only increments on systemd-driven
-auto-restart after failure, not on manual ``systemctl restart``. We
-want to detect both.
+Why not ``NRestarts`` for the restart rule: that counter only increments
+on systemd-driven auto-restart after failure, not on manual ``systemctl
+restart``. We want to detect both. The same property is what makes it
+the right signal for ``ServiceFailureRule``, which wants only the
+crashes — the sample carries both so one poll feeds both rules.
 
 Why not the existing ``probe_services`` (``systemctl is-active``):
 ``is-active`` returns the same string ("active") across an entire
@@ -38,6 +40,17 @@ class InvocationSnapshot:
     sub_state: str | None
     active_state: str | None
     error: str | None  # set when the systemctl call failed
+    # systemd's verdict on the last run: "success" while healthy,
+    # otherwise "core-dump", "exit-code", "signal", "oom-kill",
+    # "timeout", "start-limit-hit". None when the property was absent.
+    result: str | None = None
+    # Auto-restarts after failure since the unit was last started
+    # cleanly. Manual restarts do not move it.
+    n_restarts: int | None = None
+    # Exit status of the main process and how it died ("exited",
+    # "killed", "dumped"). Both are 0 while the unit runs.
+    exec_main_status: int | None = None
+    exec_main_code: str | None = None
 
 
 async def _run(cmd: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
@@ -66,7 +79,8 @@ async def poll_invocation(
             "systemctl",
             "show",
             service,
-            "--property=InvocationID,SubState,ActiveState",
+            "--property=InvocationID,SubState,ActiveState,Result,"
+            "NRestarts,ExecMainStatus,ExecMainCode",
         ],
         timeout=timeout,
     )
@@ -94,7 +108,25 @@ async def poll_invocation(
         sub_state=fields.get("SubState") or None,
         active_state=fields.get("ActiveState") or None,
         error=None,
+        result=fields.get("Result") or None,
+        n_restarts=_as_int(fields.get("NRestarts")),
+        exec_main_status=_as_int(fields.get("ExecMainStatus")),
+        exec_main_code=fields.get("ExecMainCode") or None,
     )
+
+
+def _as_int(raw: str | None) -> int | None:
+    """Parse a systemd numeric property, tolerating anything odd.
+
+    A missing or unparsable value has to read as "no information" rather
+    than as zero: zero is a meaningful value for both counters here.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
 
 
 async def poll_invocations(
