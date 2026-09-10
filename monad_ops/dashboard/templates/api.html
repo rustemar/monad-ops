@@ -97,7 +97,7 @@
                     </tr>
                     <tr>
                         <td><code>GET /api/stress_events?limit=&amp;max_age_days=&amp;include_profile=</code></td>
-                        <td>Load-test and stress windows this node lived through, newest first, each with the shape of the event: blocks, peak and average retry_pct, peak and average effective TPS, transaction and gas totals. A running event has <code>to_ts_ms: null</code> and a profile that grows with it. <code>include_profile=false</code> returns the bare windows.</td>
+                        <td>Load-test and stress windows this node lived through, newest first, each with the shape of the event: blocks, peak and average retry_pct, peak per-block effective TPS, realized average TPS over the window, transaction and gas totals. A running event has <code>to_ts_ms: null</code> and a profile that grows with it. <code>include_profile=false</code> returns the bare windows.</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/alerts?limit=N</code></td>
