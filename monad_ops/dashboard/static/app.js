@@ -1216,6 +1216,13 @@ function _fmtStressDuration(ms) {
 function _fmtStressDate(ms) {
     return _fmtLocal(ms).slice(5, 16);  // "MM-DD HH:MM" in local tz
 }
+// Compact peak-TPS for a button label: 93_000 → "93k". Whole thousands
+// only — the button is a jump target, the exact figure lives in the
+// window summary the click opens.
+function _fmtStressTps(tps) {
+    if (!tps) return null;
+    return tps >= 1000 ? `${Math.round(tps / 1000)}k` : `${tps}`;
+}
 
 function renderStressEvents(events) {
     const wrap = document.getElementById("charts-stress");
@@ -1233,9 +1240,20 @@ function renderStressEvents(events) {
         const fromMs = e.from_ts_ms;
         const toMs = e.to_ts_ms != null ? e.to_ts_ms : nowMs;
         const span = toMs - fromMs;
-        const label = isLive
+        // Peak retry and peak TPS say more about an event than its
+        // duration does, so they go on the button when the endpoint
+        // sends a profile. Older payloads without one still render.
+        const p = e.profile;
+        const peaks = p
+            ? [
+                p.peak_rtp ? `${Math.round(p.peak_rtp)}% rtp` : null,
+                _fmtStressTps(p.peak_tps) ? `${_fmtStressTps(p.peak_tps)} tps` : null,
+              ].filter(Boolean).join(" · ")
+            : "";
+        const head = isLive
             ? `LIVE STRESS · ${_fmtStressDuration(span)}`
             : `${_fmtStressDate(fromMs)} · ${_fmtStressDuration(span)}`;
+        const label = peaks ? `${head} · ${peaks}` : head;
         const cls = isLive ? "stress-btn is-live" : "stress-btn";
         return `<button type="button" class="${cls}" `
              + `data-from="${fromMs}" data-to="${toMs}" `

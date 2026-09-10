@@ -676,13 +676,27 @@ def build_app(
     def _sanitize_block_for_public(row: dict) -> dict:
         return {k: row[k] for k in _REORG_TRACE_PUBLIC_FIELDS if k in row}
 
+    # How many envelopes get a profile. Each one costs a bounded
+    # aggregate query, so the cap is what keeps a limit=50 request from
+    # turning a cheap list call into 50 scans.
+    _STRESS_PROFILE_MAX = 10
+
+    # Profile fields lifted from the window aggregate. The full
+    # aggregate carries gas-per-second and averages the button row has
+    # no use for; this is the subset that answers "how big was it".
+    _STRESS_PROFILE_FIELDS = (
+        "blocks", "peak_rtp", "avg_rtp", "peak_tps", "avg_tps",
+        "total_tx", "total_retried", "total_gas",
+    )
+
     @app.api_route("/api/stress_events", methods=["GET", "HEAD"])
     async def api_stress_events(
         limit: int = Query(5, ge=1, le=50),
         max_age_days: int = Query(30, ge=1, le=365),
         merge_gap_sec: int = Query(1800, ge=60, le=86400),
+        include_profile: bool = Query(True),
     ) -> JSONResponse:
-        """Quick-jump targets for past + ongoing stress events.
+        """Past and ongoing stress events, with what each one did.
 
         Walks the alerts table for retry_spike CRITICAL/RECOVERED runs,
         groups consecutive criticals into envelopes, then merges
@@ -693,9 +707,22 @@ def build_app(
         Backed by ``Storage.list_stress_envelopes`` — see that method
         for the merge-gap rationale (default 30 min covers within-batch
         dips without merging real between-batch silence).
+
+        ``include_profile`` (default on) adds the shape of each event —
+        block count, peak and average retry_pct, peak and average
+        effective TPS, transaction and gas totals — from the same SQL
+        aggregate ``/api/window_summary`` uses. Without it the caller
+        knows an event happened and has to run a second query to learn
+        anything about it, which is what the 2026-09-10 load test made
+        obvious: the envelope was in the list within a minute, and every
+        number worth reporting still had to be assembled by hand.
+
+        A live envelope has ``to_ts_ms: null``; its profile is computed
+        to wall-clock now, so it grows while the event runs.
         """
         if state.storage is None:
             return JSONResponse({"error": "persistence disabled"}, status_code=503)
+
         async def _load():
             rows = await asyncio.to_thread(
                 state.storage.list_stress_envelopes,
@@ -703,10 +730,22 @@ def build_app(
                 max_age_days=max_age_days,
                 merge_gap_sec=float(merge_gap_sec),
             )
+            if include_profile:
+                now_ms = int(time.time() * 1000)
+                for row in rows[:_STRESS_PROFILE_MAX]:
+                    aggregate = await asyncio.to_thread(
+                        state.storage.block_metrics_aggregate,
+                        from_ts_ms=int(row["from_ts_ms"]),
+                        to_ts_ms=int(row["to_ts_ms"] or now_ms),
+                    )
+                    row["profile"] = {
+                        k: aggregate[k] for k in _STRESS_PROFILE_FIELDS
+                    }
             return {"count": len(rows), "events": rows}
+
         payload = await _cached(
             "stress_events", _STRESS_EVENTS_TTL,
-            (limit, max_age_days, merge_gap_sec),
+            (limit, max_age_days, merge_gap_sec, include_profile),
             _load,
         )
         return JSONResponse(payload)

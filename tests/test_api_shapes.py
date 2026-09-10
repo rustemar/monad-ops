@@ -1216,5 +1216,102 @@ async def test_api_probes_shares_cache_with_alias(
     assert counter["calls"] == 1
 
 
+# ---------------------------------------------------------------------------
+# /api/stress_events — envelope profiles
+# ---------------------------------------------------------------------------
+
+def _seed_stress_event(state: State, *, now: float) -> None:
+    """One closed retry_spike envelope with three blocks inside it.
+
+    The envelope runs [now-600, now-300]; the blocks sit inside that
+    range so the aggregate has something to summarize.
+    """
+    import dataclasses
+
+    from tests.test_storage import _mk_block
+
+    storage = state.storage
+    storage.write_alert(
+        AlertEvent(rule="retry_spike", severity=Severity.CRITICAL,
+                   key="retry_spike", title="t", detail="d"),
+        ts=now - 600,
+    )
+    storage.write_alert(
+        AlertEvent(rule="retry_spike", severity=Severity.RECOVERED,
+                   key="retry_spike", title="t", detail="d"),
+        ts=now - 300,
+    )
+    for i, (rtp, tx, retried, tps) in enumerate(
+        [(70.0, 100, 70, 20_000), (99.0, 900, 891, 90_000), (80.0, 300, 240, 40_000)]
+    ):
+        b = dataclasses.replace(
+            _mk_block(1000 + i, rtp=rtp, tx=tx, retried=retried),
+            timestamp_ms=int((now - 550 + i * 60) * 1000),
+            tps_effective=tps,
+        )
+        storage.write_block(b)
+
+
+@pytest.mark.asyncio
+async def test_stress_events_carry_a_profile(state_with_storage: State) -> None:
+    """Each envelope says how big it was, so a caller does not need a
+    second query to learn anything about the event."""
+    import time
+
+    _seed_stress_event(state_with_storage, now=time.time())
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get("/api/stress_events")
+    assert r.status_code == 200
+    events = r.json()["events"]
+    assert len(events) == 1
+    profile = events[0]["profile"]
+    assert {
+        "blocks", "peak_rtp", "avg_rtp", "peak_tps", "avg_tps",
+        "total_tx", "total_retried", "total_gas",
+    } == set(profile.keys())
+    assert profile["blocks"] == 3
+    assert profile["peak_rtp"] == 99.0
+    assert profile["peak_tps"] == 90_000
+    assert profile["total_tx"] == 1300
+    assert profile["total_retried"] == 1201
+
+
+@pytest.mark.asyncio
+async def test_stress_events_profile_can_be_switched_off(
+    state_with_storage: State,
+) -> None:
+    """The aggregate is a per-envelope query, so a caller that only
+    wants the jump targets can skip it."""
+    import time
+
+    _seed_stress_event(state_with_storage, now=time.time())
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        r = await c.get("/api/stress_events?include_profile=false")
+    assert r.status_code == 200
+    assert "profile" not in r.json()["events"][0]
+
+
+@pytest.mark.asyncio
+async def test_stress_events_profile_and_plain_do_not_share_a_cache_slot(
+    state_with_storage: State,
+) -> None:
+    """Same URL, different `include_profile` — the cache key has to
+    carry it or the first caller decides for everyone."""
+    import time
+
+    _seed_stress_event(state_with_storage, now=time.time())
+    app = build_app(state_with_storage, _minimal_config(), enricher=None, labels=None)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        plain = await c.get("/api/stress_events?include_profile=false")
+        rich = await c.get("/api/stress_events")
+    assert "profile" not in plain.json()["events"][0]
+    assert "profile" in rich.json()["events"][0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
