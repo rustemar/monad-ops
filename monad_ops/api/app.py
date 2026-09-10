@@ -709,9 +709,13 @@ def build_app(
         dips without merging real between-batch silence).
 
         ``include_profile`` (default on) adds the shape of each event —
-        block count, peak and average retry_pct, peak and average
-        effective TPS, transaction and gas totals — from the same SQL
-        aggregate ``/api/window_summary`` uses. Without it the caller
+        block count, peak and average retry_pct, peak per-block
+        effective TPS, realized average TPS across the window, and
+        transaction and gas totals — from the same SQL aggregate
+        ``/api/window_summary`` uses. The two TPS figures answer
+        different questions and differ by an order of magnitude on a
+        real event: ``peak_tps`` is the fastest single block, ``avg_tps``
+        is total transactions over the whole span, gaps included. Without it the caller
         knows an event happened and has to run a second query to learn
         anything about it, which is what the 2026-09-10 load test made
         obvious: the envelope was in the list within a minute, and every
