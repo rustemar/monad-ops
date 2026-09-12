@@ -482,6 +482,19 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("retention.error", exc=str(e))
             await asyncio.sleep(interval_sec)
 
+    async def planner_stats_loop():
+        # Daily bounded ANALYZE so the query planner's row estimates keep
+        # up with a database that only ever grows. Own connection, worker
+        # thread, failure-safe.
+        await asyncio.sleep(120)
+        while True:
+            try:
+                est = await asyncio.to_thread(storage.refresh_planner_stats)
+                log.info("planner_stats.refreshed", **est)
+            except Exception as e:  # noqa: BLE001
+                log.error("planner_stats.error", exc=str(e))
+            await asyncio.sleep(86400)
+
     nls = NetworkLayerSignalRule(
         window_sec=config.rules.network_layer_signal.window_sec,
         warn_count=config.rules.network_layer_signal.warn_count,
@@ -1000,6 +1013,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
         tasks.add(
             asyncio.create_task(contract_hour_loop(), name="contract_hour")
+        )
+        tasks.add(
+            asyncio.create_task(planner_stats_loop(), name="planner_stats")
         )
     # Only spawn the retention task when actually enabled — otherwise a
     # no-op coroutine returns immediately, and `asyncio.wait(FIRST_COMPLETED)`
