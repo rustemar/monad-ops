@@ -932,3 +932,18 @@ def test_load_alerts_range_accepts_several_severities(tmp_path: Path) -> None:
     assert {r.severity for r in green} == {Severity.INFO, Severity.RECOVERED}
     assert len(storage.load_alerts_range(severity=[])) == 4
     storage.close()
+
+
+
+def test_refresh_planner_stats_tracks_real_row_counts(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "state.db")
+    for b in [_mk_block(100 + i) for i in range(50)]:
+        storage.write_block(b)
+    est = storage.refresh_planner_stats()
+    assert est["blocks"] == 50
+    # a second pass after growth must not keep the stale figure
+    for b in [_mk_block(200 + i) for i in range(50)]:
+        storage.write_block(b)
+    assert storage.refresh_planner_stats()["blocks"] == 100
+    storage.close()
+

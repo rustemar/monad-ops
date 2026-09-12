@@ -1955,6 +1955,37 @@ class Storage:
             deleted["bft_base_fee"] = cur.rowcount
         return deleted
 
+    def refresh_planner_stats(self, *, analysis_limit: int = 1000) -> dict[str, int]:
+        """Re-run a bounded ``ANALYZE`` so ``sqlite_stat1`` tracks the real
+        table sizes.
+
+        The stats were last gathered by hand in April; five months later
+        they claimed 6.5M rows for a 124M-row ``tx_contract_block``, and
+        the planner picks join orders from those numbers. ``analysis_limit``
+        samples that many rows per index and extrapolates, which keeps a
+        pass on a 30 GB file under a second.
+
+        Runs on its own connection so it never sits inside ``self._lock``
+        in front of the collector's writes.
+
+        Returns ``{table: estimated_rows}`` for every table with stats.
+        """
+        conn = sqlite3.connect(str(self._path), check_same_thread=False)
+        try:
+            conn.execute("PRAGMA busy_timeout = 5000")
+            conn.execute(f"PRAGMA analysis_limit = {int(analysis_limit)}")
+            conn.execute("ANALYZE")
+            rows = conn.execute(
+                "SELECT tbl, stat FROM sqlite_stat1 WHERE idx IS NOT NULL"
+            ).fetchall()
+        finally:
+            conn.close()
+        est: dict[str, int] = {}
+        for tbl, stat in rows:
+            n = int(str(stat).split()[0])
+            est[tbl] = max(est.get(tbl, 0), n)
+        return est
+
     # -- popup detail queries ---------------------------------------------
 
     def get_block_detail(
