@@ -67,6 +67,7 @@ from monad_ops.rules import (
     VersionRule,
     WaltraceFloodRule,
 )
+from monad_ops.rules.probe_alerts import ProbeAlertRule, open_probe_envelopes
 from monad_ops.state import State
 from monad_ops.storage import Storage
 from monad_ops.waltrace_capture import capture_waltrace_evidence, waltrace_dir_for
@@ -352,50 +353,14 @@ async def _cmd_run(args: argparse.Namespace) -> int:
              http=f"{args.host}:{args.port}")
 
     async def probe_loop():
-        # Track previous severity per probe to close envelope on recovery.
-        prev_severity: dict[str, str] = {}
+        rule = ProbeAlertRule(open_probe_envelopes(state.recent_alerts(limit=1000)))
         # Run probes immediately, then every 60s.
         while True:
             try:
                 results = await run_all_probes(config.node.services)
                 state.set_probes(results)
-                # Emit alerts on any critical probe.
-                for r in results:
-                    # key_backups is operator hygiene — internal-only
-                    # (also leaks file names in `detail`). Public dashboard
-                    # was filling with one WARN/min because _RecordingSink
-                    # records before DedupingSink.
-                    if r.name == "key_backups":
-                        continue
-                    if r.status == "critical":
-                        await sink.deliver(AlertEvent(
-                            rule=f"probe:{r.name}",
-                            severity=Severity.CRITICAL,
-                            key=f"probe:{r.name}",
-                            title=f"Probe {r.name} CRITICAL",
-                            detail=r.summary,
-                        ))
-                        prev_severity[r.name] = "critical"
-                    elif r.status == "warn":
-                        await sink.deliver(AlertEvent(
-                            rule=f"probe:{r.name}",
-                            severity=Severity.WARN,
-                            key=f"probe:{r.name}",
-                            title=f"Probe {r.name} WARN",
-                            detail=r.summary,
-                        ))
-                        prev_severity[r.name] = "warn"
-                    elif r.status == "ok":
-                        # Close envelope only if we previously armed.
-                        if prev_severity.get(r.name) in ("warn", "critical"):
-                            await sink.deliver(AlertEvent(
-                                rule=f"probe:{r.name}",
-                                severity=Severity.RECOVERED,
-                                key=f"probe:{r.name}",
-                                title=f"Probe {r.name} recovered",
-                                detail=r.summary,
-                            ))
-                        prev_severity[r.name] = "ok"
+                for ev in rule.evaluate(results):
+                    await sink.deliver(ev)
             except Exception as e:  # noqa: BLE001
                 log.error("probe_loop.error", exc=str(e))
             await asyncio.sleep(60)
