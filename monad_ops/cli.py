@@ -1036,6 +1036,11 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         tasks,
         return_when=asyncio.FIRST_COMPLETED,
     )
+    if http in pending:
+        # Cancelling serve() mid-lifespan makes every restart log a
+        # CancelledError traceback; ask uvicorn to exit on its own first.
+        pending.discard(http)
+        await stop_server(server, http)
     for t in pending:
         t.cancel()
     for t in done:
@@ -1046,6 +1051,17 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     if receipts_client is not None:
         await receipts_client.close()
     return 0
+
+
+async def stop_server(server, task: asyncio.Task, grace_sec: float = 5.0) -> None:
+    """Let uvicorn run its own shutdown; cancel only if it overstays."""
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(asyncio.shield(task), grace_sec)
+    except TimeoutError:
+        task.cancel()
+    except Exception as e:  # noqa: BLE001
+        log.error("task.exited", task="http", exc=str(e))
 
 
 async def _cmd_ping(args: argparse.Namespace) -> int:
