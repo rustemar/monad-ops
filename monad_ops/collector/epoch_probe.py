@@ -25,10 +25,11 @@ rotation cadence.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import re
 import time
 from dataclasses import dataclass
+
+from monad_ops.collector.subproc import reap
 
 # Regex walks a single JSON log line — cheap, no JSON parse. Pins
 # block_seq_num and block_epoch as adjacent fields, which is the
@@ -109,13 +110,7 @@ async def scan_epoch_history(
         # Return whatever we got; don't block the caller forever.
         pass
     finally:
-        if proc.returncode is None:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except (TimeoutError, ProcessLookupError):
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
+        await reap(proc)
     return results
 
 
@@ -186,13 +181,7 @@ async def find_current_epoch_first_seq(
     except TimeoutError:
         pass
     finally:
-        if proc.returncode is None:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            except (TimeoutError, ProcessLookupError):
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
+        await reap(proc)
     return smallest
 
 
@@ -231,13 +220,12 @@ async def probe_epoch(
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
     except TimeoutError as e:
-        # Kill on timeout or the subprocess outlives us blocked on a
-        # full pipe — a journal flood (2026-06-12: waltrace, ~250
-        # lines/s) left 34 stuck journalctl readers this way.
-        proc.kill()
-        with contextlib.suppress(ProcessLookupError):
-            await proc.wait()
+        # A reader blocked on a full pipe outlives us otherwise — a
+        # journal flood (2026-06-12: waltrace, ~250 lines/s) left 34
+        # stuck journalctl readers that way.
         return EpochSample(epoch=0, seq_num=0, checked_ms=now_ms, error=f"probe: {e}")
+    finally:
+        await reap(proc)
     text = out.decode("utf-8", errors="replace")
     last_seq: int | None = None
     last_epoch: int | None = None

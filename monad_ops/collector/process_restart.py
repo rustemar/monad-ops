@@ -31,6 +31,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from monad_ops.collector.subproc import run_capture
+
 
 @dataclass(frozen=True, slots=True)
 class InvocationSnapshot:
@@ -53,17 +55,7 @@ class InvocationSnapshot:
     exec_main_code: str | None = None
 
 
-async def _run(cmd: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
-    except (TimeoutError, FileNotFoundError) as e:
-        return 127, "", str(e)
+_run = run_capture
 
 
 async def poll_invocation(
