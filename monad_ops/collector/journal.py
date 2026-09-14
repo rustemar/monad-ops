@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 import structlog
 
+from monad_ops.collector.subproc import reap
 from monad_ops.parser import (
     AssertionEvent,
     DualRoot,
@@ -158,7 +159,7 @@ async def tail_raw_lines(
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=3)
                 except TimeoutError:
-                    proc.kill()
+                    await reap(proc)
 
         # Only reached via the idle-timeout `break` (follow mode). Record
         # the respawn and bail loudly if we're thrashing.

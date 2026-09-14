@@ -18,6 +18,8 @@ from pathlib import Path
 
 import httpx
 
+from monad_ops.collector.subproc import run_capture
+
 _TRIEDB_DEVICE = Path("/dev/triedb")
 _MONAD_CONFIG = Path("/home/monad/monad-bft/config/node.toml")
 _MONAD_SECP_BACKUP = Path("/opt/monad/backup/secp-backup")
@@ -65,17 +67,7 @@ class ProbeResult:
     details: dict        # structured extras
 
 
-async def _run(cmd: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
-    except (TimeoutError, FileNotFoundError) as e:
-        return 127, "", str(e)
+_run = run_capture
 
 
 # ─── services ─────────────────────────────────────────────────────────
