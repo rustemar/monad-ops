@@ -363,6 +363,12 @@ a.version-row:hover, a.version-row:focus { color: var(--text-dim); text-decorati
     display: flex; gap: 12px;
 }
 .bot .sep { color: var(--text-faint); }
+.bot kbd {
+    font-family: var(--mono); font-size: 10.5px; padding: 0 4px;
+    border: 1px solid var(--text-faint); border-radius: 3px;
+}
+/* No keyboard on touch screens; the footer is already tight there. */
+@media (max-width: 720px), (hover: none) { .bot .keys { display: none; } }
 
 /* ---- epoch progress card -------------------------------------------- */
 /* Full-width card sitting between the KPI strip and the legend. Shows

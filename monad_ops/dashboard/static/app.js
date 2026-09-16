@@ -3041,6 +3041,32 @@ _schedule(fetchEnrichment, ENRICHMENT_INTERVAL);
 _schedule(fetchRecoveryPath, 600000);
 _schedule(fetchStressEvents, INCIDENTS_INTERVAL);
 
+// Keyboard shortcuts: `r` refreshes every panel, digits pick a chart
+// range in toolbar order (1 = 5min … 7 = 7d). Ignored while typing in
+// a field, while a popup is open, or with a modifier held so browser
+// combos keep working.
+const _RANGE_KEY_SECS = [...document.querySelectorAll(".charts-range .range-btn[data-range]")]
+    .map((btn) => parseInt(btn.dataset.range, 10));
+function _refreshAll() {
+    for (const fn of [fetchState, fetchBlocks, fetchBftSeries, fetchReorgSeries,
+                      fetchBaseFeeSeries, fetchContracts, fetchIncidents, fetchProbes,
+                      fetchVersion, fetchValidatorSet, fetchEnrichment,
+                      fetchRecoveryPath, fetchStressEvents]) fn();
+}
+document.addEventListener("keydown", (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT"
+              || t.isContentEditable)) return;
+    if (!_popup.root.classList.contains("hidden")) return;
+    if (e.key === "r") { _refreshAll(); return; }
+    const n = parseInt(e.key, 10);
+    if (n >= 1 && n <= _RANGE_KEY_SECS.length) {
+        _setChartRange(_RANGE_KEY_SECS[n - 1]);
+        _closeCustomPanel();
+    }
+});
+
 // Chart.js internally uses a ResizeObserver on each canvas parent, but
 // on mobile orientation change (portrait↔landscape) the parent's
 // computed size may settle across two frames while the browser finishes
