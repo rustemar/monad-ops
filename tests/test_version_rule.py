@@ -111,3 +111,49 @@ def test_reminder_key_changes_per_day():
     r2 = rule.on_status(_status("0.14.1", "0.14.2"), now_sec=1000.0 + 50 * 3600)
     assert r1 is not None and r2 is not None
     assert r1.key != r2.key
+
+
+def test_reminder_carries_how_long_the_package_has_been_in_apt():
+    """The reminder is what the operator reads while deciding to wait, so
+    it has to say how long the release has been sitting in the repo."""
+    rule = VersionRule(reminder_interval_sec=24 * 3600)
+    first = rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0)
+    assert first is not None
+    # A fresh release has no age worth printing.
+    assert "has been in the" not in first.detail
+    assert "announced" in first.detail
+
+    ev = rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0 + 50 * 3600)
+    assert ev is not None
+    assert "2d 2h" in ev.detail
+
+
+def test_pending_age_counts_from_first_sighting_not_first_alert():
+    """A restart between the sighting and the alert must not reset the
+    clock: state is restored from the meta table on every start."""
+    rule = VersionRule(reminder_interval_sec=24 * 3600)
+    rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0)
+
+    restarted = VersionRule(reminder_interval_sec=24 * 3600)
+    restarted.load_state(rule.to_state())
+    ev = restarted.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0 + 30 * 3600)
+    assert ev is not None
+    assert "1d 6h" in ev.detail
+
+
+def test_a_newer_release_restarts_the_apt_clock():
+    rule = VersionRule(reminder_interval_sec=24 * 3600)
+    rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0)
+    # 0.16.4 lands two days later; its age is its own, not 0.16.3's.
+    rule.on_status(_status("0.16.2", "0.16.4"), now_sec=1000.0 + 48 * 3600)
+    ev = rule.on_status(_status("0.16.2", "0.16.4"), now_sec=1000.0 + 73 * 3600)
+    assert ev is not None
+    assert "1d 1h" in ev.detail
+
+
+def test_upgrade_clears_the_pending_clock():
+    rule = VersionRule(reminder_interval_sec=24 * 3600)
+    rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0)
+    rule.on_status(_status("0.16.3", "0.16.3", status="up_to_date"), now_sec=2000.0)
+    assert rule.to_state()["pending_version"] is None
+    assert rule.to_state()["pending_since_ts"] == 0.0
