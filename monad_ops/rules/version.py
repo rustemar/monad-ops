@@ -77,6 +77,12 @@ class VersionRule:
             self._pending_since_ts = float(state.get("pending_since_ts") or 0.0)
         except (TypeError, ValueError):
             self._pending_since_ts = 0.0
+        # State written before this rule tracked the clock: adopt the
+        # outstanding release with an unknown age rather than restarting
+        # the count from the upgrade, which would understate it.
+        if self._pending_version is None and self._last_alerted_version is not None:
+            self._pending_version = self._last_alerted_version
+            self._pending_since_ts = 0.0
 
     def on_status(
         self,
