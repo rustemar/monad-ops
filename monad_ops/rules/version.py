@@ -42,6 +42,11 @@ class VersionRule:
     _last_alerted_version: str | None = None     # the upstream version we last fired NEW for
     _last_reminder_ts: float = 0.0
     _last_seen_installed: str | None = None       # what we observed last tick
+    # When the pending release first showed up in the repo. A package can
+    # sit in apt for days before it is announced, and "how long has it been
+    # there" is what the operator weighs against waiting for the announce.
+    _pending_version: str | None = None
+    _pending_since_ts: float = 0.0
 
     def to_state(self) -> dict[str, Any]:
         """Serialize fields the caller must persist across restarts."""
@@ -49,6 +54,8 @@ class VersionRule:
             "last_alerted_version": self._last_alerted_version,
             "last_reminder_ts": self._last_reminder_ts,
             "last_seen_installed": self._last_seen_installed,
+            "pending_version": self._pending_version,
+            "pending_since_ts": self._pending_since_ts,
         }
 
     def load_state(self, state: dict[str, Any]) -> None:
@@ -64,6 +71,12 @@ class VersionRule:
             self._last_reminder_ts = 0.0
         lsi = state.get("last_seen_installed")
         self._last_seen_installed = str(lsi) if lsi else None
+        pv = state.get("pending_version")
+        self._pending_version = str(pv) if pv else None
+        try:
+            self._pending_since_ts = float(state.get("pending_since_ts") or 0.0)
+        except (TypeError, ValueError):
+            self._pending_since_ts = 0.0
 
     def on_status(
         self,
@@ -102,6 +115,8 @@ class VersionRule:
             self._last_seen_installed = installed
             self._last_alerted_version = None
             self._last_reminder_ts = 0.0
+            self._pending_version = None
+            self._pending_since_ts = 0.0
             return event
 
         self._last_seen_installed = installed
@@ -113,6 +128,8 @@ class VersionRule:
             if self._last_alerted_version is not None:
                 self._last_alerted_version = None
                 self._last_reminder_ts = 0.0
+            self._pending_version = None
+            self._pending_since_ts = 0.0
             return None
 
         if status.status != "update_available" or status.latest is None:
@@ -120,16 +137,29 @@ class VersionRule:
 
         latest = status.latest
 
+        # Start the clock the first tick this release is visible, not the
+        # first tick we alert on it: a restart before the alert would
+        # otherwise reset the age.
+        if self._pending_version != latest:
+            self._pending_version = latest
+            self._pending_since_ts = now
+
         # New version we've never alerted on (or a newer-than-pending one).
         if self._last_alerted_version != latest:
             self._last_alerted_version = latest
             self._last_reminder_ts = now
-            return self._build_event(status, is_reminder=False, now_sec=now)
+            return self._build_event(
+                status, is_reminder=False, now_sec=now,
+                pending_since_sec=self._pending_since_ts,
+            )
 
         # Same outstanding version — daily reminder if interval elapsed.
         if (now - self._last_reminder_ts) >= self.reminder_interval_sec:
             self._last_reminder_ts = now
-            return self._build_event(status, is_reminder=True, now_sec=now)
+            return self._build_event(
+                status, is_reminder=True, now_sec=now,
+                pending_since_sec=self._pending_since_ts,
+            )
 
         return None
 
@@ -147,11 +177,23 @@ class VersionRule:
         return a < b
 
     @staticmethod
+    def _fmt_age(seconds: float) -> str:
+        total_min = int(max(0.0, seconds) // 60)
+        if total_min < 60:
+            return f"{total_min}m"
+        hours, minutes = divmod(total_min, 60)
+        if hours < 24:
+            return f"{hours}h {minutes}m"
+        days, hours = divmod(hours, 24)
+        return f"{days}d {hours}h"
+
+    @staticmethod
     def _build_event(
         status: VersionStatus,
         *,
         is_reminder: bool,
         now_sec: float,
+        pending_since_sec: float = 0.0,
     ) -> AlertEvent:
         installed = status.installed or "?"
         latest = status.latest or "?"
@@ -179,9 +221,23 @@ class VersionRule:
             if not is_reminder
             else f"version_watch:reminder:{latest}:{int(now_sec) // 86400}"
         )
+        # The reminder is the one an operator reads while deciding whether
+        # to wait: it carries how long the package has been sitting there.
+        if is_reminder and pending_since_sec > 0.0:
+            age = VersionRule._fmt_age(now_sec - pending_since_sec)
+            availability = (
+                f"{status.package} {installed} → {latest} has been in the "
+                f"apt repo for {age}."
+            )
+        else:
+            availability = (
+                f"{status.package} {installed} → {latest} available "
+                f"in apt repo."
+            )
         detail = (
-            f"{status.package} {installed} → {latest} available "
-            f"in apt repo. Newer versions: {extras_part}."
+            f"{availability} Newer versions: {extras_part}. "
+            f"Upgrade once the release is announced — a package in apt "
+            f"is not the announcement."
         )
         return AlertEvent(
             rule="version_watch",

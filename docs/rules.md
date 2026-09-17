@@ -390,6 +390,12 @@ Emits INFO when a newer stable version of the monad package appears in
 the configured apt repo, with a daily reminder while the upgrade is
 outstanding and a RECOVERED once you pick it up.
 
+A package landing in apt is not a release announcement — it can sit
+there for days before the Foundation announces it, and upgrading early is
+on you. So the alert says to wait for the announcement, and the daily
+reminder carries how long the release has been in the repo, counted from
+the first tick that saw it (the clock survives a monad-ops restart).
+
 It polls the repo's `Packages.gz` directly and compares against
 `dpkg-query`, so it needs neither `apt-get update` nor sudo.
 `skip_substrings` filters out `-debug`, `-preview`, `~rc` and friends so
