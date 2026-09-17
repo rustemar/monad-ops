@@ -157,3 +157,19 @@ def test_upgrade_clears_the_pending_clock():
     rule.on_status(_status("0.16.3", "0.16.3", status="up_to_date"), now_sec=2000.0)
     assert rule.to_state()["pending_version"] is None
     assert rule.to_state()["pending_since_ts"] == 0.0
+
+
+def test_state_without_a_clock_reports_no_age_rather_than_a_wrong_one():
+    """monad-ops upgraded while a release was already outstanding: the
+    saved state has no clock, and inventing one from the restart would
+    understate how long the package has been sitting there."""
+    rule = VersionRule(reminder_interval_sec=24 * 3600)
+    rule.load_state({
+        "last_alerted_version": "0.16.3",
+        "last_reminder_ts": 1000.0,
+        "last_seen_installed": "0.16.2",
+    })
+    ev = rule.on_status(_status("0.16.2", "0.16.3"), now_sec=1000.0 + 25 * 3600)
+    assert ev is not None
+    assert "has been in the" not in ev.detail
+    assert "announced" in ev.detail
