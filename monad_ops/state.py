@@ -670,6 +670,13 @@ class State:
         with self._lock:
             return list(self._probes.values()), self._probes_ran_at
 
+    def maintenance_until(self) -> float | None:
+        """End of the open alert-delivery maintenance window (epoch s), else None."""
+        if self._storage is None:
+            return None
+        _since, until = self._storage.maintenance_window()
+        return until if until is not None and until > time.time() else None
+
     def set_version(self, status: VersionStatus) -> None:
         with self._lock:
             self._version = status

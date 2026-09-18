@@ -194,6 +194,29 @@ Two cases that need an extra step (rare):
 To see what changed before pulling: `git fetch origin main && git log
 --oneline HEAD..origin/main`.
 
+### Maintenance window
+
+Planned node work (a package upgrade, a restart) fires stall, service
+and reference-lag alerts that are all expected and all close on their
+own. Open a window first and Telegram stays quiet until it ends; the
+dashboard and the alert history still record every event, and one
+summary line follows within about half a minute of the window closing
+(what was held, and whether anything is still open). A RECOVERED for an
+alert the running service already delivered is let through even inside
+the window, so a red message never stays open because of maintenance.
+
+```bash
+.venv/bin/python -m monad_ops.cli maintenance --minutes 15
+# ... stop, upgrade, start ...
+.venv/bin/python -m monad_ops.cli maintenance --off   # or let it expire
+.venv/bin/python -m monad_ops.cli maintenance         # status
+```
+
+Run it from the service's working directory (it writes to the same
+`state.db`); the running service picks the window up within seconds, no
+restart needed. Size the window to outlast the work plus a minute for
+the stall RECOVERED. `ping` is not held.
+
 ### Public dashboard (optional)
 
 A ready nginx template lives in
