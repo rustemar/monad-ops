@@ -975,6 +975,16 @@ class Storage:
             ).fetchone()
         return None if row is None else str(row["value"])
 
+    def _meta_in_txn(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return None if row is None else str(row["value"])
+
+    def _put_meta_in_txn(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT OR REPLACE INTO meta(key, value, updated_ts) VALUES (?,?,?)",
+            (key, value, int(time.time())),
+        )
+
     def maintenance_window(self) -> tuple[float | None, float | None]:
         """(since, until) of the alert-delivery maintenance window, epoch seconds."""
         from monad_ops.alerts.sink import (
@@ -982,46 +992,92 @@ class Storage:
             MAINTENANCE_UNTIL_KEY,
             parse_maintenance_ts,
         )
-        return (
-            parse_maintenance_ts(self.get_meta(MAINTENANCE_SINCE_KEY)),
-            parse_maintenance_ts(self.get_meta(MAINTENANCE_UNTIL_KEY)),
-        )
+        with self._lock:
+            since = self._meta_in_txn(MAINTENANCE_SINCE_KEY)
+            until = self._meta_in_txn(MAINTENANCE_UNTIL_KEY)
+        return parse_maintenance_ts(since), parse_maintenance_ts(until)
 
     def open_maintenance(self, until_sec: float, now_sec: float | None = None) -> None:
-        """Open (or extend) the window. ``since`` is kept when one is already open
-        so the summary covers the whole stretch."""
-        from monad_ops.alerts.sink import MAINTENANCE_SINCE_KEY, MAINTENANCE_UNTIL_KEY
+        """Open (or extend) the window in one transaction. ``since`` is kept
+        while a window is open so the summary covers the whole stretch, and
+        started afresh once the stored ``until`` has passed. The service's
+        ``take_closed_window`` runs in its own IMMEDIATE transaction, so the
+        two never interleave half-way."""
+        from monad_ops.alerts.sink import (
+            MAINTENANCE_SINCE_KEY,
+            MAINTENANCE_UNTIL_KEY,
+            parse_maintenance_ts,
+        )
         now = time.time() if now_sec is None else now_sec
-        since, _until = self.maintenance_window()
-        # Full precision, no rounding: a row recorded right after the open
-        # (or right before `--off`) must fall inside [since, until].
-        if since is None:
-            self.put_meta(MAINTENANCE_SINCE_KEY, repr(float(now)))
-        self.put_meta(MAINTENANCE_UNTIL_KEY, repr(float(until_sec)))
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                since = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_SINCE_KEY))
+                until = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_UNTIL_KEY))
+                # Full precision, no rounding: a row recorded right after the
+                # open (or right before `--off`) must fall inside [since, until].
+                self._put_meta_in_txn(MAINTENANCE_UNTIL_KEY, repr(float(until_sec)))
+                if since is None or until is None or until <= now:
+                    self._put_meta_in_txn(MAINTENANCE_SINCE_KEY, repr(float(now)))
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
 
-    def close_maintenance(self) -> None:
-        """Mark the window summarised; the gate calls this exactly once per window."""
-        from monad_ops.alerts.sink import MAINTENANCE_SINCE_KEY
-        self.put_meta(MAINTENANCE_SINCE_KEY, "0")
+    def take_closed_window(self, now_sec: float) -> tuple[float, float] | None:
+        """Claim a window that has ended: clear ``since`` and return the bounds,
+        or None when no closed, unsummarised window exists. One transaction, so
+        only one caller ever gets a given window."""
+        from monad_ops.alerts.sink import (
+            MAINTENANCE_SINCE_KEY,
+            MAINTENANCE_UNTIL_KEY,
+            parse_maintenance_ts,
+        )
+        with self._lock:
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                since = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_SINCE_KEY))
+                until = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_UNTIL_KEY))
+                if since is None or until is None or until > now_sec:
+                    self._conn.execute("COMMIT")
+                    return None
+                self._put_meta_in_txn(MAINTENANCE_SINCE_KEY, "0")
+                self._conn.execute("COMMIT")
+            except Exception:
+                self._conn.execute("ROLLBACK")
+                raise
+        return since, until
 
-    def recovering_rules(self) -> set[str]:
-        """Rules that have ever closed with RECOVERED — the envelope-shaped ones."""
+    def recovered_envelopes(self) -> set[str]:
+        """Alert keys that have ever closed with RECOVERED — the envelope-shaped ones."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT DISTINCT rule FROM alerts WHERE severity = 'recovered'"
+                "SELECT DISTINCT key FROM alerts WHERE severity = 'recovered'"
             ).fetchall()
-        return {str(r["rule"]) for r in rows}
+        return {str(r["key"]) for r in rows}
+
+    def last_severity_before(self, envelope: str, ts_sec: float) -> str | None:
+        """Severity of the envelope's last row before ``ts_sec``, if any."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT severity FROM alerts WHERE ts < ? AND key IN (?, ?, ?) "
+                "ORDER BY ts DESC, id DESC LIMIT 1",
+                (ts_sec, envelope, f"{envelope}:warn", f"{envelope}:critical"),
+            ).fetchone()
+        return None if row is None else str(row["severity"])
 
     def alerts_between(
-        self, since_sec: float, until_sec: float
+        self, since_sec: float, until_sec: float, *, before: float | None = None
     ) -> list[tuple[float, str, str, str]]:
-        """(ts, rule, severity, key) for alerts recorded inside a window, oldest first."""
+        """(ts, rule, severity, key) for alerts recorded inside a window, oldest
+        first; ``before`` excludes rows stamped at or after it."""
+        sql = "SELECT ts, rule, severity, key FROM alerts WHERE ts >= ? AND ts <= ?"
+        args: list[float] = [since_sec, until_sec]
+        if before is not None:
+            sql += " AND ts < ?"
+            args.append(before)
         with self._lock:
-            rows = self._conn.execute(
-                "SELECT ts, rule, severity, key FROM alerts "
-                "WHERE ts >= ? AND ts <= ? ORDER BY ts, id",
-                (since_sec, until_sec),
-            ).fetchall()
+            rows = self._conn.execute(sql + " ORDER BY ts, id", args).fetchall()
         return [(float(r["ts"]), str(r["rule"]), str(r["severity"]), str(r["key"])) for r in rows]
 
     def put_meta(self, key: str, value: str) -> None:

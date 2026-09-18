@@ -58,15 +58,30 @@ def parse_maintenance_ts(raw: str | None) -> float | None:
     return ts if ts > 0 else None
 
 
+def envelope_id(key: str) -> str:
+    """The envelope an alert key belongs to.
+
+    Envelope rules key WARN/CRITICAL as ``rule:severity`` and the matching
+    RECOVERED as the bare ``rule``; per-entity rules (``service_failure:<unit>``,
+    ``enrichment_health:failing``) use one key for every severity. Stripping
+    the severity suffix gives the identity both shapes share.
+    """
+    for suffix in (":warn", ":critical"):
+        if key.endswith(suffix):
+            return key[: -len(suffix)]
+    return key
+
+
 class MaintenanceStore(Protocol):
     """What the gate needs from persistence; ``Storage`` implements it."""
 
     def maintenance_window(self) -> tuple[float | None, float | None]: ...
+    def take_closed_window(self, now_sec: float) -> tuple[float, float] | None: ...
     def alerts_between(
-        self, since_sec: float, until_sec: float
+        self, since_sec: float, until_sec: float, *, before: float | None = None
     ) -> list[tuple[float, str, str, str]]: ...
-    def close_maintenance(self) -> None: ...
-    def recovering_rules(self) -> set[str]: ...
+    def recovered_envelopes(self) -> set[str]: ...
+    def last_severity_before(self, envelope: str, ts_sec: float) -> str | None: ...
 
 
 class MaintenanceGate:
@@ -80,10 +95,10 @@ class MaintenanceGate:
 
     The window (``since``/``until``) lives in the database and the summary is
     built from the rows recorded there, so a restart inside the window loses
-    nothing; closing clears ``since`` before the summary goes out, so it is
-    sent at most once. A RECOVERED for a rule this process delivered live is
-    let through even inside the window, so a red message the operator already
-    has never stays open because of maintenance.
+    nothing; taking the closed window clears ``since`` in one transaction, so
+    the summary goes out at most once. A RECOVERED for an envelope that was
+    red before the window is let through, so a red message never stays open
+    because of maintenance; one-shot rules (``version_watch``) pass regardless.
     """
 
     def __init__(
@@ -92,89 +107,111 @@ class MaintenanceGate:
         store: MaintenanceStore,
         *,
         record: Callable[[AlertEvent], Awaitable[None]] | None = None,
+        passthrough_rules: frozenset[str] = frozenset({"version_watch"}),
         now: Callable[[], float] = time.time,
         cache_sec: float = 2.0,
     ) -> None:
         self._inner = inner
         self._store = store
         self._record = record
+        self._passthrough = passthrough_rules
         self._now = now
         self._cache_sec = cache_sec
         self._cached: tuple[float, tuple[float | None, float | None]] | None = None
-        self._live: set[str] = set()  # rules delivered WARN/CRITICAL by this process
+        self._last_good: tuple[float | None, float | None] = (None, None)
+        self._live: set[str] = set()  # envelopes delivered WARN/CRITICAL by this process
         self._flushing = asyncio.Lock()
 
     def _read_window(self) -> tuple[float | None, float | None]:
         try:
-            return self._store.maintenance_window()
+            self._last_good = self._store.maintenance_window()
         except Exception as e:  # noqa: BLE001 — a meta read must never take the alert path down
             print(f"[maintenance] window read failed: {e}", file=sys.stderr, flush=True)
-            return self._cached[1] if self._cached is not None else (None, None)
+        return self._last_good
 
-    async def _window(self) -> tuple[float | None, float | None]:
+    async def _window(self, *, force: bool = False) -> tuple[float | None, float | None]:
         """The stored window, re-read off the loop at most every ``cache_sec``."""
         now = self._now()
-        if self._cached is None or now - self._cached[0] >= self._cache_sec:
+        if force or self._cached is None or now - self._cached[0] >= self._cache_sec:
             self._cached = (now, await asyncio.to_thread(self._read_window))
         return self._cached[1]
+
+    @staticmethod
+    def _is_open(window: tuple[float | None, float | None], now: float, ts: float | None) -> bool:
+        since, until = window
+        if since is None or until is None or now >= until:
+            return False
+        # A row stamped before the window opened is not part of it.
+        return ts is None or ts >= since
 
     def window_end(self) -> float | None:
         """End of the open window (epoch seconds) from the last read, else None."""
         if self._cached is None:
             self._cached = (self._now(), self._read_window())
-        _since, until = self._cached[1]
-        return until if until is not None and self._now() < until else None
+        window = self._cached[1]
+        return window[1] if self._is_open(window, self._now(), None) else None
 
-    async def deliver(self, event: AlertEvent) -> None:
-        _since, until = await self._window()
-        if until is not None and self._now() < until:
-            # Envelope rules key WARN/CRITICAL as "rule:severity" and RECOVERED
-            # as the bare rule, so the match is on the rule, not the key.
-            if event.severity is Severity.RECOVERED and event.rule in self._live:
-                self._live.discard(event.rule)
+    async def deliver(self, event: AlertEvent, ts: float | None = None) -> None:
+        window = await self._window()
+        envelope = envelope_id(event.key)
+        if self._is_open(window, self._now(), ts):
+            if event.rule in self._passthrough:
+                await self._inner.deliver(event)
+            elif event.severity is Severity.RECOVERED and await self._was_red(envelope, window[0]):
+                self._live.discard(envelope)
                 await self._inner.deliver(event)
             return
-        await self.flush()
+        await self.flush(before=ts)
         if event.severity is Severity.RECOVERED:
-            self._live.discard(event.rule)
+            self._live.discard(envelope)
         elif event.severity in (Severity.WARN, Severity.CRITICAL):
-            self._live.add(event.rule)
+            self._live.add(envelope)
         await self._inner.deliver(event)
 
-    async def flush(self) -> None:
-        """Summarise a window that has closed. Safe to call on a timer."""
+    async def _was_red(self, envelope: str, since: float | None) -> bool:
+        """Was this envelope delivered WARN/CRITICAL before the window opened?
+        Memory answers for this process; the history answers across restarts."""
+        if envelope in self._live:
+            return True
+        if since is None:
+            return False
+        try:
+            last = await asyncio.to_thread(self._store.last_severity_before, envelope, since)
+        except Exception as e:  # noqa: BLE001
+            print(f"[maintenance] history read failed: {e}", file=sys.stderr, flush=True)
+            return False
+        return last in ("warn", "critical")
+
+    async def flush(self, before: float | None = None) -> None:
+        """Summarise a window that has closed. Safe to call on a timer.
+
+        ``before`` is the timestamp of the event whose delivery triggered the
+        flush: its row is being delivered live, so it is not part of the summary.
+        """
         async with self._flushing:
-            self._cached = None
-            since, until = await self._window()
+            since, until = await self._window(force=True)
             now = self._now()
             if since is None or until is None or now < until:
                 return
-            # Up to now, not up to `until`: an event that arrived after `--off`
-            # but before this flush was held on the cached window.
-            rows = await asyncio.to_thread(self._store.alerts_between, since, now)
-            recovering = await asyncio.to_thread(self._store.recovering_rules)
-            await asyncio.to_thread(self._store.close_maintenance)
+            taken = await asyncio.to_thread(self._store.take_closed_window, now)
             self._cached = None
-            # "Still open" = the rule's last event in the window is WARN/CRITICAL
-            # and the rule is envelope-shaped (it has closed with RECOVERED
-            # before). process_restart, reorg and friends never recover, so a
-            # routine upgrade must not end on a red line because of them.
-            last: dict[str, str] = {}
-            for _ts, rule, sev, _key in rows:
-                last[rule] = sev
-            still_open = sorted(
-                (rule, sev) for rule, sev in last.items()
-                if sev in ("warn", "critical") and rule in recovering
-            )
-            summary = self._summary(rows, still_open, since, until)
-        if self._record is not None:
-            await self._record(summary)
-        await self._inner.deliver(summary)
+            if taken is None:
+                return
+            since, until = taken
+            rows = await asyncio.to_thread(self._store.alerts_between, since, now, before=before)
+            recovered = await asyncio.to_thread(self._store.recovered_envelopes)
+            summary = self._summary(rows, recovered, since, until)
+            await self._inner.deliver(summary)
+            if self._record is not None:
+                try:
+                    await self._record(summary)
+                except Exception as e:  # noqa: BLE001 — the channel line matters more than the row
+                    print(f"[maintenance] summary not recorded: {e}", file=sys.stderr, flush=True)
 
     @staticmethod
     def _summary(
         rows: list[tuple[float, str, str, str]],
-        still_open: list[tuple[str, str]],
+        recovered_envelopes: set[str],
         since: float,
         until: float,
     ) -> AlertEvent:
@@ -189,21 +226,31 @@ class MaintenanceGate:
                 severity=Severity.INFO,
                 key=key,
                 title="Maintenance window closed",
-                detail=f"Nothing was held ({span}); delivery is live again.",
+                detail=f"Nothing was recorded ({span}); delivery is live again.",
             )
         counts: dict[str, int] = {}
-        for _ts, rule, _sev, _key in rows:
+        last: dict[str, str] = {}
+        for _ts, rule, sev, row_key in rows:
             counts[rule] = counts.get(rule, 0) + 1
+            last[envelope_id(row_key)] = sev
+        # "Still open" = the envelope's last row in the window is WARN/CRITICAL
+        # and it is envelope-shaped (it has closed with RECOVERED before), so
+        # point events (process_restart, a crash that already restarted) never
+        # turn a routine upgrade's summary red.
+        still_open = sorted(
+            (envelope, sev) for envelope, sev in last.items()
+            if sev in ("warn", "critical") and envelope in recovered_envelopes
+        )
         parts = ", ".join(f"{rule} ×{n}" for rule, n in sorted(counts.items()))
-        detail = f"Held {len(rows)} alert(s) during the window ({span}): {parts}."
+        detail = f"{len(rows)} alert(s) recorded during the window ({span}): {parts}."
         severity = Severity.INFO
         if still_open:
             detail += " Still open: " + ", ".join(
-                f"{rule} {sev.upper()}" for rule, sev in still_open
+                f"{envelope} {sev.upper()}" for envelope, sev in still_open
             ) + "."
             severity = (
                 Severity.CRITICAL
-                if any(sev == "critical" for _r, sev in still_open)
+                if any(sev == "critical" for _e, sev in still_open)
                 else Severity.WARN
             )
         detail += " The alert history has every one of them."

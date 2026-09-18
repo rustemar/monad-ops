@@ -47,7 +47,6 @@ async def test_held_events_reach_the_history_but_not_the_channel(tmp_path) -> No
     assert inner.events == []
 
     storage.open_maintenance(time.time())  # `--off`: the window ends now
-    gate._cached = None
     await gate.flush()
     assert [e.rule for e in inner.events] == ["maintenance"]
     assert inner.events[0].severity is Severity.CRITICAL  # stall never recovered

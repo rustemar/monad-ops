@@ -545,14 +545,16 @@ class State:
             # /api/alerts/history agree to the millisecond.
             self._storage.write_alert(alert, ts=ts)
 
-    async def add_alert_async(self, alert: AlertEvent) -> None:
-        """Async-safe counterpart to add_alert — sqlite write off the loop."""
+    async def add_alert_async(self, alert: AlertEvent) -> float:
+        """Async-safe counterpart to add_alert — sqlite write off the loop.
+        Returns the timestamp the row was stamped with."""
         ts = time.time()
         with self._lock:
             self._alerts.append(alert)
             self._alert_ts.append(ts)
         if self._storage is not None:
             await asyncio.to_thread(self._storage.write_alert, alert, ts)
+        return ts
 
     def add_consensus_event(self, event: ConsensusEvent) -> None:
         """Tally one bft consensus event into the current minute bucket.

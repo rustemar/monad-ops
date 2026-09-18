@@ -201,9 +201,10 @@ and reference-lag alerts that are all expected and all close on their
 own. Open a window first and Telegram stays quiet until it ends; the
 dashboard and the alert history still record every event, and one
 summary line follows within about half a minute of the window closing
-(what was held, and whether anything is still open). A RECOVERED for an
-alert the running service already delivered is let through even inside
-the window, so a red message never stays open because of maintenance.
+(what was recorded, and whether anything is still open). A RECOVERED for
+an alert that was already delivered red is let through even inside the
+window, so a red message never stays open because of maintenance; the
+`version_watch` upgrade confirmation passes too.
 
 ```bash
 .venv/bin/python -m monad_ops.cli maintenance --minutes 15

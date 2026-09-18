@@ -167,5 +167,5 @@ def test_each_service_keeps_its_own_envelope():
     rule.on_snapshot(_snap(service="monad-execution"))
     ev = rule.on_snapshot(_snap(service="monad-bft", n_restarts=1))
     assert ev is not None
-    assert ev.key == "service_failure:monad-bft"
+    assert ev.key == "service_failure:monad-bft:crash"
     assert rule.on_snapshot(_snap(service="monad-execution")) is None
