@@ -290,6 +290,7 @@ def build_app(
                 "reference_checked_ms": snap.reference_checked_ms,
                 "reference_error": snap.reference_error,
                 "reference_local_at_sample": snap.reference_local_at_sample,
+                "maintenance_until": state.maintenance_until(),
                 "current_alerts": snap.current_alerts,
                 "epoch": {
                     "number": snap.epoch_number,

@@ -91,10 +91,11 @@ async def test_api_state_shape(client: httpx.AsyncClient) -> None:
         "last_reorg_number", "last_reorg_old_id",
         "last_reorg_new_id", "last_reorg_ts_ms",
         "reference_block", "reference_checked_ms", "reference_error",
-        "reference_local_at_sample",
+        "reference_local_at_sample", "maintenance_until",
         "current_alerts", "epoch", "consensus",
     }
     assert expected_keys <= set(body.keys())
+    assert body["maintenance_until"] is None
     assert body["node_name"] == "test-node"
     # Epoch is a nested dict.
     assert isinstance(body["epoch"], dict)

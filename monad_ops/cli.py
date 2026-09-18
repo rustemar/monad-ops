@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import sqlite3
 import sys
 import time
 from datetime import UTC
@@ -19,7 +20,7 @@ import structlog
 import uvicorn
 
 from monad_ops.alerts import DedupingSink, StdoutSink, TelegramSink
-from monad_ops.alerts.sink import AlertSink
+from monad_ops.alerts.sink import AlertSink, MaintenanceGate
 from monad_ops.api import build_app
 from monad_ops.collector.bft_journal import tail_consensus_events
 from monad_ops.collector.epoch_probe import (
@@ -112,6 +113,17 @@ class _RecordingSink:
         await self._inner.deliver(event)
 
 
+def _wrap_sink(
+    base: AlertSink, storage: Storage | None, state: State
+) -> tuple[AlertSink, MaintenanceGate | None]:
+    """Recording outside, maintenance gate inside: the history keeps every
+    event, the gate only decides whether Telegram hears about it now."""
+    if storage is None:
+        return _RecordingSink(base, state), None
+    gate = MaintenanceGate(base, storage, record=state.add_alert_async)
+    return _RecordingSink(gate, state), gate
+
+
 async def _collector_loop(
     config: Config,
     sink: AlertSink,
@@ -197,7 +209,10 @@ async def _collector_loop(
             await asyncio.sleep(1)
             ev = stall.on_tick()
             if ev is not None:
-                await sink.deliver(ev)
+                try:
+                    await sink.deliver(ev)
+                except Exception as e:  # noqa: BLE001 — a sink hiccup must not stop stall detection
+                    log.warning("stall.deliver_failed", exc=str(e))
 
     tick_handle = asyncio.create_task(tick_task())
 
@@ -307,8 +322,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # bracketed observation (when it arrives) overrides the carried
         # value silently.
         state.bootstrap_carried_epoch_length()
-    base_sink = _build_sink(config)
-    sink: AlertSink = _RecordingSink(base_sink, state)
+    sink, gate = _wrap_sink(_build_sink(config), storage, state)
 
     enricher: EnrichmentWorker | None = None
     receipts_client: ReceiptsClient | None = None
@@ -926,6 +940,23 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         process_restart_loop(), name="process_restart",
     )
 
+    async def maintenance_flush_loop():
+        """Send the held-alerts summary when a window closes with no event
+        to trigger it. Must NOT return — task is in FIRST_COMPLETED gather."""
+        if gate is None:
+            await asyncio.Future()
+            return
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await gate.flush()
+            except Exception as e:  # noqa: BLE001
+                log.warning("maintenance_flush.error", exc=str(e))
+
+    maintenance_flush = asyncio.create_task(
+        maintenance_flush_loop(), name="maintenance_flush",
+    )
+
     async def reorg_capture_backfill_loop():
         """Recover reorg journal captures whose live task got cancelled by
         an ill-timed restart. Idempotent — find_artifact skips blocks that
@@ -972,7 +1003,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     tasks: set[asyncio.Task] = {
         collector, http, probes, reference, epoch, consensus, bft_flush,
         version_task, validator_set_task, network_signal_tick,
-        process_restart_task, reorg_backfill,
+        process_restart_task, reorg_backfill, maintenance_flush,
     }
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
@@ -1048,6 +1079,65 @@ async def _cmd_ping(args: argparse.Namespace) -> int:
     )
     print("ping delivered", file=sys.stderr)
     return 0
+
+
+async def _cmd_maintenance(args: argparse.Namespace) -> int:
+    """Open, close or show the alert-delivery maintenance window.
+
+    The window lives in the meta table so the running service picks it up
+    within seconds, no restart needed; the dashboard keeps recording, only
+    Telegram goes quiet until the window ends, then one summary follows.
+    """
+    config = load_config(args.config)
+    if not config.persistence.enabled:
+        print("maintenance: needs [persistence] enabled — the service reads the "
+              "window from state.db", file=sys.stderr)
+        return 2
+    path = Path(config.persistence.path).resolve()
+    if not path.exists():
+        # Storage() would create an empty database here and the service,
+        # reading its own file, would never see the window.
+        print(f"maintenance: no database at {path}; run from the service's "
+              f"working directory", file=sys.stderr)
+        return 2
+    storage = Storage(path)
+    try:
+        now = time.time()
+        if args.off:
+            _since, until = storage.maintenance_window()
+            if until is None or until <= now:
+                print(f"maintenance: no window open ({path})", file=sys.stderr)
+                return 0
+            storage.open_maintenance(now)
+            print(f"maintenance: closed, the service sends the summary ({path})",
+                  file=sys.stderr)
+            return 0
+        if args.minutes is not None:
+            if args.minutes <= 0:
+                print("maintenance: --minutes must be positive", file=sys.stderr)
+                return 2
+            until = now + args.minutes * 60
+            storage.open_maintenance(until)
+            print(f"maintenance: open until {_fmt_utc(until)} ({args.minutes} min, {path})",
+                  file=sys.stderr)
+            return 0
+        since, until = storage.maintenance_window()
+        if until is not None and until > now:
+            print(f"maintenance: open until {_fmt_utc(until)} ({path})", file=sys.stderr)
+        elif since is not None:
+            print(f"maintenance: closed, summary pending ({path})", file=sys.stderr)
+        else:
+            print(f"maintenance: closed ({path})", file=sys.stderr)
+        return 0
+    except sqlite3.OperationalError as e:
+        print(f"maintenance: state.db busy ({e}); retry in a few seconds", file=sys.stderr)
+        return 1
+    finally:
+        storage.close()
+
+
+def _fmt_utc(epoch: float) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(epoch))
 
 
 async def _cmd_replay_export(args: argparse.Namespace) -> int:
@@ -1181,6 +1271,13 @@ def _parse_args() -> argparse.Namespace:
     run.add_argument("--port", type=int, default=8873)
 
     sub.add_parser("ping", help="send a test alert to the configured channel")
+    m = sub.add_parser(
+        "maintenance",
+        help="hold Telegram delivery for planned node work (alerts are still recorded)",
+    )
+    m.add_argument("--minutes", type=int, default=None,
+                   help="open a window for this many minutes from now")
+    m.add_argument("--off", action="store_true", help="close the window now")
     r = sub.add_parser("replay", help="parse journal history without alerting live")
     r.add_argument("--since", default="10 minutes ago")
     r.add_argument("--limit", type=int, default=10_000)
@@ -1219,6 +1316,7 @@ def main() -> int:
     handlers = {
         "run": _cmd_run,
         "ping": _cmd_ping,
+        "maintenance": _cmd_maintenance,
         "replay": _cmd_replay,
         "replay-export": _cmd_replay_export,
     }

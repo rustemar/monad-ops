@@ -975,6 +975,55 @@ class Storage:
             ).fetchone()
         return None if row is None else str(row["value"])
 
+    def maintenance_window(self) -> tuple[float | None, float | None]:
+        """(since, until) of the alert-delivery maintenance window, epoch seconds."""
+        from monad_ops.alerts.sink import (
+            MAINTENANCE_SINCE_KEY,
+            MAINTENANCE_UNTIL_KEY,
+            parse_maintenance_ts,
+        )
+        return (
+            parse_maintenance_ts(self.get_meta(MAINTENANCE_SINCE_KEY)),
+            parse_maintenance_ts(self.get_meta(MAINTENANCE_UNTIL_KEY)),
+        )
+
+    def open_maintenance(self, until_sec: float, now_sec: float | None = None) -> None:
+        """Open (or extend) the window. ``since`` is kept when one is already open
+        so the summary covers the whole stretch."""
+        from monad_ops.alerts.sink import MAINTENANCE_SINCE_KEY, MAINTENANCE_UNTIL_KEY
+        now = time.time() if now_sec is None else now_sec
+        since, _until = self.maintenance_window()
+        # Full precision, no rounding: a row recorded right after the open
+        # (or right before `--off`) must fall inside [since, until].
+        if since is None:
+            self.put_meta(MAINTENANCE_SINCE_KEY, repr(float(now)))
+        self.put_meta(MAINTENANCE_UNTIL_KEY, repr(float(until_sec)))
+
+    def close_maintenance(self) -> None:
+        """Mark the window summarised; the gate calls this exactly once per window."""
+        from monad_ops.alerts.sink import MAINTENANCE_SINCE_KEY
+        self.put_meta(MAINTENANCE_SINCE_KEY, "0")
+
+    def recovering_rules(self) -> set[str]:
+        """Rules that have ever closed with RECOVERED — the envelope-shaped ones."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT DISTINCT rule FROM alerts WHERE severity = 'recovered'"
+            ).fetchall()
+        return {str(r["rule"]) for r in rows}
+
+    def alerts_between(
+        self, since_sec: float, until_sec: float
+    ) -> list[tuple[float, str, str, str]]:
+        """(ts, rule, severity, key) for alerts recorded inside a window, oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT ts, rule, severity, key FROM alerts "
+                "WHERE ts >= ? AND ts <= ? ORDER BY ts, id",
+                (since_sec, until_sec),
+            ).fetchall()
+        return [(float(r["ts"]), str(r["rule"]), str(r["severity"]), str(r["key"])) for r in rows]
+
     def put_meta(self, key: str, value: str) -> None:
         """Upsert a meta-table value with current wall-clock ts."""
         ts = int(time.time())
