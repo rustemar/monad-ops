@@ -104,13 +104,18 @@ def _build_sink(config: Config) -> AlertSink:
 class _RecordingSink:
     """Wraps a sink and records every delivered event into shared State."""
 
-    def __init__(self, inner: AlertSink, state: State) -> None:
+    def __init__(self, inner: AlertSink, state: State, gate: MaintenanceGate | None = None) -> None:
         self._inner = inner
         self._state = state
+        self._gate = gate
 
     async def deliver(self, event: AlertEvent) -> None:
-        await self._state.add_alert_async(event)
-        await self._inner.deliver(event)
+        ts = await self._state.add_alert_async(event)
+        if self._gate is not None:
+            # The row's own stamp decides whether it belongs to the window.
+            await self._gate.deliver(event, ts)
+        else:
+            await self._inner.deliver(event)
 
 
 def _wrap_sink(
@@ -121,7 +126,7 @@ def _wrap_sink(
     if storage is None:
         return _RecordingSink(base, state), None
     gate = MaintenanceGate(base, storage, record=state.add_alert_async)
-    return _RecordingSink(gate, state), gate
+    return _RecordingSink(gate, state, gate=gate), gate
 
 
 async def _collector_loop(

@@ -122,7 +122,9 @@ class ServiceFailureRule:
             return AlertEvent(
                 rule="service_failure",
                 severity=Severity.CRITICAL,
-                key=f"service_failure:{snap.service}",
+                # Its own key: this never gets a RECOVERED, so it must not
+                # share the down envelope's identity in the alert history.
+                key=f"service_failure:{snap.service}:crash",
                 title=f"Service crashed and restarted: {snap.service}",
                 detail=_detail(snap, down=False),
             )
