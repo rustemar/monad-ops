@@ -1316,3 +1316,13 @@ async def test_stress_events_profile_and_plain_do_not_share_a_cache_slot(
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+@pytest.mark.asyncio
+async def test_api_version_shape(client: httpx.AsyncClient) -> None:
+    r = await client.get("/api/version")
+    assert r.status_code == 200
+    body = r.json()
+    assert {"package", "installed", "latest", "status", "checked_at", "pending_since",
+            "packages_url", "enabled"} <= set(body.keys())
+    assert body["pending_since"] is None  # nothing pending on a fresh fixture

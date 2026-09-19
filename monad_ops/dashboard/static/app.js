@@ -550,6 +550,15 @@ function fmtUptime(sec) {
     if (m) return `uptime ${m}m ${s}s`;
     return `uptime ${s}s`;
 }
+// Coarse age for things measured in days, not seconds ("2d 4h", "37m").
+function fmtAge(ms) {
+    const totalMin = Math.max(0, Math.floor(ms / 60000));
+    if (totalMin < 60) return `${totalMin}m`;
+    const h = Math.floor(totalMin / 60);
+    if (h < 24) return `${h}h ${totalMin % 60}m`;
+    return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
 function fmtSince(ms) {
     if (!ms) return "—";
     const diffSec = Math.round((Date.now() - ms) / 1000);
@@ -731,7 +740,18 @@ function codeColorChip(alert) {
     });
 })();
 
+function updateMaintenancePill(data) {
+    const pill = document.getElementById("maint-pill");
+    if (!pill) return;
+    const until = data.maintenance_until;
+    if (!until) { pill.hidden = true; pill.textContent = ""; return; }
+    const hhmm = new Date(until * 1000).toISOString().slice(11, 16);
+    pill.textContent = `maintenance until ${hhmm} UTC`;
+    pill.hidden = false;
+}
+
 function updateHealth(data) {
+    updateMaintenancePill(data);
     const pill = document.getElementById("health-pill");
     pill.classList.remove("ok", "warn", "crit");
     // current_alerts is an append-only buffer; a rule can have e.g. warn
@@ -2571,9 +2591,12 @@ function renderVersion(d) {
             + `<span class="v-latest">${escapeHTML(d.latest || "?")}</span>`
         );
         const extrasCount = (d.extras_newer || []).length;
-        extrasEl.textContent = extrasCount > 1
-            ? `${extrasCount} versions ahead`
-            : "click for details";
+        // A package in apt is not the announcement: say how long it has
+        // been sitting there, so "wait for the announce" has a number.
+        const parts = [];
+        if (d.pending_since) parts.push(`in apt for ${fmtAge(Date.now() - d.pending_since * 1000)}`);
+        parts.push(extrasCount > 1 ? `${extrasCount} versions ahead` : "click for details");
+        extrasEl.textContent = parts.join(" · ");
         return;
     }
 
