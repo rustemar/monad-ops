@@ -972,6 +972,7 @@ def build_app(
                     "status": "unknown",
                     "error": "version_watch has not run yet",
                     "checked_at": None,
+                    "pending_since": None,
                     "packages_url": config.version_watch.packages_url,
                     "enabled": config.version_watch.enabled,
                 }
@@ -983,6 +984,10 @@ def build_app(
                 "status": status.status,
                 "error": status.error,
                 "checked_at": checked_at,
+                "pending_since": (
+                    state.version_pending_since(status.latest)
+                    if status.status == "update_available" else None
+                ),
                 "packages_url": config.version_watch.packages_url,
                 "enabled": config.version_watch.enabled,
             }

@@ -275,6 +275,8 @@ main { max-width: 1280px; margin: 0 auto; padding: 24px; }
 .status.critical { color: var(--crit); background: rgba(255,107,107,0.12); }
 .status.unknown  { color: var(--text-dim); background: rgba(138,143,153,0.12); }
 .status.update   { color: var(--info, #6ea8ff); background: rgba(110,168,255,0.14); }
+.status.maint    { color: var(--info, #6ea8ff); background: rgba(110,168,255,0.14); white-space: nowrap; }
+.status.maint[hidden] { display: none; }
 
 .version-row {
     padding: 12px 0;
@@ -321,6 +323,9 @@ a.version-row:hover, a.version-row:focus { color: var(--text-dim); text-decorati
 .version-line.update .v-latest { color: var(--info, #6ea8ff); }
 .version-extras { color: var(--text-faint); font-size: 11.5px; text-align: right; }
 @media (max-width: 720px) {
+    /* A second pill (maintenance) must not push the health pill off-screen. */
+    .nav-links { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+
     /* 90px + line + right-aligned extras does not fit a phone: the
        extras column collapses to one word per line. Give it its own
        full-width row instead. */

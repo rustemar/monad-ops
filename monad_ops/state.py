@@ -10,6 +10,7 @@ execution stress test) can query arbitrary block ranges.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -678,6 +679,25 @@ class State:
             return None
         _since, until = self._storage.maintenance_window()
         return until if until is not None and until > time.time() else None
+
+    def version_pending_since(self, latest: str | None) -> float | None:
+        """When ``latest`` first showed up in apt (epoch s), else None.
+
+        Read from the version rule's persisted state, so the card can say how
+        long a package has been sitting there unannounced. The clock belongs
+        to one version: a newer release replacing the pending one must not
+        inherit its age for the tick before the rule catches up."""
+        if self._storage is None or not latest:
+            return None
+        raw = self._storage.get_meta("version_watch_state")
+        if not raw:
+            return None
+        try:
+            saved = json.loads(raw)
+            since = float(saved.get("pending_since_ts") or 0.0)
+        except (TypeError, ValueError, AttributeError):
+            return None
+        return since if since > 0 and saved.get("pending_version") == latest else None
 
     def set_version(self, status: VersionStatus) -> None:
         with self._lock:
