@@ -28,6 +28,9 @@ const VALIDATOR_SET_INTERVAL = 60000;
 // enrichment_health samples the worker once a minute server-side, so a
 // faster client poll would only re-read the same verdict.
 const ENRICHMENT_INTERVAL = 60000;
+// The git log of the checkout moves about once a day; the card exists so
+// a visitor can tell the project is alive, not to watch commits land.
+const CHANGES_INTERVAL = 300000;
 
 // Inflight-dedup per endpoint: when setInterval fires while a previous
 // request is still in flight (slow network, backgrounded tab releasing
@@ -2608,6 +2611,70 @@ function renderVersion(d) {
     extrasEl.textContent = "";
 }
 
+// Recent commits of the monad-ops checkout, with the commit this process
+// started on. The hint carries the "alive" signal (running X since Y, N in
+// the last 24 h); rows older than a day are dimmed rather than hidden so a
+// quiet week still shows what the last change was.
+const CHANGES_FRESH_MS = 24 * 3600 * 1000;
+const CHANGES_ROWS = 5;
+
+async function fetchChanges() {
+    try {
+        const r = await pollFetch("changes", "/api/changes");
+        if (!r.ok) throw new Error(r.statusText);
+        renderChanges(await r.json());
+    } catch (e) { /* swallow */ }
+}
+
+function renderChanges(d) {
+    const list = document.getElementById("changes-list");
+    const hint = document.getElementById("changes-hint");
+    if (!list || !hint) return;
+
+    if (!d || !d.enabled) {
+        hint.textContent = "monad-ops itself";
+        list.innerHTML = `<li class="empty">${escapeHTML((d && d.error) || "not a git checkout")}</li>`;
+        return;
+    }
+
+    const now = Date.now();
+    const running = d.running || {};
+    const commits = d.commits || [];
+    const fresh = commits.filter((c) => now - c.committed_at * 1000 < CHANGES_FRESH_MS).length;
+    const parts = [];
+    if (running.commit) {
+        parts.push(`running ${running.commit}`
+            + (running.started_at ? ` for ${fmtAge(now - running.started_at * 1000)}` : ""));
+    }
+    // The server sends a fixed number of rows; when all of them are fresh
+    // the true count may be higher.
+    parts.push(`${fresh}${fresh && fresh === commits.length ? "+" : ""} in the last 24 h`);
+    if (d.restart_pending) parts.push("checkout ahead · restart pending");
+    hint.textContent = parts.join(" · ");
+
+    const rows = commits.slice(0, CHANGES_ROWS);
+    if (!rows.length) {
+        list.innerHTML = `<li class="empty">no commits yet</li>`;
+        return;
+    }
+    list.innerHTML = rows.map((c) => {
+        const ageMs = now - c.committed_at * 1000;
+        const isRunning = running.commit && c.commit === running.commit;
+        const cls = [ageMs >= CHANGES_FRESH_MS ? "old" : "", isRunning ? "running" : ""].join(" ").trim();
+        const hash = escapeHTML(c.commit);
+        const hashEl = d.repo_url
+            ? `<a class="chg-hash" href="${escapeHTML(d.repo_url)}/commit/${hash}" target="_blank" rel="noopener noreferrer">${hash}</a>`
+            : `<span class="chg-hash">${hash}</span>`;
+        const when = new Date(c.committed_at * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+        return `<li class="${cls}">`
+            + `<span class="chg-age" title="${when}">${ageMs < 60000 ? "just now" : fmtAge(ageMs) + " ago"}</span>`
+            + hashEl
+            + `<span class="chg-subject">${escapeHTML(c.subject)}`
+            + (isRunning ? `<span class="chg-mark">running</span>` : "")
+            + `</span></li>`;
+    }).join("");
+}
+
 // Receipts-enrichment health. The alert for this is edge-triggered and
 // scrolls out of /alerts, so the tile is the only surface that says
 // enrichment is *still* degraded rather than that it once was.
@@ -3033,6 +3100,7 @@ fetchProbes();
 fetchVersion();
 fetchValidatorSet();
 fetchEnrichment();
+fetchChanges();
 fetchRecoveryPath();
 fetchStressEvents();
 // Throttle polling when the tab is hidden to save battery and reduce
@@ -3058,6 +3126,7 @@ _schedule(fetchProbes, PROBES_INTERVAL);
 _schedule(fetchVersion, VERSION_INTERVAL);
 _schedule(fetchValidatorSet, VALIDATOR_SET_INTERVAL);
 _schedule(fetchEnrichment, ENRICHMENT_INTERVAL);
+_schedule(fetchChanges, CHANGES_INTERVAL);
 // recovery-path counter is curated (operator updates it on GitHub
 // issue confirmation); 10-min cadence is generous, the page itself
 // is the canonical surface.
@@ -3073,7 +3142,7 @@ const _RANGE_KEY_SECS = [...document.querySelectorAll(".charts-range .range-btn[
 function _refreshAll() {
     for (const fn of [fetchState, fetchBlocks, fetchBftSeries, fetchReorgSeries,
                       fetchBaseFeeSeries, fetchContracts, fetchIncidents, fetchProbes,
-                      fetchVersion, fetchValidatorSet, fetchEnrichment,
+                      fetchVersion, fetchValidatorSet, fetchEnrichment, fetchChanges,
                       fetchRecoveryPath, fetchStressEvents]) fn();
 }
 document.addEventListener("keydown", (e) => {

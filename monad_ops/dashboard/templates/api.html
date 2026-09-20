@@ -128,6 +128,10 @@
                         <td>Operator status of the receipts-enrichment worker. Lifetime <code>attempts</code>/<code>succeeded</code>/<code>failed</code>/<code>dropped</code> counters since process start, plus <code>health</code> — the <code>enrichment_health</code> rule's rolling-window verdict (<code>status</code>, <code>fail_pct</code> over <code>window_attempts</code>). Counters answer "has this ever gone wrong", <code>health</code> answers "is it wrong now".</td>
                     </tr>
                     <tr>
+                        <td><code>GET /api/changes</code></td>
+                        <td>Recent commits of this monad-ops checkout: <code>commits[]</code> (<code>commit</code> short hash, <code>committed_at</code> unix seconds, <code>subject</code>; newest first, from the pushed tip when the branch tracks one), <code>head</code>, <code>running</code> (<code>commit</code> this process started on, <code>started_at</code>) and <code>restart_pending</code> — true once the checkout has moved past the running commit. <code>repo_url</code> links the hashes when an operator identity is configured; <code>enabled</code> is false (with <code>error</code>) when the code is not a git checkout.</td>
+                    </tr>
+                    <tr>
                         <td><code>GET /api/probes</code></td>
                         <td>Sanitized host-probe status (service/key/disk/fd) — name, status, summary.</td>
                     </tr>
