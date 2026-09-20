@@ -41,6 +41,46 @@ _TEMPLATE_DIR = _PKG_DIR / "dashboard" / "templates"
 _STATIC_DIR = _PKG_DIR / "dashboard" / "static"
 
 
+def _git(*args: str) -> str | None:
+    """One read-only git command against the checkout; None when git cannot answer."""
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(_REPO_DIR), *args],
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    return out.decode(errors="replace").strip()
+
+
+def _git_head() -> str | None:
+    return _git("rev-parse", "--short", "HEAD") or None
+
+
+def _git_head_full() -> str | None:
+    return _git("rev-parse", "HEAD") or None
+
+
+def _git_recent_commits(limit: int = 8) -> list[dict] | None:
+    """Newest-first ``{commit, committed_at, subject}`` rows, or None outside a checkout.
+
+    Lists the pushed tip when the branch tracks one, so every row exists on
+    the public repo; only subjects and short hashes reach the wire.
+    """
+    ref = "@{u}" if _git("rev-parse", "--verify", "-q", "@{u}") else "HEAD"
+    out = _git("log", f"-n{limit}", "--format=%h%x1f%ct%x1f%s", ref)
+    if out is None:
+        return None
+    rows: list[dict] = []
+    for line in out.splitlines():
+        parts = line.split("\x1f", 2)
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue
+        rows.append({"commit": parts[0], "committed_at": int(parts[1]), "subject": parts[2]})
+    return rows
+
+
 def _asset_version() -> str:
     """Version string for cache-busting CSS/JS via ?v=... query param.
 
@@ -49,15 +89,7 @@ def _asset_version() -> str:
     Either part can be missing; the result still changes whenever either
     changes.
     """
-    try:
-        out = subprocess.check_output(
-            ["git", "-C", str(_REPO_DIR), "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
-        git_part = out.decode().strip() or "dev"
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        git_part = "dev"
+    git_part = _git_head() or "dev"
     mtime = 0
     for d in (_STATIC_DIR, _TEMPLATE_DIR):
         for f in d.rglob("*"):
@@ -70,6 +102,11 @@ def _asset_version() -> str:
 
 
 _ASSET_VERSION = _asset_version()
+# What this process is running: HEAD at import time. Compared against the live
+# HEAD later so a commit made without a restart shows up as such.
+_RUNNING_COMMIT = _git_head()
+_RUNNING_COMMIT_FULL = _git_head_full()
+_STARTED_AT = time.time()
 
 
 def build_app(
@@ -149,6 +186,7 @@ def build_app(
     _ALERTS_TTL = 5.0         # in-memory recent-alerts tail
     _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
     _VERSION_TTL = 30.0       # version_watch runs hourly; short cache surfaces an upgrade fast
+    _CHANGES_TTL = 60.0       # git log of the checkout; changes once a day at most
     _REORGS_LIST_TTL = 30.0   # changes only when a new reorg fires (rare)
     _STRESS_EVENTS_TTL = 10.0 # alerts table append-only; live envelope updates need fresh reads
     _REORG_TRACE_TTL = 300.0  # historical reorg trace is immutable
@@ -992,6 +1030,36 @@ def build_app(
                 "enabled": config.version_watch.enabled,
             }
         payload = await _cached("version", _VERSION_TTL, (), _load)
+        return JSONResponse(payload)
+
+    @app.api_route("/api/changes", methods=["GET", "HEAD"])
+    async def api_changes() -> JSONResponse:
+        """Recent commits of this monad-ops checkout and the commit the process runs.
+
+        Powers the "recent changes" card: a visitor sees the dashboard is
+        maintained, the operator sees when the checkout has moved past what
+        is running. Public-safe: short hashes, commit times and subjects.
+        ``enabled`` is false when the code is not a git checkout.
+        """
+        def _read_git() -> tuple[list[dict] | None, str | None, str | None]:
+            return _git_recent_commits(8), _git_head(), _git_head_full()
+
+        async def _load():
+            commits, head, head_full = await asyncio.to_thread(_read_git)
+            repo_url = (config.operator.public_repo or None) if config.operator.enabled else None
+            return {
+                "enabled": commits is not None,
+                "error": None if commits is not None else "not a git checkout",
+                "repo_url": repo_url,
+                "running": {"commit": _RUNNING_COMMIT, "started_at": _STARTED_AT},
+                "head": head,
+                # Full hashes: short ones can grow as the object count does.
+                "restart_pending": bool(
+                    head_full and _RUNNING_COMMIT_FULL and head_full != _RUNNING_COMMIT_FULL
+                ),
+                "commits": commits or [],
+            }
+        payload = await _cached("changes", _CHANGES_TTL, (), _load)
         return JSONResponse(payload)
 
     @app.api_route("/api/validator_set", methods=["GET", "HEAD"])

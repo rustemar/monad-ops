@@ -809,6 +809,7 @@ _HEAD_ENDPOINTS = [
     "/api/probes/public",
     "/api/contracts/labels",
     "/api/enrichment/status",
+    "/api/changes",
 ]
 
 
@@ -819,6 +820,131 @@ async def test_head_returns_200(client: httpx.AsyncClient, path: str) -> None:
     assert r.status_code == 200
     # HEAD responses must not have a body.
     assert r.content == b""
+
+
+# ---------------------------------------------------------------------------
+# /api/changes — recent commits of the checkout
+# ---------------------------------------------------------------------------
+
+_FAKE_COMMITS = [
+    {"commit": "bbb2222", "committed_at": 1_789_900_000, "subject": "feat(x): newer"},
+    {"commit": "aaa1111", "committed_at": 1_789_800_000, "subject": "fix(y): older"},
+]
+
+
+def _fake_git(monkeypatch, app_mod, *, commits, head, running) -> None:
+    """Stand in for the git helpers; full hashes are the short ones padded."""
+    def full(h):
+        return h * 5 if h else None
+
+    monkeypatch.setattr(app_mod, "_git_recent_commits", lambda limit=8: commits and list(commits))
+    monkeypatch.setattr(app_mod, "_git_head", lambda: head)
+    monkeypatch.setattr(app_mod, "_git_head_full", lambda: full(head))
+    monkeypatch.setattr(app_mod, "_RUNNING_COMMIT", running)
+    monkeypatch.setattr(app_mod, "_RUNNING_COMMIT_FULL", full(running))
+
+
+@pytest.mark.asyncio
+async def test_api_changes_shape_and_running_marker(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import monad_ops.api.app as app_mod
+    _fake_git(monkeypatch, app_mod, commits=_FAKE_COMMITS, head="bbb2222", running="bbb2222")
+    r = await client.get("/api/changes")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["enabled"] is True and d["error"] is None
+    assert d["commits"] == _FAKE_COMMITS
+    assert d["head"] == "bbb2222"
+    assert d["running"]["commit"] == "bbb2222"
+    assert isinstance(d["running"]["started_at"], float)
+    assert d["restart_pending"] is False
+    # No operator identity configured -> no repo to link commits to.
+    assert d["repo_url"] is None
+    # Only hashes, times and subjects reach the wire.
+    assert set(d["commits"][0]) == {"commit", "committed_at", "subject"}
+
+
+@pytest.mark.asyncio
+async def test_api_changes_flags_a_checkout_ahead_of_the_process(
+    client_with_operator: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import monad_ops.api.app as app_mod
+    _fake_git(monkeypatch, app_mod, commits=_FAKE_COMMITS, head="bbb2222", running="aaa1111")
+    d = (await client_with_operator.get("/api/changes")).json()
+    assert d["head"] == "bbb2222" and d["running"]["commit"] == "aaa1111"
+    assert d["restart_pending"] is True
+    assert d["repo_url"] == "https://github.com/rustemar/monad-ops"
+
+
+@pytest.mark.asyncio
+async def test_api_changes_outside_a_git_checkout(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import monad_ops.api.app as app_mod
+    _fake_git(monkeypatch, app_mod, commits=None, head=None, running=None)
+    r = await client.get("/api/changes")
+    assert r.status_code == 200
+    d = r.json()
+    assert d["enabled"] is False
+    assert d["error"] == "not a git checkout"
+    assert d["commits"] == [] and d["head"] is None and d["restart_pending"] is False
+
+
+def test_git_recent_commits_skips_malformed_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    import monad_ops.api.app as app_mod
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str) -> str | None:
+        calls.append(args)
+        if args[0] == "rev-parse":
+            return None  # no upstream -> log HEAD
+        return "abc1234\x1f1789900000\x1ffeat: ok\nbroken line\nxyz9876\x1fnotanumber\x1fnope\n"
+
+    monkeypatch.setattr(app_mod, "_git", fake_git)
+    rows = app_mod._git_recent_commits(3)
+    assert rows == [{"commit": "abc1234", "committed_at": 1789900000, "subject": "feat: ok"}]
+    assert calls[-1] == ("log", "-n3", "--format=%h%x1f%ct%x1f%s", "HEAD")
+
+
+def test_git_recent_commits_prefers_the_pushed_tip(monkeypatch: pytest.MonkeyPatch) -> None:
+    import monad_ops.api.app as app_mod
+    calls: list[tuple[str, ...]] = []
+
+    def fake_git(*args: str) -> str | None:
+        calls.append(args)
+        return "deadbee" if args[0] == "rev-parse" else ""
+
+    monkeypatch.setattr(app_mod, "_git", fake_git)
+    assert app_mod._git_recent_commits(2) == []
+    assert calls[-1][-1] == "@{u}"
+
+
+def test_git_returns_none_when_the_command_cannot_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    import subprocess
+
+    import monad_ops.api.app as app_mod
+
+    def boom(*a, **kw):
+        raise subprocess.TimeoutExpired(cmd="git", timeout=2)
+
+    monkeypatch.setattr(app_mod.subprocess, "check_output", boom)
+    assert app_mod._git("rev-parse", "HEAD") is None
+    assert app_mod._git_recent_commits() is None
+    assert app_mod._asset_version().startswith("dev")
+
+
+def test_git_recent_commits_parses_real_log() -> None:
+    from monad_ops.api.app import _git_recent_commits
+    rows = _git_recent_commits(3)
+    if rows is None:  # e.g. a source tarball without .git
+        pytest.skip("not a git checkout")
+    assert 1 <= len(rows) <= 3
+    assert all(set(r) == {"commit", "committed_at", "subject"} for r in rows)
+    assert all(isinstance(r["committed_at"], int) and r["subject"] for r in rows)
+    # Newest first, as git log emits them.
+    times = [r["committed_at"] for r in rows]
+    assert times == sorted(times, reverse=True)
 
 
 # ---------------------------------------------------------------------------

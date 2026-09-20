@@ -250,6 +250,8 @@ per 10 s by default (`[api]` in the config). Over the limit you get
 - `GET /api/window_summary?from_ts_ms=&to_ts_ms=&include_blocks=`
   — single-call post-event report.
 - `GET /api/probes` — sanitized host-probe status.
+- `GET /api/changes` — recent commits of the running checkout, and
+  whether the process is behind it.
 - `GET /api/status/errors` — HTTP error counters plus `parse_drift`:
   log lines the parser recognised but could not extract, per kind.
   Non-zero means the node release moved the log schema.
