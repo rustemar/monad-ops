@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from monad_ops.config import Config
+from monad_ops.labels import ContractLabels
 from monad_ops.state import State
 
 
@@ -31,4 +32,5 @@ class ApiContext:
     state: State
     config: Config
     cached: Callable[..., Awaitable[Any]]
+    labels: ContractLabels
     journal_capture_dir: Path | None = None
