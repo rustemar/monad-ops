@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -29,6 +29,7 @@ from monad_ops.api.context import ApiContext
 from monad_ops.api.ratelimit import TokenBucketLimiter, client_key
 from monad_ops.api.routes import alerts as alerts_routes
 from monad_ops.api.routes import details as details_routes
+from monad_ops.api.routes import meta as meta_routes
 from monad_ops.api.routes import reorgs as reorgs_routes
 from monad_ops.api.routes import series as series_routes
 from monad_ops.config import Config
@@ -1021,38 +1022,9 @@ def build_app(
         )
         return JSONResponse(payload)
 
-    @app.api_route("/healthz", methods=["GET", "HEAD"])
-    async def healthz() -> JSONResponse:
-        return JSONResponse({"ok": True})
-
-    @app.api_route("/manifest.json", methods=["GET", "HEAD"])
-    async def manifest_json() -> FileResponse:
-        return FileResponse(
-            _STATIC_DIR / "manifest.json", media_type="application/manifest+json"
-        )
-
-    @app.api_route("/robots.txt", methods=["GET", "HEAD"])
-    async def robots_txt() -> FileResponse:
-        return FileResponse(_STATIC_DIR / "robots.txt", media_type="text/plain")
-
-    @app.api_route("/sitemap.xml", methods=["GET", "HEAD"])
-    async def sitemap_xml() -> FileResponse:
-        return FileResponse(_STATIC_DIR / "sitemap.xml", media_type="application/xml")
-
-    @app.api_route("/.well-known/security.txt", methods=["GET", "HEAD"])
-    async def security_txt() -> FileResponse:
-        return FileResponse(
-            _STATIC_DIR / ".well-known" / "security.txt",
-            media_type="text/plain",
-        )
-
-    @app.api_route("/favicon.ico", methods=["GET", "HEAD"])
-    async def favicon() -> FileResponse:
-        # Serve the SVG for the legacy /favicon.ico path so browsers that
-        # preflight it before parsing the HTML <link> don't log a 404.
-        return FileResponse(
-            _STATIC_DIR / "favicon.svg", media_type="image/svg+xml"
-        )
+    # Site metadata lives in its own module (queue item R1); mounted here so
+    # the route order around it is unchanged.
+    app.include_router(meta_routes.build_router(_STATIC_DIR))
 
     @app.api_route("/", methods=["GET", "HEAD"])
     async def root(request: Request):
