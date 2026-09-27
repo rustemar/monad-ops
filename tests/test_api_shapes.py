@@ -22,6 +22,19 @@ from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
 from monad_ops.storage import Storage
 
+# Words the public pages must never contain. The list is operator-local
+# (tests/private_names.txt, one per line, gitignored) so it never enters
+# the repository; without the file the checks are skipped.
+_PRIVATE_NAMES_FILE = Path(__file__).with_name("private_names.txt")
+
+
+def _private_names() -> tuple[str, ...]:
+    if not _PRIVATE_NAMES_FILE.exists():
+        return ()
+    lines = _PRIVATE_NAMES_FILE.read_text(encoding="utf-8").splitlines()
+    return tuple(w.strip() for w in lines if w.strip() and not w.startswith("#"))
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -283,7 +296,7 @@ async def test_incidents_recovery_path_page_renders(client: httpx.AsyncClient) -
     assert "Recovery-path assertion stall class" in body
     # Negative checks: no operator names / Foundation first names slip
     # into the public copy.
-    for forbidden in ():
+    for forbidden in _private_names():
         assert forbidden not in body, f"public page leaks {forbidden!r}"
 
 
@@ -298,7 +311,7 @@ async def test_profile_page_renders_for_configured_handle(
     assert "rustemar" in body
     # Forbidden references — operator profile is public and shouldn't
     # leak private handles or Foundation first names.
-    for forbidden in ():
+    for forbidden in _private_names():
         assert forbidden not in body, f"profile leaks {forbidden!r}"
 
 

@@ -40,3 +40,6 @@ systemd/nginx-ops-dashboard.conf
 # scripts/watchdog.env.example is the committed template; the real file
 # is operator-local.
 scripts/watchdog.env
+
+# Operator-local deny-list for the public-page tests.
+tests/private_names.txt
