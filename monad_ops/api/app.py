@@ -12,7 +12,6 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
-import re
 import subprocess
 import time
 from collections import OrderedDict
@@ -31,6 +30,7 @@ from monad_ops.api.routes import alerts as alerts_routes
 from monad_ops.api.routes import blocks as blocks_routes
 from monad_ops.api.routes import details as details_routes
 from monad_ops.api.routes import meta as meta_routes
+from monad_ops.api.routes import node as node_routes
 from monad_ops.api.routes import pages as pages_routes
 from monad_ops.api.routes import reorgs as reorgs_routes
 from monad_ops.api.routes import series as series_routes
@@ -187,8 +187,6 @@ def build_app(
     # collapsing 1000 concurrent viewers into a single SQL/snapshot per
     # interval. Values cross-referenced with the dashboard's poll cadence
     # in dashboard/static/dashboard.js.
-    _PROBES_TTL = 60.0        # probes loop runs every ~30s host-side
-    _VERSION_TTL = 30.0       # version_watch runs hourly; short cache surfaces an upgrade fast
     _CHANGES_TTL = 60.0       # git log of the checkout; changes once a day at most
     _WINDOW_SUMMARY_TTL = 15.0  # heavy SQL aggregate over arbitrary window
 
@@ -300,107 +298,11 @@ def build_app(
     # unchanged.
     app.include_router(reorgs_routes.build_router(ctx))
 
-    def _sanitize_probe_summary(name: str, summary: str) -> str:
-        """Strip exact port numbers, ulimit values and percentages from
-        probe summaries. Keeps the status signal without leaking
-        host-configuration detail."""
-        if name == "udp_config":
-            # We never want the port number or the "config not readable"
-            # caveat — just health.
-            if "authenticated UDP" in summary:
-                return "authenticated UDP listener healthy"
-            return summary
-        if name == "fd_limits":
-            return re.sub(r"nofile soft=\d+ hard=\d+", "fd limits within safe margin", summary)
-        if name == "disk_usage":
-            return re.sub(r"\(peak [\d.]+%?\)", "(peak <20%)", summary)
-        return summary
-
-    async def _api_probes_payload() -> dict:
-        """Sanitized host-probe payload — name, status, summary only.
-
-        The earlier two-tier architecture (`/api/probes` with `details` +
-        `/api/probes/public` sanitized) was retired 2026-05-03: the
-        `/public` suffix implied a `/private` counterpart that no longer
-        exists, and the operator-sensitive `details` field (key-backup
-        paths, `/dev/nvme<N>p<N>`, ulimit values) is information the
-        operator already has via shell access. The single endpoint here
-        is what the dashboard renders and what external clients see.
-        """
-        probes, ran_at = state.probes()
-        return {
-            "ran_at": ran_at,
-            "probes": [
-                {
-                    "name": p.name,
-                    "status": p.status,
-                    "summary": _sanitize_probe_summary(p.name, p.summary),
-                }
-                for p in probes
-            ],
-        }
-
-    @app.api_route("/api/probes", methods=["GET", "HEAD"])
-    async def api_probes() -> JSONResponse:
-        payload = await _cached("probes", _PROBES_TTL, (), _api_probes_payload)
-        return JSONResponse(payload)
-
-    @app.api_route("/api/probes/public", methods=["GET", "HEAD"])
-    async def api_probes_public() -> JSONResponse:
-        """Backwards-compat alias of /api/probes.
-
-        Pre-2026-05-03 callers (README + bookmarks) hit /public. Returns
-        the same payload as /api/probes so nothing breaks during the
-        transition; can be removed once external references migrate.
-        """
-        payload = await _cached("probes", _PROBES_TTL, (), _api_probes_payload)
-        return JSONResponse(payload)
-
-    @app.api_route("/api/version", methods=["GET", "HEAD"])
-    async def api_version() -> JSONResponse:
-        """Locally-installed monad package vs. apt repo.
-
-        Powers the "node version" tile on the dashboard. Returns the
-        same shape whether the operator is up to date, has an upgrade
-        pending, or the probe could not run — the UI special-cases
-        each ``status`` value.
-
-        Public-safe: contains only package name + version strings + the
-        configured repo URL — no host paths, no PIDs, no metadata about
-        the host OS.
-        """
-        async def _load():
-            status, checked_at = state.version()
-            if status is None:
-                return {
-                    "package": config.version_watch.package,
-                    "installed": None,
-                    "latest": None,
-                    "extras_newer": [],
-                    "status": "unknown",
-                    "error": "version_watch has not run yet",
-                    "checked_at": None,
-                    "pending_since": None,
-                    "packages_url": config.version_watch.packages_url,
-                    "enabled": config.version_watch.enabled,
-                }
-            return {
-                "package": status.package,
-                "installed": status.installed,
-                "latest": status.latest,
-                "extras_newer": list(status.extras_newer),
-                "status": status.status,
-                "error": status.error,
-                "checked_at": checked_at,
-                "pending_since": (
-                    state.version_pending_since(status.latest)
-                    if status.status == "update_available" else None
-                ),
-                "packages_url": config.version_watch.packages_url,
-                "enabled": config.version_watch.enabled,
-            }
-        payload = await _cached("version", _VERSION_TTL, (), _load)
-        return JSONResponse(payload)
+    # Node info (probes, version, validator set) lives in its own module
+    # (queue item R1), mounted where the probes used to be declared. The
+    # validator set now registers before /api/changes; neither takes a path
+    # parameter.
+    app.include_router(node_routes.build_router(ctx))
 
     @app.api_route("/api/changes", methods=["GET", "HEAD"])
     async def api_changes() -> JSONResponse:
@@ -430,57 +332,6 @@ def build_app(
                 "commits": commits or [],
             }
         payload = await _cached("changes", _CHANGES_TTL, (), _load)
-        return JSONResponse(payload)
-
-    @app.api_route("/api/validator_set", methods=["GET", "HEAD"])
-    async def api_validator_set() -> JSONResponse:
-        """Active validator-set snapshot from the staking precompile.
-
-        Powers the "active validator set" tile on the dashboard. The
-        snapshot itself changes on epoch boundaries (~5.5h on testnet);
-        polled every 5 min by ``validator_set_loop`` in cli.py.
-
-        Public-safe: returns only protocol constants + on-chain counts
-        + the cutoff stake (already public via the precompile). No host
-        metadata or peer-level identity.
-        """
-        async def _load():
-            snapshot, checked_at = state.validator_set()
-            if snapshot is None:
-                return {
-                    "enabled": config.validator_set.enabled,
-                    "status": "unknown",
-                    "error": "validator_set probe has not run yet",
-                    "checked_at": None,
-                    "epoch": None,
-                    "in_epoch_delay": False,
-                    "consensus_count": None,
-                    "execution_count": None,
-                    "bench_count": None,
-                    "lowest_active_stake_wei": None,
-                    "active_valset_cap": 200,
-                    "active_validator_stake_mon": 10_000_000,
-                    "min_auth_address_stake_mon": 100_000,
-                }
-            return {
-                "enabled": config.validator_set.enabled,
-                "status": snapshot.status,
-                "error": snapshot.error,
-                "checked_at": checked_at,
-                "epoch": snapshot.epoch,
-                "in_epoch_delay": snapshot.in_epoch_delay,
-                "consensus_count": snapshot.consensus_count,
-                "execution_count": snapshot.execution_count,
-                "bench_count": snapshot.bench_count,
-                "lowest_active_stake_wei": (
-                    str(snapshot.lowest_active_stake_wei)
-                    if snapshot.lowest_active_stake_wei is not None else None
-                ),
-                "active_valset_cap": 200,
-                "active_validator_stake_mon": 10_000_000,
-                "min_auth_address_stake_mon": 100_000,
-            }
-        payload = await _cached("validator_set", 30.0, (), _load)
         return JSONResponse(payload)
 
     @app.api_route("/api/contracts/top_retried", methods=["GET", "HEAD"])
