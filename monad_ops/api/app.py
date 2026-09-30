@@ -35,10 +35,10 @@ from monad_ops.api.routes import node as node_routes
 from monad_ops.api.routes import pages as pages_routes
 from monad_ops.api.routes import reorgs as reorgs_routes
 from monad_ops.api.routes import series as series_routes
+from monad_ops.api.routes import status as status_routes
 from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
-from monad_ops.parser import drift
 from monad_ops.state import State
 
 _THIS_DIR = Path(__file__).parent
@@ -345,62 +345,16 @@ def build_app(
     # /api/contracts/* routes above.
     app.include_router(details_routes.build_router(ctx))
 
-    @app.api_route("/api/status/errors", methods=["GET", "HEAD"])
-    async def api_status_errors() -> JSONResponse:
-        """Error counters since process start, grouped by status code.
-
-        ``parse_drift`` covers the other silent failure: per log-line
-        kind, how many lines the parser recognised but could not extract
-        (``drift``, zero at steady state) against how many it did parse
-        (``ok``, which goes flat if a marker disappears entirely).
-        """
-        return JSONResponse({
-            "since_ms": int(_error_since * 1000),
-            "uptime_sec": round(time.time() - _error_since, 1),
-            "counts": dict(_error_counts),
-            "total": sum(_error_counts.values()),
-            "parse_drift": drift.snapshot(),
-        })
-
-    @app.api_route("/api/enrichment/status", methods=["GET", "HEAD"])
-    async def api_enrichment_status() -> JSONResponse:
-        """Receipts-enrichment worker: lifetime counters plus the rule's
-        current verdict.
-
-        The counters are cumulative since process start and answer "has
-        this ever gone wrong"; ``health`` is the rolling-window view and
-        answers "is it wrong now". Both are needed — an outage that
-        recovered leaves a permanent gap in the contract tables, so the
-        lifetime ``failed``/``dropped`` totals stay operationally
-        interesting long after the alert cleared.
-
-        Public-safe: counts and a status word, no host metadata.
-        """
-        if enricher is None:
-            return JSONResponse({"enabled": False})
-        health, checked_at = state.enrichment_health()
-        return JSONResponse({
-            "enabled": True,
-            **enricher.stats,
-            "checked_at": checked_at,
-            "health": {
-                "status": "unknown",
-                "failing": False,
-                "dropping": False,
-                "window_attempts": 0,
-                "window_failed": 0,
-                "fail_pct": None,
-                "samples": 0,
-            } if health is None else {
-                "status": health.status,
-                "failing": health.failing,
-                "dropping": health.dropping,
-                "window_attempts": health.window_attempts,
-                "window_failed": health.window_failed,
-                "fail_pct": health.fail_pct,
-                "samples": health.samples,
-            },
-        })
+    # Status endpoints live in their own module (queue item R1), mounted where
+    # they were declared; they get the middleware's counter and the enricher.
+    app.include_router(
+        status_routes.build_router(
+            ctx,
+            error_counts=_error_counts,
+            error_since=_error_since,
+            enricher=enricher,
+        )
+    )
 
     @app.api_route("/api/window_summary", methods=["GET", "HEAD"])
     async def api_window_summary(
