@@ -860,7 +860,7 @@ def _fake_git(monkeypatch, app_mod, *, commits, head, running) -> None:
 async def test_api_changes_shape_and_running_marker(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
     _fake_git(monkeypatch, app_mod, commits=_FAKE_COMMITS, head="bbb2222", running="bbb2222")
     r = await client.get("/api/changes")
     assert r.status_code == 200
@@ -881,7 +881,7 @@ async def test_api_changes_shape_and_running_marker(
 async def test_api_changes_flags_a_checkout_ahead_of_the_process(
     client_with_operator: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
     _fake_git(monkeypatch, app_mod, commits=_FAKE_COMMITS, head="bbb2222", running="aaa1111")
     d = (await client_with_operator.get("/api/changes")).json()
     assert d["head"] == "bbb2222" and d["running"]["commit"] == "aaa1111"
@@ -893,7 +893,7 @@ async def test_api_changes_flags_a_checkout_ahead_of_the_process(
 async def test_api_changes_outside_a_git_checkout(
     client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
     _fake_git(monkeypatch, app_mod, commits=None, head=None, running=None)
     r = await client.get("/api/changes")
     assert r.status_code == 200
@@ -904,7 +904,7 @@ async def test_api_changes_outside_a_git_checkout(
 
 
 def test_git_recent_commits_skips_malformed_lines(monkeypatch: pytest.MonkeyPatch) -> None:
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
     calls: list[tuple[str, ...]] = []
 
     def fake_git(*args: str) -> str | None:
@@ -920,7 +920,7 @@ def test_git_recent_commits_skips_malformed_lines(monkeypatch: pytest.MonkeyPatc
 
 
 def test_git_recent_commits_prefers_the_pushed_tip(monkeypatch: pytest.MonkeyPatch) -> None:
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
     calls: list[tuple[str, ...]] = []
 
     def fake_git(*args: str) -> str | None:
@@ -935,7 +935,7 @@ def test_git_recent_commits_prefers_the_pushed_tip(monkeypatch: pytest.MonkeyPat
 def test_git_returns_none_when_the_command_cannot_run(monkeypatch: pytest.MonkeyPatch) -> None:
     import subprocess
 
-    import monad_ops.api.app as app_mod
+    import monad_ops.api.checkout as app_mod
 
     def boom(*a, **kw):
         raise subprocess.TimeoutExpired(cmd="git", timeout=2)
@@ -947,7 +947,7 @@ def test_git_returns_none_when_the_command_cannot_run(monkeypatch: pytest.Monkey
 
 
 def test_git_recent_commits_parses_real_log() -> None:
-    from monad_ops.api.app import _git_recent_commits
+    from monad_ops.api.checkout import _git_recent_commits
     rows = _git_recent_commits(3)
     if rows is None:  # e.g. a source tarball without .git
         pytest.skip("not a git checkout")

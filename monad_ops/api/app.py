@@ -12,7 +12,6 @@ Design notes:
 from __future__ import annotations
 
 import asyncio
-import subprocess
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -24,10 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from monad_ops.api import checkout
 from monad_ops.api.context import ApiContext
 from monad_ops.api.ratelimit import TokenBucketLimiter, client_key
 from monad_ops.api.routes import alerts as alerts_routes
 from monad_ops.api.routes import blocks as blocks_routes
+from monad_ops.api.routes import changes as changes_routes
 from monad_ops.api.routes import contracts as contracts_routes
 from monad_ops.api.routes import details as details_routes
 from monad_ops.api.routes import meta as meta_routes
@@ -41,80 +42,6 @@ from monad_ops.config import Config
 from monad_ops.enricher import EnrichmentWorker
 from monad_ops.labels import ContractLabels
 from monad_ops.state import State
-
-_THIS_DIR = Path(__file__).parent
-_PKG_DIR = _THIS_DIR.parent
-_REPO_DIR = _PKG_DIR.parent
-_TEMPLATE_DIR = _PKG_DIR / "dashboard" / "templates"
-_STATIC_DIR = _PKG_DIR / "dashboard" / "static"
-
-
-def _git(*args: str) -> str | None:
-    """One read-only git command against the checkout; None when git cannot answer."""
-    try:
-        out = subprocess.check_output(
-            ["git", "-C", str(_REPO_DIR), *args],
-            stderr=subprocess.DEVNULL,
-            timeout=2,
-        )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
-        return None
-    return out.decode(errors="replace").strip()
-
-
-def _git_head() -> str | None:
-    return _git("rev-parse", "--short", "HEAD") or None
-
-
-def _git_head_full() -> str | None:
-    return _git("rev-parse", "HEAD") or None
-
-
-def _git_recent_commits(limit: int = 8) -> list[dict] | None:
-    """Newest-first ``{commit, committed_at, subject}`` rows, or None outside a checkout.
-
-    Lists the pushed tip when the branch tracks one, so every row exists on
-    the public repo; only subjects and short hashes reach the wire.
-    """
-    ref = "@{u}" if _git("rev-parse", "--verify", "-q", "@{u}") else "HEAD"
-    out = _git("log", f"-n{limit}", "--format=%h%x1f%ct%x1f%s", ref)
-    if out is None:
-        return None
-    rows: list[dict] = []
-    for line in out.splitlines():
-        parts = line.split("\x1f", 2)
-        if len(parts) != 3 or not parts[1].isdigit():
-            continue
-        rows.append({"commit": parts[0], "committed_at": int(parts[1]), "subject": parts[2]})
-    return rows
-
-
-def _asset_version() -> str:
-    """Version string for cache-busting CSS/JS via ?v=... query param.
-
-    Combines the short git HEAD hash (human-readable) with the newest
-    template/static mtime (catches uncommitted edits after a restart).
-    Either part can be missing; the result still changes whenever either
-    changes.
-    """
-    git_part = _git_head() or "dev"
-    mtime = 0
-    for d in (_STATIC_DIR, _TEMPLATE_DIR):
-        for f in d.rglob("*"):
-            if f.is_file():
-                try:
-                    mtime = max(mtime, int(f.stat().st_mtime))
-                except OSError:
-                    continue
-    return f"{git_part}-{mtime}" if mtime else git_part
-
-
-_ASSET_VERSION = _asset_version()
-# What this process is running: HEAD at import time. Compared against the live
-# HEAD later so a commit made without a restart shows up as such.
-_RUNNING_COMMIT = _git_head()
-_RUNNING_COMMIT_FULL = _git_head_full()
-_STARTED_AT = time.time()
 
 
 def build_app(
@@ -139,8 +66,8 @@ def build_app(
         allow_headers=["*"],
         max_age=600,
     )
-    templates = Jinja2Templates(directory=str(_TEMPLATE_DIR))
-    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+    templates = Jinja2Templates(directory=str(checkout._TEMPLATE_DIR))
+    app.mount("/static", StaticFiles(directory=str(checkout._STATIC_DIR)), name="static")
 
     # Registered before the error counter so a 429 is still counted. CORS
     # sits inside this layer, hence the explicit allow-origin on the 429.
@@ -182,14 +109,6 @@ def build_app(
         if response.status_code >= 400:
             _error_counts[response.status_code] += 1
         return response
-
-    # Per-endpoint TTLs. Each one balances "user expectation of freshness"
-    # against "how much load we shed by caching". For an open dashboard
-    # tab polling at 30s, even 1-2s of staleness is invisible while
-    # collapsing 1000 concurrent viewers into a single SQL/snapshot per
-    # interval. Values cross-referenced with the dashboard's poll cadence
-    # in dashboard/static/dashboard.js.
-    _CHANGES_TTL = 60.0       # git log of the checkout; changes once a day at most
 
     # Generic TTL cache + in-flight dedup. Used for the two heavy
     # aggregates — top_retried (15s TTL, 4-sec query) and blocks/sampled
@@ -305,35 +224,9 @@ def build_app(
     # parameter.
     app.include_router(node_routes.build_router(ctx))
 
-    @app.api_route("/api/changes", methods=["GET", "HEAD"])
-    async def api_changes() -> JSONResponse:
-        """Recent commits of this monad-ops checkout and the commit the process runs.
-
-        Powers the "recent changes" card: a visitor sees the dashboard is
-        maintained, the operator sees when the checkout has moved past what
-        is running. Public-safe: short hashes, commit times and subjects.
-        ``enabled`` is false when the code is not a git checkout.
-        """
-        def _read_git() -> tuple[list[dict] | None, str | None, str | None]:
-            return _git_recent_commits(8), _git_head(), _git_head_full()
-
-        async def _load():
-            commits, head, head_full = await asyncio.to_thread(_read_git)
-            repo_url = (config.operator.public_repo or None) if config.operator.enabled else None
-            return {
-                "enabled": commits is not None,
-                "error": None if commits is not None else "not a git checkout",
-                "repo_url": repo_url,
-                "running": {"commit": _RUNNING_COMMIT, "started_at": _STARTED_AT},
-                "head": head,
-                # Full hashes: short ones can grow as the object count does.
-                "restart_pending": bool(
-                    head_full and _RUNNING_COMMIT_FULL and head_full != _RUNNING_COMMIT_FULL
-                ),
-                "commits": commits or [],
-            }
-        payload = await _cached("changes", _CHANGES_TTL, (), _load)
-        return JSONResponse(payload)
+    # Checkout changes live in their own module (queue item R1), mounted
+    # where the endpoint was declared so route order stays unchanged.
+    app.include_router(changes_routes.build_router(ctx))
 
     # Contract ranking and labels live in their own module (queue item R1),
     # mounted where they were declared: still ahead of the details router's
@@ -362,7 +255,7 @@ def build_app(
 
     # Site metadata lives in its own module (queue item R1); mounted here so
     # the route order around it is unchanged.
-    app.include_router(meta_routes.build_router(_STATIC_DIR))
+    app.include_router(meta_routes.build_router(checkout._STATIC_DIR))
 
     # Pages live in their own module (queue item R1); mounted here so the
     # route order around them is unchanged.
@@ -370,7 +263,7 @@ def build_app(
         pages_routes.build_router(
             ctx,
             templates=templates,
-            asset_version=_ASSET_VERSION,
+            asset_version=checkout._ASSET_VERSION,
             api_rate_limit=_api_cfg if _limiter is not None else None,
         )
     )
@@ -389,7 +282,7 @@ def build_app(
                 return templates.TemplateResponse(
                     request,
                     "404.html",
-                    {"asset_version": _ASSET_VERSION, "path": path},
+                    {"asset_version": checkout._ASSET_VERSION, "path": path},
                     status_code=404,
                 )
         # Preserve default behavior for all other cases (incl. API 404s).

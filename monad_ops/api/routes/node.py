@@ -1,8 +1,8 @@
 """Node info endpoints: the host probes, the installed package version and the
 active validator set.
 
-Moved out of ``build_app`` unchanged (queue item R1). ``/api/changes`` stays in
-``app.py`` with the git helpers it reads.
+Moved out of ``build_app`` unchanged (queue item R1). Checkout changes live in
+their own router, mounted after these node info endpoints.
 """
 
 from __future__ import annotations
