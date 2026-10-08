@@ -29,6 +29,7 @@ from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
 from monad_ops.storage.consensus import _ConsensusQueryMixin
 from monad_ops.storage.maintenance import _MaintenanceMixin
+from monad_ops.storage.metadata import _MetadataMixin
 from monad_ops.storage.proposers import _ProposerQueryMixin
 from monad_ops.storage.reorgs import _ReorgQueryMixin
 
@@ -346,7 +347,7 @@ class _PercentileAgg:
 
 class Storage(
     _MaintenanceMixin, _BaseFeeQueryMixin, _ConsensusQueryMixin, _ProposerQueryMixin,
-    _ReorgQueryMixin,
+    _ReorgQueryMixin, _MetadataMixin,
 ):
     """Thin wrapper over a SQLite connection.
 
@@ -928,87 +929,6 @@ class Storage(
             row = self._conn.execute("SELECT COUNT(*) AS n FROM blocks").fetchone()
         return int(row["n"])
 
-    def get_meta(self, key: str) -> str | None:
-        """Read a meta-table value, or None if the key isn't set."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM meta WHERE key = ?", (key,)
-            ).fetchone()
-        return None if row is None else str(row["value"])
-
-    def _meta_in_txn(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        return None if row is None else str(row["value"])
-
-    def _put_meta_in_txn(self, key: str, value: str) -> None:
-        self._conn.execute(
-            "INSERT OR REPLACE INTO meta(key, value, updated_ts) VALUES (?,?,?)",
-            (key, value, int(time.time())),
-        )
-
-    def maintenance_window(self) -> tuple[float | None, float | None]:
-        """(since, until) of the alert-delivery maintenance window, epoch seconds."""
-        from monad_ops.alerts.sink import (
-            MAINTENANCE_SINCE_KEY,
-            MAINTENANCE_UNTIL_KEY,
-            parse_maintenance_ts,
-        )
-        with self._lock:
-            since = self._meta_in_txn(MAINTENANCE_SINCE_KEY)
-            until = self._meta_in_txn(MAINTENANCE_UNTIL_KEY)
-        return parse_maintenance_ts(since), parse_maintenance_ts(until)
-
-    def open_maintenance(self, until_sec: float, now_sec: float | None = None) -> None:
-        """Open (or extend) the window in one transaction. ``since`` is kept
-        while a window is open so the summary covers the whole stretch, and
-        started afresh once the stored ``until`` has passed. The service's
-        ``take_closed_window`` runs in its own IMMEDIATE transaction, so the
-        two never interleave half-way."""
-        from monad_ops.alerts.sink import (
-            MAINTENANCE_SINCE_KEY,
-            MAINTENANCE_UNTIL_KEY,
-            parse_maintenance_ts,
-        )
-        now = time.time() if now_sec is None else now_sec
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                since = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_SINCE_KEY))
-                until = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_UNTIL_KEY))
-                # Full precision, no rounding: a row recorded right after the
-                # open (or right before `--off`) must fall inside [since, until].
-                self._put_meta_in_txn(MAINTENANCE_UNTIL_KEY, repr(float(until_sec)))
-                if since is None or until is None or until <= now:
-                    self._put_meta_in_txn(MAINTENANCE_SINCE_KEY, repr(float(now)))
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-
-    def take_closed_window(self, now_sec: float) -> tuple[float, float] | None:
-        """Claim a window that has ended: clear ``since`` and return the bounds,
-        or None when no closed, unsummarised window exists. One transaction, so
-        only one caller ever gets a given window."""
-        from monad_ops.alerts.sink import (
-            MAINTENANCE_SINCE_KEY,
-            MAINTENANCE_UNTIL_KEY,
-            parse_maintenance_ts,
-        )
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                since = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_SINCE_KEY))
-                until = parse_maintenance_ts(self._meta_in_txn(MAINTENANCE_UNTIL_KEY))
-                if since is None or until is None or until > now_sec:
-                    self._conn.execute("COMMIT")
-                    return None
-                self._put_meta_in_txn(MAINTENANCE_SINCE_KEY, "0")
-                self._conn.execute("COMMIT")
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-        return since, until
-
     def recovered_envelopes(self) -> set[str]:
         """Alert keys that have ever closed with RECOVERED — the envelope-shaped ones."""
         with self._lock:
@@ -1040,16 +960,6 @@ class Storage(
         with self._lock:
             rows = self._conn.execute(sql + " ORDER BY ts, id", args).fetchall()
         return [(float(r["ts"]), str(r["rule"]), str(r["severity"]), str(r["key"])) for r in rows]
-
-    def put_meta(self, key: str, value: str) -> None:
-        """Upsert a meta-table value with current wall-clock ts."""
-        ts = int(time.time())
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO meta(key, value, updated_ts) VALUES (?,?,?)",
-                (key, value, ts),
-            )
-            self._conn.commit()
 
     def sampled_blocks(
         self,
