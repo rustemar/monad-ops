@@ -281,7 +281,7 @@ monad_ops/
 ├── rules/              # the eleven alert-emitting rules (docs/rules.md)
 ├── alerts/             # sinks (Telegram, stdout, deduping)
 ├── state.py            # in-memory snapshot + EpochTracker
-├── storage/            # SQLite facade, schema, metadata, aggregates, query families, maintenance
+├── storage/            # SQLite facade, schema, metadata, alert envelopes, aggregates, query families, maintenance
 └── config.py           # Pydantic settings
 ```
 

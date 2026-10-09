@@ -25,7 +25,9 @@ from pathlib import Path
 from threading import Lock
 
 from monad_ops.parser import ExecBlock
-from monad_ops.rules.events import AlertEvent, Severity
+from monad_ops.rules.events import AlertEvent as AlertEvent
+from monad_ops.rules.events import Severity
+from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
 from monad_ops.storage.consensus import _ConsensusQueryMixin
 from monad_ops.storage.maintenance import _MaintenanceMixin
@@ -347,7 +349,7 @@ class _PercentileAgg:
 
 class Storage(
     _MaintenanceMixin, _BaseFeeQueryMixin, _ConsensusQueryMixin, _ProposerQueryMixin,
-    _ReorgQueryMixin, _MetadataMixin,
+    _ReorgQueryMixin, _MetadataMixin, _AlertEnvelopeMixin,
 ):
     """Thin wrapper over a SQLite connection.
 
@@ -468,17 +470,6 @@ class Storage(
                     b.retry_pct, b.state_reset_us, b.tx_exec_us, b.commit_us, b.total_us,
                     b.tps_effective, b.tps_avg, b.gas_used, b.gas_per_sec_effective,
                     b.gas_per_sec_avg, b.active_chunks, b.storage_cache_size,
-                ),
-            )
-
-    def write_alert(self, a: AlertEvent, ts: float | None = None) -> None:
-        with self._lock:
-            self._conn.execute(
-                """INSERT INTO alerts (ts, rule, severity, key, title, detail)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    ts if ts is not None else time.time(),
-                    a.rule, a.severity.value, a.key, a.title, a.detail,
                 ),
             )
 
@@ -928,38 +919,6 @@ class Storage(
         with self._lock:
             row = self._conn.execute("SELECT COUNT(*) AS n FROM blocks").fetchone()
         return int(row["n"])
-
-    def recovered_envelopes(self) -> set[str]:
-        """Alert keys that have ever closed with RECOVERED — the envelope-shaped ones."""
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT DISTINCT key FROM alerts WHERE severity = 'recovered'"
-            ).fetchall()
-        return {str(r["key"]) for r in rows}
-
-    def last_severity_before(self, envelope: str, ts_sec: float) -> str | None:
-        """Severity of the envelope's last row before ``ts_sec``, if any."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT severity FROM alerts WHERE ts < ? AND key IN (?, ?, ?) "
-                "ORDER BY ts DESC, id DESC LIMIT 1",
-                (ts_sec, envelope, f"{envelope}:warn", f"{envelope}:critical"),
-            ).fetchone()
-        return None if row is None else str(row["severity"])
-
-    def alerts_between(
-        self, since_sec: float, until_sec: float, *, before: float | None = None
-    ) -> list[tuple[float, str, str, str]]:
-        """(ts, rule, severity, key) for alerts recorded inside a window, oldest
-        first; ``before`` excludes rows stamped at or after it."""
-        sql = "SELECT ts, rule, severity, key FROM alerts WHERE ts >= ? AND ts <= ?"
-        args: list[float] = [since_sec, until_sec]
-        if before is not None:
-            sql += " AND ts < ?"
-            args.append(before)
-        with self._lock:
-            rows = self._conn.execute(sql + " ORDER BY ts, id", args).fetchall()
-        return [(float(r["ts"]), str(r["rule"]), str(r["severity"]), str(r["key"])) for r in rows]
 
     def sampled_blocks(
         self,
