@@ -30,6 +30,7 @@ from monad_ops.rules.events import Severity
 from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
 from monad_ops.storage.consensus import _ConsensusQueryMixin
+from monad_ops.storage.enrichment import _EnrichmentQueryMixin
 from monad_ops.storage.maintenance import _MaintenanceMixin
 from monad_ops.storage.metadata import _MetadataMixin
 from monad_ops.storage.proposers import _ProposerQueryMixin
@@ -349,7 +350,7 @@ class _PercentileAgg:
 
 class Storage(
     _MaintenanceMixin, _BaseFeeQueryMixin, _ConsensusQueryMixin, _ProposerQueryMixin,
-    _ReorgQueryMixin, _MetadataMixin, _AlertEnvelopeMixin,
+    _ReorgQueryMixin, _MetadataMixin, _AlertEnvelopeMixin, _EnrichmentQueryMixin,
 ):
     """Thin wrapper over a SQLite connection.
 
@@ -1006,13 +1007,6 @@ class Storage(
             )
         return len(params)
 
-    def tx_enrichment_count(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM tx_enrichment"
-            ).fetchone()
-        return int(row["n"])
-
     def write_tx_contract_block(self, rows: list[ContractBlockAgg]) -> int:
         """Upsert a batch of (block, to_addr) aggregate rows.
 
@@ -1033,33 +1027,7 @@ class Storage(
             )
         return len(params)
 
-    def tx_contract_block_count(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM tx_contract_block"
-            ).fetchone()
-        return int(row["n"])
-
     # -- contract_hour rollup ---------------------------------------------
-
-    def contract_hour_count(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM contract_hour"
-            ).fetchone()
-        return int(row["n"])
-
-    def contract_hour_range(self) -> tuple[int | None, int | None]:
-        """Return (min_hour_ms, max_hour_ms) present in the rollup, or
-        ``(None, None)`` if empty. Used by the rebuild task to decide
-        whether a full backfill is needed."""
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT MIN(hour_ms) AS lo, MAX(hour_ms) AS hi FROM contract_hour"
-            ).fetchone()
-        if row is None or row["lo"] is None:
-            return (None, None)
-        return (int(row["lo"]), int(row["hi"]))
 
     def rebuild_contract_hour(
         self, from_hour_ms: int, to_hour_ms: int
@@ -1372,14 +1340,6 @@ class Storage(
                 block_nums,
             ).fetchall())
         return [(bn, int(block_ts.get(bn, ts * 1000))) for bn, ts in parsed]
-
-    def enrichment_has_block(self, block_number: int) -> bool:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT 1 FROM tx_enrichment WHERE block_number = ? LIMIT 1",
-                (int(block_number),),
-            ).fetchone()
-        return row is not None
 
     def top_retried_contracts(
         self,
