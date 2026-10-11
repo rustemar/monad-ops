@@ -93,3 +93,66 @@ class _ReorgQueryMixin:
             {"t": ts, "single": v["single"], "cluster": v["cluster"]}
             for ts, v in sorted(buckets.items())
         ]
+
+    def list_reorg_alerts_for_capture(self, since_sec: float) -> list[tuple[int, int]]:
+        """(block_number, block_ts_ms) for reorg alerts since ``since_sec``.
+
+        Drives the startup backfill that recovers captures cancelled by
+        an ill-timed restart. block_ts_ms preferred from the blocks table;
+        falls back to alert.ts*1000 if the block was pruned."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key, ts FROM alerts WHERE rule='reorg' AND ts >= ?",
+                (float(since_sec),),
+            ).fetchall()
+            parsed: list[tuple[int, float]] = []
+            for r in rows:
+                parts = r["key"].split(":", 2)
+                if len(parts) >= 2 and parts[0] == "reorg" and parts[1].isdigit():
+                    parsed.append((int(parts[1]), float(r["ts"])))
+            if not parsed:
+                return []
+            block_nums = list({bn for bn, _ in parsed})
+            ph = ",".join("?" * len(block_nums))
+            block_ts = dict(self._conn.execute(
+                f"SELECT block_number, timestamp_ms FROM blocks WHERE block_number IN ({ph})",
+                block_nums,
+            ).fetchall())
+        return [(bn, int(block_ts.get(bn, ts * 1000))) for bn, ts in parsed]
+
+
+    def find_reorg_near_block(
+        self,
+        block_number: int,
+        *,
+        window: int = 10,
+    ) -> int | None:
+        """Nearest reorg alert's block_number within ±window, or None.
+
+        Reads from the append-only alerts table. Reorgs are rare (a
+        handful per week on testnet) so a full scan of ``rule='reorg'``
+        rows is cheap; parsing happens client-side because the
+        composite key ``reorg:<number>:<new_id>`` is canonical.
+        """
+        window = max(0, min(int(window), 1000))
+        n = int(block_number)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT key FROM alerts WHERE rule = 'reorg'"
+            ).fetchall()
+        best: int | None = None
+        best_delta: int | None = None
+        for r in rows:
+            key = r["key"] or ""
+            parts = key.split(":", 2)
+            if len(parts) < 3:
+                continue
+            try:
+                rn = int(parts[1])
+            except ValueError:
+                continue
+            d = abs(rn - n)
+            if d <= window and (best_delta is None or d < best_delta):
+                best = rn
+                best_delta = d
+        return best
