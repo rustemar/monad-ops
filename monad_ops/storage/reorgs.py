@@ -156,3 +156,74 @@ class _ReorgQueryMixin:
                 best = rn
                 best_delta = d
         return best
+
+    def list_reorgs(self, limit: int = 200) -> list[dict]:
+        """List reorg events enriched with the reorged block's metrics.
+
+        Each row reconstructs both block_ids: the "before" id from the
+        ``blocks`` table (first-seen via INSERT OR IGNORE, so it holds
+        the original observation) and the "after" id from the alert's
+        ``key`` column (format ``reorg:<number>:<full_new_id>``). The
+        alert ``detail`` field only carries truncated hex, so the key
+        parse is the canonical source for the full new id.
+
+        Block metrics (tx_count, retry_pct, gas_used, timing) come from
+        whichever version of the block was persisted — for reorgs that
+        is the "before" version. Callers should treat per-block metrics
+        here as the losing-fork view, not the canonical chain view.
+
+        Returns newest-first so dashboards can render without a reverse
+        pass. Rows lacking a corresponding ``blocks`` entry (bootstrap
+        edge cases, blocks evicted by retention) still appear with
+        ``block: None`` so the caller can distinguish "no metrics" from
+        "no reorg".
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT a.id AS alert_id, a.ts AS alert_ts, a.key, a.detail,
+                          b.block_number, b.block_id AS block_id_before,
+                          b.timestamp_ms, b.tx_count, b.retried, b.retry_pct,
+                          b.gas_used
+                   FROM alerts a
+                   LEFT JOIN blocks b ON b.block_number = CAST(
+                       substr(a.key,
+                              length('reorg:') + 1,
+                              instr(substr(a.key, length('reorg:') + 1), ':') - 1
+                       ) AS INTEGER
+                   )
+                   WHERE a.rule = 'reorg'
+                   ORDER BY a.ts DESC
+                   LIMIT ?""",
+                (max(1, min(int(limit), 5000)),),
+            ).fetchall()
+
+        out: list[dict] = []
+        for r in rows:
+            # Parse "reorg:<number>:<full_new_id>" — the key is always
+            # well-formed because the rule constructs it directly.
+            parts = (r["key"] or "").split(":", 2)
+            block_number = int(parts[1]) if len(parts) >= 3 else None
+            block_id_after = parts[2] if len(parts) >= 3 else None
+
+            block_view: dict | None = None
+            if r["block_number"] is not None:
+                block_view = {
+                    "block_number": r["block_number"],
+                    "block_id_before": r["block_id_before"],
+                    "timestamp_ms": r["timestamp_ms"],
+                    "tx_count": r["tx_count"],
+                    "retried": r["retried"],
+                    "retry_pct": r["retry_pct"],
+                    "gas_used": r["gas_used"],
+                }
+
+            out.append({
+                "alert_id": r["alert_id"],
+                "alert_ts_ms": int(r["alert_ts"] * 1000),
+                "block_number": block_number,
+                "block_id_before": block_view["block_id_before"] if block_view else None,
+                "block_id_after": block_id_after,
+                "block": block_view,  # full metrics for the losing-fork view, or None
+                "detail": r["detail"],
+            })
+        return out
