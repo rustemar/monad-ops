@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 from _thread import LockType
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
 
 class _ReorgQueryMixin:
@@ -11,6 +13,9 @@ class _ReorgQueryMixin:
 
     _conn: sqlite3.Connection
     _lock: LockType
+
+    if TYPE_CHECKING:
+        def get_proposers(self, block_seqs: Iterable[int]) -> dict[int, str]: ...
 
     def count_reorgs_since(self, since_ts: float) -> int:
         """Count reorg alerts with ``ts >= since_ts``.
@@ -227,3 +232,84 @@ class _ReorgQueryMixin:
                 "detail": r["detail"],
             })
         return out
+
+    def get_reorg_trace(
+        self,
+        block_number: int,
+        *,
+        window: int = 30,
+    ) -> dict | None:
+        """Return a reorg event + N blocks on each side from ``blocks``.
+
+        ``window`` is clamped to [0, 500]. The returned neighbors span
+        ``[block_number - window, block_number + window]`` as available
+        in the blocks table (gaps at startup or post-retention are
+        simply omitted — the caller sees the contiguous range that
+        exists). Neighbors are returned in ascending block_number order
+        so renderers can chart timing without a sort.
+
+        Returns ``None`` if no reorg alert exists for this block_number.
+        """
+        window = max(0, min(int(window), 500))
+        key_prefix = f"reorg:{int(block_number)}:"
+        with self._lock:
+            alert_row = self._conn.execute(
+                """SELECT id, ts, key, title, detail
+                   FROM alerts
+                   WHERE rule = 'reorg' AND key LIKE ?
+                   ORDER BY ts DESC LIMIT 1""",
+                (key_prefix + "%",),
+            ).fetchone()
+            if not alert_row:
+                return None
+
+            lo = int(block_number) - window
+            hi = int(block_number) + window
+            block_rows = self._conn.execute(
+                """SELECT block_number, block_id, timestamp_ms, tx_count,
+                          retried, retry_pct, state_reset_us, tx_exec_us,
+                          commit_us, total_us, tps_effective, tps_avg,
+                          gas_used, gas_per_sec_effective, gas_per_sec_avg,
+                          active_chunks, storage_cache_size
+                   FROM blocks
+                   WHERE block_number BETWEEN ? AND ?
+                   ORDER BY block_number ASC""",
+                (lo, hi),
+            ).fetchall()
+
+        # Reconstruct the new block_id from the alert key.
+        parts = (alert_row["key"] or "").split(":", 2)
+        block_id_after = parts[2] if len(parts) >= 3 else None
+
+        # Pull the "before" id out of the block row we already have, if any.
+        reorged_block = next(
+            (r for r in block_rows if r["block_number"] == int(block_number)),
+            None,
+        )
+        block_id_before = reorged_block["block_id"] if reorged_block else None
+
+        # Leader attribution across the whole window, not just the
+        # reorged block: the forensic question is whether one validator
+        # proposed both sides of the split, or whether the neighbours
+        # changed hands around it. One batched lookup for the window.
+        blocks = [dict(r) for r in block_rows]
+        proposers = self.get_proposers(
+            [b["block_number"] for b in blocks] + [int(block_number)]
+        )
+        for b in blocks:
+            b["proposer"] = proposers.get(b["block_number"])
+
+        return {
+            "alert": {
+                "id": alert_row["id"],
+                "ts_ms": int(alert_row["ts"] * 1000),
+                "title": alert_row["title"],
+                "detail": alert_row["detail"],
+            },
+            "block_number": int(block_number),
+            "block_id_before": block_id_before,
+            "block_id_after": block_id_after,
+            "proposer": proposers.get(int(block_number)),
+            "window": window,
+            "blocks": blocks,
+        }
