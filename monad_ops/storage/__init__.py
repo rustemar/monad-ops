@@ -30,6 +30,7 @@ from monad_ops.rules.events import Severity
 from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
 from monad_ops.storage.blocks import _BlockQueryMixin
+from monad_ops.storage.blocks import _row_to_block as _row_to_block
 from monad_ops.storage.consensus import _ConsensusQueryMixin
 from monad_ops.storage.enrichment import _EnrichmentQueryMixin
 from monad_ops.storage.maintenance import _MaintenanceMixin
@@ -477,52 +478,6 @@ class Storage(
             )
 
     # -- reads -------------------------------------------------------------
-    def load_recent_blocks(self, limit: int) -> list[ExecBlock]:
-        """Return the most-recent ``limit`` blocks in ascending order."""
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT * FROM blocks
-                   ORDER BY block_number DESC
-                   LIMIT ?""",
-                (int(limit),),
-            ).fetchall()
-        rows.reverse()
-        return [_row_to_block(r) for r in rows]
-
-    def load_blocks_range(
-        self,
-        from_block: int | None = None,
-        to_block: int | None = None,
-        from_ts_ms: int | None = None,
-        to_ts_ms: int | None = None,
-        limit: int = 5000,
-    ) -> list[ExecBlock]:
-        """Query blocks by block_number range or timestamp range."""
-        clauses: list[str] = []
-        params: list[object] = []
-        if from_block is not None:
-            clauses.append("block_number >= ?")
-            params.append(int(from_block))
-        if to_block is not None:
-            clauses.append("block_number <= ?")
-            params.append(int(to_block))
-        if from_ts_ms is not None:
-            clauses.append("timestamp_ms >= ?")
-            params.append(int(from_ts_ms))
-        if to_ts_ms is not None:
-            clauses.append("timestamp_ms <= ?")
-            params.append(int(to_ts_ms))
-
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = (
-            f"SELECT * FROM blocks {where} "
-            f"ORDER BY block_number ASC LIMIT ?"
-        )
-        params.append(max(1, min(int(limit), 50_000)))
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
-        return [_row_to_block(r) for r in rows]
-
     def block_metrics_aggregate(
         self,
         *,
@@ -1411,28 +1366,6 @@ def _classify_pattern(
             ),
         }
     return None
-
-
-def _row_to_block(r: sqlite3.Row) -> ExecBlock:
-    return ExecBlock(
-        block_number=r["block_number"],
-        block_id=r["block_id"],
-        timestamp_ms=r["timestamp_ms"],
-        tx_count=r["tx_count"],
-        retried=r["retried"],
-        retry_pct=r["retry_pct"],
-        state_reset_us=r["state_reset_us"],
-        tx_exec_us=r["tx_exec_us"],
-        commit_us=r["commit_us"],
-        total_us=r["total_us"],
-        tps_effective=r["tps_effective"],
-        tps_avg=r["tps_avg"],
-        gas_used=r["gas_used"],
-        gas_per_sec_effective=r["gas_per_sec_effective"],
-        gas_per_sec_avg=r["gas_per_sec_avg"],
-        active_chunks=r["active_chunks"],
-        storage_cache_size=r["storage_cache_size"],
-    )
 
 
 def bulk_write_blocks(storage: Storage, blocks: Iterable[ExecBlock]) -> int:
