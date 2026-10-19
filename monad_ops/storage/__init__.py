@@ -29,6 +29,7 @@ from monad_ops.rules.events import AlertEvent as AlertEvent
 from monad_ops.rules.events import Severity
 from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
+from monad_ops.storage.blocks import _GAS_PER_SEC_SCALE as _GAS_PER_SEC_SCALE
 from monad_ops.storage.blocks import _BlockQueryMixin
 from monad_ops.storage.blocks import _row_to_block as _row_to_block
 from monad_ops.storage.consensus import _ConsensusQueryMixin
@@ -222,9 +223,6 @@ CREATE TABLE IF NOT EXISTS meta (
 """
 
 _HOUR_MS = 3_600_000
-
-# gpse is logged in mega-gas/sec; scale on read so the stored column stays one unit.
-_GAS_PER_SEC_SCALE = 1_000_000
 
 # Minimum per-hour blocks_appeared for a (hour, to_addr) row to be kept
 # in the rollup. See contract_hour schema comment for the measurement
@@ -478,74 +476,6 @@ class Storage(
             )
 
     # -- reads -------------------------------------------------------------
-    def block_metrics_aggregate(
-        self,
-        *,
-        from_ts_ms: int,
-        to_ts_ms: int,
-    ) -> dict:
-        """Aggregate metrics for a window, computed in SQL.
-
-        Replaces the older pattern of loading every block row into
-        Python and computing peak/avg/sum from attributes — that
-        materialised ~18 K row objects for a 2 h window and ~200 K for
-        24 h. Moving the aggregation into a single SQL pass keeps the
-        response fixed-size regardless of window span, which is what
-        allows ``/api/window_summary`` to accept ranges up to 30 days
-        without returning megabytes of per-block rows.
-
-        Returns the dict shape expected by the endpoint (empty-window
-        default is the caller's concern).
-        """
-        sql = """
-            SELECT
-                COUNT(*)                                AS blocks,
-                MIN(timestamp_ms)                       AS first_ts,
-                MAX(timestamp_ms)                       AS last_ts,
-                MAX(retry_pct)                          AS peak_rtp,
-                AVG(retry_pct)                          AS avg_rtp,
-                MAX(gas_per_sec_effective)              AS peak_gps,
-                SUM(gas_used)                           AS total_gas,
-                MAX(tps_effective)                      AS peak_tps,
-                SUM(tx_count)                           AS total_tx,
-                SUM(retried)                            AS total_retried
-            FROM blocks
-            WHERE timestamp_ms >= ? AND timestamp_ms <= ?
-        """
-        with self._lock:
-            row = self._conn.execute(sql, (int(from_ts_ms), int(to_ts_ms))).fetchone()
-        n = int(row["blocks"] or 0)
-        if n == 0:
-            return {
-                "blocks": 0, "span_ms": 0,
-                "peak_rtp": 0.0, "avg_rtp": 0.0,
-                "peak_gps": 0, "avg_gps": 0,
-                "peak_tps": 0, "avg_tps": 0.0,
-                "total_gas": 0, "total_tx": 0,
-                "total_retried": 0, "retried_fraction": 0.0,
-            }
-        span_ms = int(row["last_ts"]) - int(row["first_ts"])
-        span_sec = max(1, span_ms / 1000.0)
-        total_tx = int(row["total_tx"] or 0)
-        total_retried = int(row["total_retried"] or 0)
-        total_gas = int(row["total_gas"] or 0)
-        return {
-            "blocks": n,
-            "span_ms": span_ms,
-            "peak_rtp": round(float(row["peak_rtp"] or 0), 2),
-            "avg_rtp": round(float(row["avg_rtp"] or 0), 2),
-            "peak_gps": int(row["peak_gps"] or 0) * _GAS_PER_SEC_SCALE,
-            "avg_gps": int(total_gas / span_sec),
-            "peak_tps": int(row["peak_tps"] or 0),
-            "avg_tps": round(total_tx / span_sec, 2),
-            "total_gas": total_gas,
-            "total_tx": total_tx,
-            "total_retried": total_retried,
-            "retried_fraction": round(
-                total_retried / total_tx if total_tx else 0.0, 4
-            ),
-        }
-
     def load_recent_alerts(self, limit: int) -> list[StoredAlert]:
         with self._lock:
             rows = self._conn.execute(
@@ -632,68 +562,6 @@ class Storage(
             )
             for r in rows
         ]
-
-    def sampled_blocks(
-        self,
-        *,
-        from_ts_ms: int,
-        to_ts_ms: int,
-        target_points: int = 300,
-    ) -> list[dict]:
-        """Downsampled blocks over an arbitrary time window.
-
-        Returns at most ``target_points`` rows by bucketing the window
-        into fixed-width time bins (``bin_ms = span / target_points``)
-        and aggregating inside each bin. One SQL statement, uses
-        ``idx_blocks_ts`` for range, avoids loading per-block data into
-        Python — safe to call with a 7-day window (~1.5M blocks).
-
-        Fields mirror the chart consumers:
-          * n_first / n_last — first & last block_number in the bin
-          * t                 — bin start ms (min timestamp in bin)
-          * tx, rt, rtp_avg, rtp_p95, rtp_max — per-block metrics;
-            p95 is the "most blocks were this bad or worse" signal
-            used for the chart envelope (robust to single-block spikes)
-          * tps_eff_max, gas_max     — parallelism ceilings in-bin
-          * state_reset_us, tx_exec_us, commit_us — phase averages
-
-        Empty bins are simply absent (sparse series); the client fills
-        gaps if needed. `target_points=1` is valid (returns one row).
-        """
-        if to_ts_ms <= from_ts_ms:
-            return []
-        target_points = max(1, min(int(target_points), 2000))
-        span_ms = to_ts_ms - from_ts_ms
-        bin_ms = max(1, span_ms // target_points)
-        with self._lock:
-            rows = self._conn.execute(
-                f"""
-                SELECT
-                    MIN(block_number)          AS n_first,
-                    MAX(block_number)          AS n_last,
-                    MIN(timestamp_ms)          AS t,
-                    AVG(tx_count)              AS tx,
-                    AVG(retried)               AS rt,
-                    AVG(retry_pct)             AS rtp_avg,
-                    percentile(retry_pct, 0.95) AS rtp_p95,
-                    MAX(retry_pct)             AS rtp_max,
-                    MAX(tps_effective)         AS tps_eff_max,
-                    AVG(tps_effective)         AS tps_eff_avg,
-                    MAX(gas_per_sec_effective) * {_GAS_PER_SEC_SCALE} AS gas_max,
-                    AVG(state_reset_us)        AS state_reset_us,
-                    AVG(tx_exec_us)            AS tx_exec_us,
-                    AVG(commit_us)             AS commit_us,
-                    MAX(storage_cache_size)    AS storage_cache_size_max,
-                    MAX(active_chunks)         AS active_chunks_max,
-                    COUNT(*)                   AS samples
-                FROM blocks
-                WHERE timestamp_ms BETWEEN ? AND ?
-                GROUP BY (timestamp_ms - ?) / ?
-                ORDER BY t ASC
-                """,
-                (int(from_ts_ms), int(to_ts_ms), int(from_ts_ms), int(bin_ms)),
-            ).fetchall()
-        return [dict(r) for r in rows]
 
     # -- tx enrichment -----------------------------------------------------
     def write_tx_enrichment(self, rows: list[TxEnrichment]) -> int:
