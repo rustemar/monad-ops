@@ -458,23 +458,6 @@ class Storage(
             self._conn.commit()
 
     # -- writes ------------------------------------------------------------
-    def write_block(self, b: ExecBlock) -> None:
-        with self._lock:
-            self._conn.execute(
-                """INSERT OR IGNORE INTO blocks (
-                    block_number, block_id, timestamp_ms, tx_count, retried,
-                    retry_pct, state_reset_us, tx_exec_us, commit_us, total_us,
-                    tps_effective, tps_avg, gas_used, gas_per_sec_effective,
-                    gas_per_sec_avg, active_chunks, storage_cache_size
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (
-                    b.block_number, b.block_id, b.timestamp_ms, b.tx_count, b.retried,
-                    b.retry_pct, b.state_reset_us, b.tx_exec_us, b.commit_us, b.total_us,
-                    b.tps_effective, b.tps_avg, b.gas_used, b.gas_per_sec_effective,
-                    b.gas_per_sec_avg, b.active_chunks, b.storage_cache_size,
-                ),
-            )
-
     # -- reads -------------------------------------------------------------
     def load_recent_alerts(self, limit: int) -> list[StoredAlert]:
         with self._lock:
