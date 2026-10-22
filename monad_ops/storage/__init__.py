@@ -27,6 +27,7 @@ from threading import Lock
 from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent as AlertEvent
 from monad_ops.rules.events import Severity
+from monad_ops.storage import enrichment as _enrichment
 from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
 from monad_ops.storage.blocks import _GAS_PER_SEC_SCALE as _GAS_PER_SEC_SCALE
@@ -273,6 +274,9 @@ class ContractRetryStat:
     avg_rtp_of_blocks: float
     tx_count: int
     total_gas: int
+
+
+vars(_enrichment)["ContractRetryStat"] = ContractRetryStat
 
 
 @dataclass(frozen=True, slots=True)
@@ -585,78 +589,6 @@ class Storage(
         return len(params)
 
     # -- contract_hour rollup ---------------------------------------------
-
-    def top_retried_contracts_rollup(
-        self,
-        since_ts_ms: int | None = None,
-        until_ts_ms: int | None = None,
-        min_appearances: int = 3,
-        limit: int = 50,
-    ) -> list[ContractRetryStat]:
-        """Top retried contracts from the hourly rollup.
-
-        Semantically equivalent to ``top_retried_contracts`` with
-        timestamp filters, but scans ~1 000× fewer rows because the
-        per-(block, addr) data is pre-aggregated into hourly buckets.
-
-        Boundary notes:
-          * Filters are aligned to hour boundaries — the effective window
-            is ``[floor(since, 1h), ceil(until, 1h))``. A "last 1 h"
-            query crossing an hour boundary can span up to 2 buckets.
-            For ranking purposes this is acceptable distortion; exact
-            per-block precision requires ``top_retried_contracts``.
-          * ``blocks_appeared`` counts distinct blocks (per the invariant
-            of one tx_contract_block row per (block, to_addr)); rollup
-            SUMs preserve this.
-          * ``avg_rtp_of_blocks`` = Σsum_rtp / Σblocks_appeared — the
-            correctly weighted mean across buckets.
-        """
-        clauses: list[str] = []
-        params: list[object] = []
-        if since_ts_ms is not None:
-            from_aligned = (int(since_ts_ms) // _HOUR_MS) * _HOUR_MS
-            clauses.append("hour_ms >= ?")
-            params.append(from_aligned)
-        if until_ts_ms is not None:
-            to_aligned = -(-int(until_ts_ms) // _HOUR_MS) * _HOUR_MS
-            clauses.append("hour_ms < ?")
-            params.append(to_aligned)
-        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-
-        sql = f"""
-            SELECT to_addr                                               AS to_addr,
-                   SUM(blocks_appeared)                                  AS blocks_appeared,
-                   SUM(retried_blocks)                                   AS retried_blocks,
-                   CASE WHEN SUM(blocks_appeared) > 0
-                        THEN SUM(sum_rtp) * 1.0 / SUM(blocks_appeared)
-                        ELSE 0.0
-                   END                                                   AS avg_rtp_of_blocks,
-                   SUM(tx_count)                                         AS tx_count,
-                   SUM(total_gas)                                        AS total_gas
-            FROM contract_hour
-            {where}
-            GROUP BY to_addr
-            HAVING SUM(blocks_appeared) >= ?
-            ORDER BY retried_blocks DESC, avg_rtp_of_blocks DESC
-            LIMIT ?
-        """
-        final_params = params + [
-            int(min_appearances),
-            max(1, min(int(limit), 500)),
-        ]
-        with self._lock:
-            rows = self._conn.execute(sql, final_params).fetchall()
-        return [
-            ContractRetryStat(
-                to_addr=r["to_addr"],
-                blocks_appeared=int(r["blocks_appeared"]),
-                retried_blocks=int(r["retried_blocks"]),
-                avg_rtp_of_blocks=float(r["avg_rtp_of_blocks"] or 0.0),
-                tx_count=int(r["tx_count"]),
-                total_gas=int(r["total_gas"]),
-            )
-            for r in rows
-        ]
 
     # -- bft consensus minute rollup --------------------------------------
 

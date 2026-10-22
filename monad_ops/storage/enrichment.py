@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from _thread import LockType
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from monad_ops.storage import ContractRetryStat
 
 _HOUR_MS = 3_600_000
 
@@ -142,3 +146,75 @@ class _EnrichmentQueryMixin:
         lo = int(row["lo"])
         hi = int(row["hi"])
         return self.rebuild_contract_hour(lo, hi + _HOUR_MS)
+
+    def top_retried_contracts_rollup(
+        self,
+        since_ts_ms: int | None = None,
+        until_ts_ms: int | None = None,
+        min_appearances: int = 3,
+        limit: int = 50,
+    ) -> list[ContractRetryStat]:
+        """Top retried contracts from the hourly rollup.
+
+        Semantically equivalent to ``top_retried_contracts`` with
+        timestamp filters, but scans ~1 000× fewer rows because the
+        per-(block, addr) data is pre-aggregated into hourly buckets.
+
+        Boundary notes:
+          * Filters are aligned to hour boundaries — the effective window
+            is ``[floor(since, 1h), ceil(until, 1h))``. A "last 1 h"
+            query crossing an hour boundary can span up to 2 buckets.
+            For ranking purposes this is acceptable distortion; exact
+            per-block precision requires ``top_retried_contracts``.
+          * ``blocks_appeared`` counts distinct blocks (per the invariant
+            of one tx_contract_block row per (block, to_addr)); rollup
+            SUMs preserve this.
+          * ``avg_rtp_of_blocks`` = Σsum_rtp / Σblocks_appeared — the
+            correctly weighted mean across buckets.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if since_ts_ms is not None:
+            from_aligned = (int(since_ts_ms) // _HOUR_MS) * _HOUR_MS
+            clauses.append("hour_ms >= ?")
+            params.append(from_aligned)
+        if until_ts_ms is not None:
+            to_aligned = -(-int(until_ts_ms) // _HOUR_MS) * _HOUR_MS
+            clauses.append("hour_ms < ?")
+            params.append(to_aligned)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        sql = f"""
+            SELECT to_addr                                               AS to_addr,
+                   SUM(blocks_appeared)                                  AS blocks_appeared,
+                   SUM(retried_blocks)                                   AS retried_blocks,
+                   CASE WHEN SUM(blocks_appeared) > 0
+                        THEN SUM(sum_rtp) * 1.0 / SUM(blocks_appeared)
+                        ELSE 0.0
+                   END                                                   AS avg_rtp_of_blocks,
+                   SUM(tx_count)                                         AS tx_count,
+                   SUM(total_gas)                                        AS total_gas
+            FROM contract_hour
+            {where}
+            GROUP BY to_addr
+            HAVING SUM(blocks_appeared) >= ?
+            ORDER BY retried_blocks DESC, avg_rtp_of_blocks DESC
+            LIMIT ?
+        """
+        final_params = params + [
+            int(min_appearances),
+            max(1, min(int(limit), 500)),
+        ]
+        with self._lock:
+            rows = self._conn.execute(sql, final_params).fetchall()
+        return [
+            ContractRetryStat(
+                to_addr=r["to_addr"],
+                blocks_appeared=int(r["blocks_appeared"]),
+                retried_blocks=int(r["retried_blocks"]),
+                avg_rtp_of_blocks=float(r["avg_rtp_of_blocks"] or 0.0),
+                tx_count=int(r["tx_count"]),
+                total_gas=int(r["total_gas"]),
+            )
+            for r in rows
+        ]
