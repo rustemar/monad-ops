@@ -277,6 +277,8 @@ class ContractRetryStat:
 
 
 vars(_enrichment)["ContractRetryStat"] = ContractRetryStat
+vars(_enrichment)["ContractBlockAgg"] = ContractBlockAgg
+vars(_enrichment)["TxEnrichment"] = TxEnrichment
 
 
 @dataclass(frozen=True, slots=True)
@@ -545,49 +547,6 @@ class Storage(
         ]
 
     # -- tx enrichment -----------------------------------------------------
-    def write_tx_enrichment(self, rows: list[TxEnrichment]) -> int:
-        """Insert a batch of tx_enrichment rows. Returns the number attempted.
-
-        INSERT OR IGNORE keeps this idempotent if the same block is
-        enriched twice (e.g. after a service restart replays the queue).
-        """
-        if not rows:
-            return 0
-        params = [
-            (r.block_number, r.tx_index, r.tx_hash, r.from_addr, r.to_addr,
-             r.contract_created, r.status, r.gas_used)
-            for r in rows
-        ]
-        with self._lock:
-            self._conn.executemany(
-                """INSERT OR IGNORE INTO tx_enrichment (
-                    block_number, tx_index, tx_hash, from_addr, to_addr,
-                    contract_created, status, gas_used
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                params,
-            )
-        return len(params)
-
-    def write_tx_contract_block(self, rows: list[ContractBlockAgg]) -> int:
-        """Upsert a batch of (block, to_addr) aggregate rows.
-
-        INSERT OR REPLACE (not IGNORE) so that a re-enrichment of the
-        same block overwrites any prior partial write. Safe because a
-        block's receipts are deterministic — re-computing yields the
-        same tx_count/total_gas.
-        """
-        if not rows:
-            return 0
-        params = [(r.block_number, r.to_addr, r.tx_count, r.total_gas) for r in rows]
-        with self._lock:
-            self._conn.executemany(
-                """INSERT OR REPLACE INTO tx_contract_block (
-                    block_number, to_addr, tx_count, total_gas
-                ) VALUES (?, ?, ?, ?)""",
-                params,
-            )
-        return len(params)
-
     # -- contract_hour rollup ---------------------------------------------
 
     # -- bft consensus minute rollup --------------------------------------
