@@ -5,8 +5,13 @@ from __future__ import annotations
 import sqlite3
 import time
 from _thread import LockType
+from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-from monad_ops.rules.events import AlertEvent
+from monad_ops.rules.events import AlertEvent, Severity
+
+if TYPE_CHECKING:
+    from monad_ops.storage import StoredAlert
 
 
 class _AlertEnvelopeMixin:
@@ -145,3 +150,90 @@ class _AlertEnvelopeMixin:
         # Newest first, capped.
         merged.reverse()
         return merged[: max(1, min(int(limit), 50))]
+
+    def load_recent_alerts(self, limit: int) -> list[StoredAlert]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT id, ts, rule, severity, key, title, detail "
+                "FROM alerts ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        rows.reverse()
+        return [
+            StoredAlert(
+                id=r["id"], ts=r["ts"], rule=r["rule"],
+                severity=Severity(r["severity"]), key=r["key"],
+                title=r["title"], detail=r["detail"],
+            )
+            for r in rows
+        ]
+
+    def load_reorg_history(self) -> tuple[int, StoredAlert | None]:
+        """Return (total reorg count, latest reorg alert) for ReorgRule bootstrap.
+
+        Used at startup so counters survive process restarts — the live
+        reorg #2 at 2026-04-19 23:30 UTC was displayed as "since start: 1"
+        because the restart between reorgs wiped the in-memory counter.
+        Reading from the append-only `alerts` table is the cleanest
+        persistent source of truth.
+        """
+        with self._lock:
+            count = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM alerts WHERE rule = 'reorg'"
+            ).fetchone()["n"]
+            last = self._conn.execute(
+                "SELECT id, ts, rule, severity, key, title, detail "
+                "FROM alerts WHERE rule = 'reorg' ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if not last:
+            return int(count), None
+        return int(count), StoredAlert(
+            id=last["id"], ts=last["ts"], rule=last["rule"],
+            severity=Severity(last["severity"]), key=last["key"],
+            title=last["title"], detail=last["detail"],
+        )
+
+    def load_alerts_range(
+        self,
+        *,
+        from_ts: float | None = None,
+        to_ts: float | None = None,
+        severity: str | Sequence[str] | None = None,
+        limit: int = 500,
+    ) -> list[StoredAlert]:
+        """Filtered historical alert query for the /alerts page.
+
+        Complements ``load_recent_alerts`` (a simple tail read) with a
+        time-window + severity filter. ``severity`` may be one value or
+        several (a Foundation colour code maps onto more than one).
+        Returns newest-first so the UI can stream rows without a second
+        reverse pass.
+        """
+        where = []
+        params: list = []
+        if from_ts is not None:
+            where.append("ts >= ?")
+            params.append(float(from_ts))
+        if to_ts is not None:
+            where.append("ts <= ?")
+            params.append(float(to_ts))
+        if severity:
+            sevs = [severity] if isinstance(severity, str) else list(severity)
+            where.append(f"severity IN ({','.join('?' * len(sevs))})")
+            params.extend(sevs)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        params.append(max(1, min(int(limit), 5000)))
+        sql = (
+            "SELECT id, ts, rule, severity, key, title, detail "
+            f"FROM alerts{clause} ORDER BY id DESC LIMIT ?"
+        )
+        with self._lock:
+            rows = self._conn.execute(sql, params).fetchall()
+        return [
+            StoredAlert(
+                id=r["id"], ts=r["ts"], rule=r["rule"],
+                severity=Severity(r["severity"]), key=r["key"],
+                title=r["title"], detail=r["detail"],
+            )
+            for r in rows
+        ]
