@@ -29,6 +29,7 @@ from monad_ops.parser import ExecBlock
 from monad_ops.rules.events import AlertEvent as AlertEvent
 from monad_ops.rules.events import Severity
 from monad_ops.storage import alerts as _alerts
+from monad_ops.storage import consensus as _consensus
 from monad_ops.storage import enrichment as _enrichment
 from monad_ops.storage.alerts import _AlertEnvelopeMixin
 from monad_ops.storage.base_fee import _BaseFeeQueryMixin
@@ -310,6 +311,10 @@ class BftBaseFee:
     author: str | None = None   # proposer's secp key; None on pre-migration rows
 
 
+vars(_consensus)["BftMinute"] = BftMinute
+vars(_consensus)["BftBaseFee"] = BftBaseFee
+
+
 class _PercentileAgg:
     """SQLite custom aggregate: percentile(value, p) with p in [0, 1].
 
@@ -470,134 +475,6 @@ class Storage(
 
     # -- bft consensus minute rollup --------------------------------------
 
-    def upsert_bft_minute(self, m: BftMinute) -> None:
-        """Insert or replace one minute-bucket of consensus counters.
-
-        REPLACE semantics so the collector can flush the in-progress
-        minute incrementally — each event observed within the minute
-        rewrites the row with cumulative counts. The next minute starts
-        a fresh row by virtue of the PK being the floored timestamp.
-        """
-        with self._lock:
-            self._conn.execute(
-                """INSERT OR REPLACE INTO bft_minute
-                   (ts_minute, rounds_total, rounds_tc, local_timeouts,
-                    decrypt_fails, session_timeouts, timestamp_invalids)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (int(m.ts_minute), int(m.rounds_total),
-                 int(m.rounds_tc), int(m.local_timeouts),
-                 int(m.decrypt_fails), int(m.session_timeouts),
-                 int(m.timestamp_invalids)),
-            )
-
-    def load_recent_bft_minutes(self, limit: int) -> list[BftMinute]:
-        """Return the most-recent ``limit`` minute buckets ascending.
-
-        Used by State.bootstrap_bft_from_storage so a service restart
-        immediately has 5m / 1h windows of consensus data without
-        waiting for the live tailer to fill them.
-        """
-        with self._lock:
-            rows = self._conn.execute(
-                """SELECT ts_minute, rounds_total, rounds_tc, local_timeouts,
-                          decrypt_fails, session_timeouts, timestamp_invalids
-                   FROM bft_minute
-                   ORDER BY ts_minute DESC
-                   LIMIT ?""",
-                (max(1, int(limit)),),
-            ).fetchall()
-        rows.reverse()
-        return [
-            BftMinute(
-                ts_minute=int(r["ts_minute"]),
-                rounds_total=int(r["rounds_total"]),
-                rounds_tc=int(r["rounds_tc"]),
-                local_timeouts=int(r["local_timeouts"]),
-                decrypt_fails=int(r["decrypt_fails"]),
-                session_timeouts=int(r["session_timeouts"]),
-                timestamp_invalids=int(r["timestamp_invalids"]),
-            )
-            for r in rows
-        ]
-
-    def bulk_write_bft(
-        self,
-        minutes: Iterable[BftMinute],
-        base_fees: Iterable[BftBaseFee],
-    ) -> tuple[int, int]:
-        """Write a batch of bft minute upserts + base-fee inserts in one txn.
-
-        Drives the iter-20 write-amplification fix: instead of one
-        ``upsert_bft_minute`` + one ``insert_bft_base_fee`` per event
-        (~5 storage writes/sec at testnet cadence), the bft_flush_loop
-        drains a 1-second buffer through this single-transaction path,
-        cutting lock-acquire cost ~5x and giving the contract_hour
-        rebuild + retention sweeps a quieter window to grab the writer
-        lock when they need it.
-
-        Idempotent — REPLACE on bft_minute means the in-progress minute
-        can be flushed every second without growing rows; IGNORE on
-        bft_base_fee dedup the same proposal seen across rebroadcasts
-        and across overlapping flush batches.
-
-        Returns (minutes_written, base_fees_written) as a coarse
-        observability signal for the flush-loop logger.
-        """
-        minutes = list(minutes)
-        base_fees = list(base_fees)
-        if not minutes and not base_fees:
-            return (0, 0)
-        with self._lock:
-            self._conn.execute("BEGIN IMMEDIATE")
-            try:
-                if minutes:
-                    self._conn.executemany(
-                        """INSERT OR REPLACE INTO bft_minute
-                           (ts_minute, rounds_total, rounds_tc, local_timeouts,
-                            decrypt_fails, session_timeouts, timestamp_invalids)
-                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                        [
-                            (int(m.ts_minute), int(m.rounds_total),
-                             int(m.rounds_tc), int(m.local_timeouts),
-                             int(m.decrypt_fails), int(m.session_timeouts),
-                             int(m.timestamp_invalids))
-                            for m in minutes
-                        ],
-                    )
-                if base_fees:
-                    self._conn.executemany(
-                        """INSERT OR IGNORE INTO bft_base_fee
-                           (block_seq, ts_ms, base_fee_wei, author)
-                           VALUES (?, ?, ?, ?)""",
-                        [
-                            (int(b.block_seq), int(b.ts_ms),
-                             int(b.base_fee_wei), b.author)
-                            for b in base_fees
-                        ],
-                    )
-                self._conn.execute("COMMIT")
-                return (len(minutes), len(base_fees))
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-
-    def insert_bft_base_fee(self, sample: BftBaseFee) -> None:
-        """Insert one base-fee observation, ignoring duplicates.
-
-        IGNORE (not REPLACE) because monad-bft rebroadcasts proposals
-        2-3× per round; the base_fee value is fixed at proposal time
-        so the first observation is canonical and later rebroadcasts
-        carry the same wei value. IGNORE also prevents a malicious
-        rewrite if a peer ever sends an inconsistent rebroadcast.
-        """
-        with self._lock:
-            self._conn.execute(
-                """INSERT OR IGNORE INTO bft_base_fee
-                   (block_seq, ts_ms, base_fee_wei, author)
-                   VALUES (?, ?, ?, ?)""",
-                (int(sample.block_seq), int(sample.ts_ms),
-                 int(sample.base_fee_wei), sample.author),
-            )
 
     def top_retried_contracts(
         self,
