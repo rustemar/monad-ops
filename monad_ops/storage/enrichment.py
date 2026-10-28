@@ -147,6 +147,85 @@ class _EnrichmentQueryMixin:
         hi = int(row["hi"])
         return self.rebuild_contract_hour(lo, hi + _HOUR_MS)
 
+    def top_retried_contracts(
+        self,
+        since_block: int | None = None,
+        since_ts_ms: int | None = None,
+        until_block: int | None = None,
+        until_ts_ms: int | None = None,
+        min_appearances: int = 3,
+        limit: int = 50,
+    ) -> list[ContractRetryStat]:
+        """Rank contracts by how often they appear in retried blocks.
+
+        Correlation, not causation: the execution log reports a block's
+        aggregate retry_pct but not which specific txs conflicted. A
+        contract that appears consistently in high-rtp blocks is a
+        strong suspect; a contract that only ever appears in rtp=0
+        blocks is presumptively low-conflict (storage-slot independent).
+
+        Counting: ``blocks_appeared`` and ``retried_blocks`` are both
+        counted per-distinct-block so a contract with multiple txs in
+        the same block is not double-counted. ``avg_rtp_of_blocks`` is
+        the mean retry_pct across distinct blocks the contract touches.
+        ``tx_count`` and ``total_gas`` aggregate every individual tx.
+        """
+        clauses: list[str] = []
+        params: list[object] = []
+        if since_block is not None:
+            clauses.append("tcb.block_number >= ?")
+            params.append(int(since_block))
+        if since_ts_ms is not None:
+            clauses.append("b.timestamp_ms >= ?")
+            params.append(int(since_ts_ms))
+        if until_block is not None:
+            clauses.append("tcb.block_number <= ?")
+            params.append(int(until_block))
+        if until_ts_ms is not None:
+            clauses.append("b.timestamp_ms <= ?")
+            params.append(int(until_ts_ms))
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+
+        # Read from the per-(block, to_addr) aggregate. One row per
+        # (block, contract) means blocks_appeared = COUNT(*) directly —
+        # no DISTINCT/CTE gymnastics needed, no double-counting possible
+        # by construction. Per-tx totals come from SUM() of the rolled-up
+        # tx_count / total_gas columns.
+        sql = f"""
+            SELECT tcb.to_addr                                              AS to_addr,
+                   COUNT(*)                                                 AS blocks_appeared,
+                   SUM(CASE WHEN b.retry_pct > 0 THEN 1 ELSE 0 END)         AS retried_blocks,
+                   AVG(b.retry_pct)                                         AS avg_rtp_of_blocks,
+                   SUM(tcb.tx_count)                                        AS tx_count,
+                   SUM(tcb.total_gas)                                       AS total_gas
+            FROM tx_contract_block tcb
+            JOIN blocks b ON b.block_number = tcb.block_number
+            {where}
+            GROUP BY tcb.to_addr
+            HAVING COUNT(*) >= ?
+            ORDER BY retried_blocks DESC, avg_rtp_of_blocks DESC
+            LIMIT ?
+        """
+        final_params = params + [
+            int(min_appearances),
+            max(1, min(int(limit), 500)),
+        ]
+
+        with self._lock:
+            rows = self._conn.execute(sql, final_params).fetchall()
+        return [
+            ContractRetryStat(
+                to_addr=r["to_addr"],
+                blocks_appeared=int(r["blocks_appeared"]),
+                retried_blocks=int(r["retried_blocks"]),
+                avg_rtp_of_blocks=float(r["avg_rtp_of_blocks"] or 0.0),
+                tx_count=int(r["tx_count"]),
+                total_gas=int(r["total_gas"]),
+            )
+            for r in rows
+        ]
+
+
     def top_retried_contracts_rollup(
         self,
         since_ts_ms: int | None = None,
