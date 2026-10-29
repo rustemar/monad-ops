@@ -7,7 +7,12 @@ from _thread import LockType
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from monad_ops.storage import ContractBlockAgg, ContractRetryStat, TxEnrichment
+    from monad_ops.storage import (
+        ContractBlockAgg,
+        ContractRetryStat,
+        TxEnrichment,
+        _classify_pattern,
+    )
 
 _HOUR_MS = 3_600_000
 
@@ -340,3 +345,223 @@ class _EnrichmentQueryMixin:
                 params,
             )
         return len(params)
+
+    def get_contract_detail(
+        self,
+        to_addr: str,
+        *,
+        from_ts_ms: int,
+        to_ts_ms: int,
+        dominance_thresholds_pct: tuple[int, ...] = (10, 30, 50),
+        hourly_series_hours: int = 48,
+    ) -> dict:
+        """Full contract profile over a time window for the popup.
+
+        Source tables:
+          * ``tx_contract_block ⋈ blocks`` — exact per-block dominance,
+            peak block, first/last seen, retry correlation buckets.
+          * ``contract_hour`` — cheap hourly activity sparkline.
+
+        Dominance is the contract's share of the block's tx_count. The
+        correlation buckets report ``avg(retry_pct)`` and sample count
+        for blocks where the contract's share met each threshold. The
+        "baseline" is the average over every block the contract touched
+        in the window — a like-for-like comparison (same set of blocks,
+        different filter), not a chain-wide average, so the story the
+        numbers tell is about dominance, not about hot moments.
+
+        Returns a dict even when the contract has no activity in the
+        window — callers get a well-formed empty shape rather than None.
+        """
+        addr = to_addr.strip().lower()
+        from_ts = int(from_ts_ms)
+        to_ts = int(to_ts_ms)
+        # Build CASE expressions for dominance buckets. The threshold
+        # compares tcb.tx_count * 100 >= b.tx_count * threshold — integer
+        # math throughout, no float precision surprises at bucket edges.
+        thresholds = tuple(
+            sorted(set(int(t) for t in dominance_thresholds_pct if 0 < int(t) <= 100))
+        )
+        dom_case_exprs = []
+        for t in thresholds:
+            dom_case_exprs.append(
+                f"SUM(CASE WHEN tcb.tx_count * 100 >= b.tx_count * {t} "
+                f"THEN b.retry_pct ELSE 0 END) AS sum_rtp_dom_{t}"
+            )
+            dom_case_exprs.append(
+                f"SUM(CASE WHEN tcb.tx_count * 100 >= b.tx_count * {t} "
+                f"THEN 1 ELSE 0 END) AS count_dom_{t}"
+            )
+        dom_cols = ",\n                ".join(dom_case_exprs)
+        # CROSS JOIN pins blocks first: idx_txcb_to has no time bound, so the natural plan
+        # walks the contract's whole lifetime.
+        sql_stats = f"""
+            SELECT
+                COUNT(*)                                          AS blocks_appeared,
+                SUM(CASE WHEN b.retry_pct > 0 THEN 1 ELSE 0 END)  AS retried_blocks,
+                AVG(b.retry_pct)                                  AS avg_rtp,
+                SUM(tcb.tx_count)                                 AS tx_count,
+                SUM(tcb.total_gas)                                AS total_gas,
+                MIN(tcb.block_number)                             AS first_block,
+                MAX(tcb.block_number)                             AS last_block,
+                MIN(b.timestamp_ms)                               AS first_ts,
+                MAX(b.timestamp_ms)                               AS last_ts,
+                {dom_cols}
+            FROM blocks b
+            CROSS JOIN tx_contract_block tcb
+                 ON tcb.block_number = b.block_number
+                AND tcb.to_addr = ?
+            WHERE b.timestamp_ms BETWEEN ? AND ?
+        """
+        with self._lock:
+            stat_row = self._conn.execute(
+                sql_stats, (addr, from_ts, to_ts)
+            ).fetchone()
+
+            peak_row = self._conn.execute(
+                """SELECT tcb.block_number, tcb.tx_count, tcb.total_gas,
+                          b.tx_count AS block_tx, b.retry_pct, b.timestamp_ms
+                   FROM blocks b
+                   CROSS JOIN tx_contract_block tcb
+                        ON tcb.block_number = b.block_number
+                       AND tcb.to_addr = ?
+                   WHERE b.timestamp_ms BETWEEN ? AND ?
+                   ORDER BY tcb.tx_count DESC, tcb.total_gas DESC
+                   LIMIT 1""",
+                (addr, from_ts, to_ts),
+            ).fetchone()
+
+            # Rank among all contracts in the window, by tx_count and by
+            # total_gas. Counts contracts strictly ahead of this one, so
+            # rank is 1-based and stable under ties (ties share the same
+            # rank as the lowest among them).
+            rank_row = self._conn.execute(
+                """WITH my AS (
+                     SELECT SUM(tcb.tx_count)   AS my_tx,
+                            SUM(tcb.total_gas)  AS my_gas
+                     FROM blocks b
+                     CROSS JOIN tx_contract_block tcb
+                          ON tcb.block_number = b.block_number
+                         AND tcb.to_addr = ?
+                     WHERE b.timestamp_ms BETWEEN ? AND ?
+                   ),
+                   peers AS (
+                     SELECT tcb.to_addr,
+                            SUM(tcb.tx_count)   AS total_tx,
+                            SUM(tcb.total_gas)  AS total_gas
+                     FROM tx_contract_block tcb
+                     JOIN blocks b ON b.block_number = tcb.block_number
+                     WHERE b.timestamp_ms BETWEEN ? AND ?
+                     GROUP BY tcb.to_addr
+                   )
+                   SELECT
+                     (SELECT 1 + COUNT(*) FROM peers, my
+                        WHERE peers.total_tx > my.my_tx)     AS rank_tx,
+                     (SELECT 1 + COUNT(*) FROM peers, my
+                        WHERE peers.total_gas > my.my_gas)   AS rank_gas,
+                     (SELECT COUNT(*) FROM peers)            AS peers_total""",
+                (addr, from_ts, to_ts, from_ts, to_ts),
+            ).fetchone()
+
+            # Hourly sparkline — last N hours of contract_hour. Rollup
+            # filter ba>=10 means hours where this contract had fewer
+            # than 10 blocks are absent; for top-of-list contracts this
+            # is invisible, for long-tail contracts the sparkline may
+            # show gaps. Caveat documented in the schema.
+            hourly_hours = max(1, min(int(hourly_series_hours), 24 * 30))
+            hourly_from = to_ts - hourly_hours * 3_600_000
+            hourly_from_aligned = (hourly_from // 3_600_000) * 3_600_000
+            hourly_rows = self._conn.execute(
+                """SELECT hour_ms, blocks_appeared, retried_blocks,
+                          tx_count, total_gas
+                   FROM contract_hour
+                   WHERE to_addr = ? AND hour_ms >= ? AND hour_ms <= ?
+                   ORDER BY hour_ms ASC""",
+                (addr, hourly_from_aligned, to_ts),
+            ).fetchall()
+
+        blocks_appeared = int(stat_row["blocks_appeared"] or 0)
+        tx_count_total = int(stat_row["tx_count"] or 0)
+        total_gas = int(stat_row["total_gas"] or 0)
+
+        stats = {
+            "blocks_appeared": blocks_appeared,
+            "retried_blocks": int(stat_row["retried_blocks"] or 0),
+            "retried_ratio": round(
+                int(stat_row["retried_blocks"] or 0) / blocks_appeared, 4
+            ) if blocks_appeared else 0.0,
+            "avg_rtp_in_blocks": round(float(stat_row["avg_rtp"] or 0.0), 2),
+            "tx_count": tx_count_total,
+            "total_gas": total_gas,
+            "avg_gas_per_tx": int(total_gas / tx_count_total)
+                              if tx_count_total else 0,
+            "first_block": int(stat_row["first_block"])
+                            if stat_row["first_block"] is not None else None,
+            "last_block": int(stat_row["last_block"])
+                           if stat_row["last_block"] is not None else None,
+            "first_ts": int(stat_row["first_ts"])
+                         if stat_row["first_ts"] is not None else None,
+            "last_ts": int(stat_row["last_ts"])
+                        if stat_row["last_ts"] is not None else None,
+        }
+
+        dominance = []
+        for t in thresholds:
+            cnt = int(stat_row[f"count_dom_{t}"] or 0)
+            sum_rtp = float(stat_row[f"sum_rtp_dom_{t}"] or 0.0)
+            dominance.append({
+                "threshold_pct": t,
+                "blocks": cnt,
+                "avg_rtp": round(sum_rtp / cnt, 2) if cnt else 0.0,
+            })
+
+        peak_block = None
+        if peak_row is not None and peak_row["block_number"] is not None:
+            peak_tx = int(peak_row["tx_count"])
+            block_tx = int(peak_row["block_tx"] or 0)
+            peak_block = {
+                "n": int(peak_row["block_number"]),
+                "t": int(peak_row["timestamp_ms"]),
+                "tx_count": peak_tx,
+                "total_gas": int(peak_row["total_gas"]),
+                "block_tx": block_tx,
+                "share": round(peak_tx / block_tx, 4) if block_tx else 0.0,
+                "rtp": float(peak_row["retry_pct"]),
+            }
+
+        rank = None
+        if rank_row is not None:
+            rank = {
+                "by_tx": int(rank_row["rank_tx"]) if rank_row["rank_tx"] else None,
+                "by_gas": int(rank_row["rank_gas"]) if rank_row["rank_gas"] else None,
+                "peers": int(rank_row["peers_total"] or 0),
+            }
+
+        hourly = [
+            {
+                "hour_ms": int(r["hour_ms"]),
+                "ba": int(r["blocks_appeared"]),
+                "rb": int(r["retried_blocks"]),
+                "tx": int(r["tx_count"]),
+                "gas": int(r["total_gas"]),
+            }
+            for r in hourly_rows
+        ]
+
+        # Hide rank on an empty contract — returning 1/158 for a contract
+        # with zero activity misleads the popup into claiming a top slot.
+        if blocks_appeared == 0:
+            rank = None
+
+        pattern = _classify_pattern(blocks_appeared, tx_count_total)
+
+        return {
+            "to_addr": addr,
+            "window": {"from_ts_ms": from_ts, "to_ts_ms": to_ts},
+            "stats": stats,
+            "dominance": dominance,
+            "peak_block": peak_block,
+            "rank": rank,
+            "hourly": hourly,
+            "pattern": pattern,
+        }
