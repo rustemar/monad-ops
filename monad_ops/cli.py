@@ -297,8 +297,7 @@ def _filter_none(items):
     return [it for it in items if it is not None]
 
 
-async def _cmd_run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
+def _build_runtime_state(config: Config) -> tuple[Storage | None, State]:
     storage: Storage | None = None
     if config.persistence.enabled:
         storage = Storage(config.persistence.path)
@@ -327,6 +326,12 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # bracketed observation (when it arrives) overrides the carried
         # value silently.
         state.bootstrap_carried_epoch_length()
+    return storage, state
+
+
+async def _cmd_run(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    storage, state = _build_runtime_state(config)
     sink, gate = _wrap_sink(_build_sink(config), storage, state)
 
     enricher: EnrichmentWorker | None = None
