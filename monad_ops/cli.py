@@ -329,11 +329,9 @@ def _build_runtime_state(config: Config) -> tuple[Storage | None, State]:
     return storage, state
 
 
-async def _cmd_run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    storage, state = _build_runtime_state(config)
-    sink, gate = _wrap_sink(_build_sink(config), storage, state)
-
+def _build_enrichment(
+    config: Config, storage: Storage | None
+) -> tuple[EnrichmentWorker | None, ReceiptsClient | None]:
     enricher: EnrichmentWorker | None = None
     receipts_client: ReceiptsClient | None = None
     if config.enrichment.enabled and storage is not None:
@@ -350,6 +348,15 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                  rpc=config.node.rpc_url,
                  queue=config.enrichment.queue_size,
                  tx_rows_on_disk=storage.tx_enrichment_count())
+    return enricher, receipts_client
+
+
+async def _cmd_run(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    storage, state = _build_runtime_state(config)
+    sink, gate = _wrap_sink(_build_sink(config), storage, state)
+
+    enricher, receipts_client = _build_enrichment(config, storage)
 
     labels = ContractLabels.load(config.labels.path)
     # Reorg-trace journal artifacts live next to the sqlite DB so the
