@@ -351,13 +351,10 @@ def _build_enrichment(
     return enricher, receipts_client
 
 
-async def _cmd_run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    storage, state = _build_runtime_state(config)
-    sink, gate = _wrap_sink(_build_sink(config), storage, state)
-
-    enricher, receipts_client = _build_enrichment(config, storage)
-
+def _build_http_server(
+    args: argparse.Namespace, config: Config, state: State,
+    enricher: EnrichmentWorker | None,
+) -> tuple[uvicorn.Server, Path | None]:
     labels = ContractLabels.load(config.labels.path)
     # Reorg-trace journal artifacts live next to the sqlite DB so the
     # whole on-disk state shares one parent directory. The collector
@@ -379,6 +376,17 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         access_log=False,
         loop="asyncio",
     ))
+    return server, journal_capture_dir
+
+
+async def _cmd_run(args: argparse.Namespace) -> int:
+    config = load_config(args.config)
+    storage, state = _build_runtime_state(config)
+    sink, gate = _wrap_sink(_build_sink(config), storage, state)
+
+    enricher, receipts_client = _build_enrichment(config, storage)
+
+    server, journal_capture_dir = _build_http_server(args, config, state, enricher)
 
     log.info("starting", node=config.node.name, rpc=config.node.rpc_url,
              http=f"{args.host}:{args.port}")
