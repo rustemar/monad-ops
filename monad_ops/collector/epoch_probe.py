@@ -25,9 +25,11 @@ rotation cadence.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import re
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 from monad_ops.collector.subproc import reap
 
@@ -38,6 +40,7 @@ from monad_ops.collector.subproc import reap
 _EPOCH_RX = re.compile(
     r'"block_seq_num":"(\d+)"[^}]*"block_epoch":"(\d+)"'
 )
+_HISTORY_CLEANUP_TIMEOUT_SEC = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,13 +57,64 @@ class EpochSample:
     error: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class EpochHistoryScan:
+    """Positive epoch/sequence pairs, in journal order, and scan outcome.
+
+    ``completed`` means EOF and a successful journalctl exit for the
+    requested window, not that the journal contains every chain event.
+    Elapsed time covers spawn, reading, exit and cleanup, excluding the
+    caller's application of the observations to State.
+    ``returncode`` records the natural exit only, before cleanup; it is
+    None when no natural exit was observed.
+    """
+
+    observations: list[tuple[int, int]]
+    status: Literal["completed", "timed_out", "failed"]
+    elapsed_sec: float
+    unit: str
+    since: str
+    timeout_sec: float
+    returncode: int | None = None
+    error: str | None = None
+
+
+async def _cleanup_history_scan(proc: asyncio.subprocess.Process) -> str | None:
+    """Collect this child even when a cancelled reader left its pipe full."""
+    deadline = asyncio.get_running_loop().time() + _HISTORY_CLEANUP_TIMEOUT_SEC
+    cancelled = False
+    try:
+        if proc.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+        # After killing, only buffered pipe data remains. Drain it so a
+        # paused StreamReader cannot keep proc.wait() pending indefinitely.
+        # Run cleanup in the scanner task: asyncio.run cancels ALL tasks
+        # directly, so shielding a separate cleanup task is insufficient.
+        # A later cancellation may interrupt communicate's pipe readers;
+        # retry their drain within the original deadline, then propagate it.
+        while True:
+            if asyncio.get_running_loop().time() >= deadline:
+                return "cleanup TimeoutError: deadline exceeded"
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await proc.communicate()
+                return None
+            except asyncio.CancelledError:
+                cancelled = True
+    except Exception as exc:  # noqa: BLE001
+        return f"cleanup {type(exc).__name__}: {exc}"
+    finally:
+        if cancelled:
+            raise asyncio.CancelledError
+
+
 async def scan_epoch_history(
     unit: str = "monad-bft",
     since: str = "24 hours ago",
     timeout_sec: float = 600.0,
-) -> list[tuple[int, int]]:
-    """Full scan of ``unit`` journal, returning every (seq_num, epoch)
-    tuple found in the window.
+) -> EpochHistoryScan:
+    """Scan ``unit`` journal with explicit completion and partial results.
 
     Intended for startup seeding: populate the tracker with historical
     epoch spans so the dashboard has a typical-length estimate
@@ -79,7 +133,15 @@ async def scan_epoch_history(
     and the typical-length median computed in state._epoch_progress
     falls to ~half the real value. 24h gives 4–5 epochs → 2–3 fully
     bracketed observations, enough for a stable median on cold start.
+    The timeout bounds both stdout reading and the child's natural exit;
+    cleanup has a separate five-second bound. Cancellation propagates
+    after cleanup. Partial observations remain usable on timeout/failure.
     """
+    started = time.monotonic()
+    results: list[tuple[int, int]] = []
+    status: Literal["completed", "timed_out", "failed"] = "failed"
+    returncode: int | None = None
+    error: str | None = None
     try:
         proc = await asyncio.create_subprocess_exec(
             "journalctl", "-u", unit, "-o", "cat", "--no-pager",
@@ -91,27 +153,45 @@ async def scan_epoch_history(
             # the ~2 KB proposal messages).
             limit=1_000_000,
         )
-    except FileNotFoundError:
-        return []
-    results: list[tuple[int, int]] = []
+    except Exception as exc:  # noqa: BLE001
+        return EpochHistoryScan(
+            results, "failed", time.monotonic() - started,
+            unit, since, timeout_sec, error=f"{type(exc).__name__}: {exc}",
+        )
     try:
         async def _drain():
             assert proc.stdout is not None
             while True:
                 raw = await proc.stdout.readline()
                 if not raw:
-                    return
+                    # EOF alone is insufficient: journalctl may still
+                    # exit unsuccessfully, or stall after closing stdout.
+                    return await proc.wait()
                 line = raw.decode("utf-8", errors="replace")
                 m = _EPOCH_RX.search(line)
                 if m:
-                    results.append((int(m.group(1)), int(m.group(2))))
-        await asyncio.wait_for(_drain(), timeout=timeout_sec)
+                    seq, epoch = int(m.group(1)), int(m.group(2))
+                    # Match State.observe_epoch's acceptance rules.
+                    if seq > 0 and epoch > 0:
+                        results.append((seq, epoch))
+        returncode = await asyncio.wait_for(_drain(), timeout=timeout_sec)
+        if returncode == 0:
+            status = "completed"
+        else:
+            error = f"journalctl exited with status {returncode}"
     except TimeoutError:
-        # Return whatever we got; don't block the caller forever.
-        pass
+        status = "timed_out"
+    except Exception as exc:  # noqa: BLE001
+        error = f"{type(exc).__name__}: {exc}"
     finally:
-        await reap(proc)
-    return results
+        cleanup_error = await _cleanup_history_scan(proc)
+    if cleanup_error is not None:
+        status = "failed"
+        error = f"{error}; {cleanup_error}" if error else cleanup_error
+    return EpochHistoryScan(
+        results, status, time.monotonic() - started,
+        unit, since, timeout_sec, returncode, error,
+    )
 
 
 async def find_current_epoch_first_seq(

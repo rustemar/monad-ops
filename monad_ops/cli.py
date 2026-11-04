@@ -706,17 +706,25 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 log.error("bft_flush.error", exc=str(e))
 
     async def epoch_backfill_task():
-        # Fire-and-forget: scan 8h of monad-bft journal and seed the
+        # Fire-and-forget: scan 24h of monad-bft journal and seed the
         # tracker with closed epoch spans. Without this, the dashboard
         # shows "epoch length unknown" for ~5 hours (until the first
         # live rollover). Runs in parallel with epoch_loop, not in
-        # series — the 60–120s scan shouldn't delay the live probe
+        # series — the scan's 600s limit must not delay the live probe
         # that gives the dashboard its current-epoch number.
         try:
             history = await scan_epoch_history()
-            for seq, ep in history:
+            for seq, ep in history.observations:
                 state.observe_epoch(ep, seq)
-            log.info("epoch.backfill", observations=len(history))
+            emit = log.info if history.status == "completed" else log.warning
+            emit(
+                "epoch.backfill", status=history.status,
+                observations=len(history.observations),
+                elapsed_sec=round(history.elapsed_sec, 3),
+                unit=history.unit, since=history.since,
+                timeout_sec=history.timeout_sec,
+                returncode=history.returncode, error=history.error,
+            )
         except Exception as e:  # noqa: BLE001
             log.warning("epoch.backfill_failed", exc=str(e))
 
