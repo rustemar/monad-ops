@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 from _thread import LockType
+from time import monotonic_ns
 from typing import TYPE_CHECKING
+
+import structlog
 
 if TYPE_CHECKING:
     from monad_ops.storage import (
@@ -15,6 +18,8 @@ if TYPE_CHECKING:
     )
 
 _HOUR_MS = 3_600_000
+_CONTRACT_DETAIL_SLOW_NS = 500_000_000
+log = structlog.stdlib.get_logger()
 
 # Minimum per-hour blocks_appeared for a (hour, to_addr) row to be kept
 # in the rollup. See contract_hour schema comment for the measurement
@@ -373,6 +378,7 @@ class _EnrichmentQueryMixin:
         Returns a dict even when the contract has no activity in the
         window — callers get a well-formed empty shape rather than None.
         """
+        started = monotonic_ns()
         addr = to_addr.strip().lower()
         from_ts = int(from_ts_ms)
         to_ts = int(to_ts_ms)
@@ -413,10 +419,13 @@ class _EnrichmentQueryMixin:
                 AND tcb.to_addr = ?
             WHERE b.timestamp_ms BETWEEN ? AND ?
         """
+        lock_requested = monotonic_ns()
         with self._lock:
+            lock_acquired = monotonic_ns()
             stat_row = self._conn.execute(
                 sql_stats, (addr, from_ts, to_ts)
             ).fetchone()
+            stats_finished = monotonic_ns()
 
             peak_row = self._conn.execute(
                 """SELECT tcb.block_number, tcb.tx_count, tcb.total_gas,
@@ -430,6 +439,7 @@ class _EnrichmentQueryMixin:
                    LIMIT 1""",
                 (addr, from_ts, to_ts),
             ).fetchone()
+            peak_finished = monotonic_ns()
 
             # Rank among all contracts in the window, by tx_count and by
             # total_gas. Counts contracts strictly ahead of this one, so
@@ -462,6 +472,7 @@ class _EnrichmentQueryMixin:
                      (SELECT COUNT(*) FROM peers)            AS peers_total""",
                 (addr, from_ts, to_ts, from_ts, to_ts),
             ).fetchone()
+            rank_finished = monotonic_ns()
 
             # Hourly sparkline — last N hours of contract_hour. Rollup
             # filter ba>=10 means hours where this contract had fewer
@@ -479,6 +490,7 @@ class _EnrichmentQueryMixin:
                    ORDER BY hour_ms ASC""",
                 (addr, hourly_from_aligned, to_ts),
             ).fetchall()
+            hourly_finished = monotonic_ns()
 
         blocks_appeared = int(stat_row["blocks_appeared"] or 0)
         tx_count_total = int(stat_row["tx_count"] or 0)
@@ -555,7 +567,7 @@ class _EnrichmentQueryMixin:
 
         pattern = _classify_pattern(blocks_appeared, tx_count_total)
 
-        return {
+        detail = {
             "to_addr": addr,
             "window": {"from_ts_ms": from_ts, "to_ts_ms": to_ts},
             "stats": stats,
@@ -565,3 +577,16 @@ class _EnrichmentQueryMixin:
             "hourly": hourly,
             "pattern": pattern,
         }
+        elapsed = monotonic_ns() - started
+        if elapsed >= _CONTRACT_DETAIL_SLOW_NS:
+            log.info(
+                "contract.detail.slow",
+                elapsed_ms=round(elapsed / 1_000_000, 3),
+                lock_wait_ms=round((lock_acquired - lock_requested) / 1_000_000, 3),
+                stats_ms=round((stats_finished - lock_acquired) / 1_000_000, 3),
+                peak_ms=round((peak_finished - stats_finished) / 1_000_000, 3),
+                rank_ms=round((rank_finished - peak_finished) / 1_000_000, 3),
+                hourly_ms=round((hourly_finished - rank_finished) / 1_000_000, 3),
+                window_ms=to_ts - from_ts,
+            )
+        return detail

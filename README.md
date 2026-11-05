@@ -260,6 +260,12 @@ All JSON routes ship `Access-Control-Allow-Origin: *` so external
 dashboards can pull from the browser. The HTML dashboard itself stays
 on a strict CSP.
 
+Completed contract-profile storage reads taking at least 500 ms emit
+one `contract.detail.slow` INFO record. It separates shared-storage lock
+wait from stats, peak, rank and hourly SQL/fetch timings, plus total
+elapsed time and the requested window duration. It excludes API-cache
+hits, worker scheduling and response serialization; it adds no queries.
+
 ## Development
 
 ```bash
