@@ -444,18 +444,11 @@ class _EnrichmentQueryMixin:
             # Rank among all contracts in the window, by tx_count and by
             # total_gas. Counts contracts strictly ahead of this one, so
             # rank is 1-based and stable under ties (ties share the same
-            # rank as the lowest among them).
+            # rank as the lowest among them). The stats query already
+            # computed this contract's sums under the same lock; preserve
+            # their raw SQLite values (including NULL) as rank thresholds.
             rank_row = self._conn.execute(
-                """WITH my AS (
-                     SELECT SUM(tcb.tx_count)   AS my_tx,
-                            SUM(tcb.total_gas)  AS my_gas
-                     FROM blocks b
-                     CROSS JOIN tx_contract_block tcb
-                          ON tcb.block_number = b.block_number
-                         AND tcb.to_addr = ?
-                     WHERE b.timestamp_ms BETWEEN ? AND ?
-                   ),
-                   peers AS (
+                """WITH peers AS (
                      SELECT tcb.to_addr,
                             SUM(tcb.tx_count)   AS total_tx,
                             SUM(tcb.total_gas)  AS total_gas
@@ -465,12 +458,11 @@ class _EnrichmentQueryMixin:
                      GROUP BY tcb.to_addr
                    )
                    SELECT
-                     (SELECT 1 + COUNT(*) FROM peers, my
-                        WHERE peers.total_tx > my.my_tx)     AS rank_tx,
-                     (SELECT 1 + COUNT(*) FROM peers, my
-                        WHERE peers.total_gas > my.my_gas)   AS rank_gas,
-                     (SELECT COUNT(*) FROM peers)            AS peers_total""",
-                (addr, from_ts, to_ts, from_ts, to_ts),
+                     1 + COUNT(CASE WHEN total_tx > ? THEN 1 END) AS rank_tx,
+                     1 + COUNT(CASE WHEN total_gas > ? THEN 1 END) AS rank_gas,
+                     COUNT(*) AS peers_total
+                   FROM peers""",
+                (from_ts, to_ts, stat_row["tx_count"], stat_row["total_gas"]),
             ).fetchone()
             rank_finished = monotonic_ns()
 
