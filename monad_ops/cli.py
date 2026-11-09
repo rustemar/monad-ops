@@ -714,8 +714,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # that gives the dashboard its current-epoch number.
         try:
             history = await scan_epoch_history()
-            for seq, ep in history.observations:
-                state.observe_epoch(ep, seq)
+            incomplete_tail = state.observe_epoch_history(
+                history.observations, complete=history.status == "completed",
+            )
             emit = log.info if history.status == "completed" else log.warning
             emit(
                 "epoch.backfill", status=history.status,
@@ -724,6 +725,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 unit=history.unit, since=history.since,
                 timeout_sec=history.timeout_sec,
                 returncode=history.returncode, error=history.error,
+                incomplete_tail_epoch=incomplete_tail,
             )
         except Exception as e:  # noqa: BLE001
             log.warning("epoch.backfill_failed", exc=str(e))

@@ -147,6 +147,10 @@ class State:
         # the epoch probe. We learn typical epoch length empirically so
         # no magic constant has to track upstream chain config changes.
         self._epochs: dict[int, tuple[int, int]] = {}
+        # A timed-out/failed history prefix can end inside an epoch.
+        # Independent live observations may supply its newer neighbor,
+        # but do not prove this truncated span is a complete size sample.
+        self._incomplete_epoch_tails: set[int] = set()
         # Carried-forward typical epoch length from a previous run,
         # loaded from the `meta` table on bootstrap. Used as the fallback
         # estimate during the ~minute after restart when the journal
@@ -166,9 +170,8 @@ class State:
         self._carried_current_epoch: int | None = None
         self._carried_current_first_seq: int | None = None
         # In-memory mirrors of the persisted meta values. Lets us skip
-        # the SQL round-trip on observe_epoch when nothing has changed —
-        # important during backfill which calls observe_epoch ~100K
-        # times in ~30s.
+        # the SQL round-trip when live observations or a history batch
+        # leave the learned values unchanged.
         self._persisted_typical_length: int | None = None
         self._persisted_current_epoch: int | None = None
         self._persisted_current_first_seq: int | None = None
@@ -212,6 +215,26 @@ class State:
         with self._lock:
             self._reference = sample
 
+    def observe_epoch_history(
+        self, observations: list[tuple[int, int]], *, complete: bool,
+    ) -> int | None:
+        """Apply journal-order (seq, epoch) pairs without trusting a cut tail.
+
+        Register the highest valid epoch before applying any observations:
+        live probing may already have recorded that epoch and its successor.
+        Retain every observation for progress, but conservatively exclude
+        the cut tail from typical-length learning for this process lifetime.
+        Existing carried estimates are not repaired or asserted correct.
+        """
+        incomplete_tail = None
+        if not complete:
+            incomplete_tail = max(
+                (epoch for seq, epoch in observations if seq > 0 and epoch > 0),
+                default=None,
+            )
+        self._observe_epoch_batch(observations, incomplete_tail=incomplete_tail)
+        return incomplete_tail
+
     def observe_epoch(self, epoch: int, seq_num: int) -> None:
         """Record an (epoch, seq_num) observation from the bft probe.
 
@@ -225,48 +248,63 @@ class State:
         """
         if epoch <= 0 or seq_num <= 0:
             return
+        self._observe_epoch_batch([(seq_num, epoch)])
+
+    def _observe_epoch_batch(
+        self, observations: list[tuple[int, int]], *, incomplete_tail: int | None = None,
+    ) -> None:
+        """Merge a batch atomically, then learn and persist only its final view."""
         live_typical: int | None = None
         current_epoch: int | None = None
         current_first_seq: int | None = None
         with self._lock:
-            prev = self._epochs.get(epoch)
-            if prev is None:
-                # First observation of this epoch in-memory. If the
-                # carried map promises a real first_seq for it, seed
-                # from there so blocks_in is correct from the very
-                # first probe sample. Skip the carry when:
-                #   * no carried entry, OR
-                #   * carried epoch differs (stale across restart that
-                #     crossed a boundary), OR
-                #   * carried first_seq is somehow > current seq (would
-                #     produce a negative blocks_in — paranoid guard).
-                if (
-                    epoch == self._carried_current_epoch
-                    and self._carried_current_first_seq is not None
-                    and self._carried_current_first_seq <= seq_num
-                ):
-                    self._epochs[epoch] = (
-                        self._carried_current_first_seq, seq_num,
-                    )
+            # Publish only after all observations have merged. A live
+            # successor must not bracket an intermediate one-record span
+            # and persist it before the rest of the history is applied.
+            epochs = self._epochs.copy()
+            incomplete_tails = self._incomplete_epoch_tails.copy()
+            if incomplete_tail is not None:
+                incomplete_tails.add(incomplete_tail)
+            observed = False
+            for seq_num, epoch in observations:
+                if epoch <= 0 or seq_num <= 0:
+                    continue
+                observed = True
+                prev = epochs.get(epoch)
+                if prev is None:
+                    # Honour carry only for the same epoch and a first
+                    # sequence no later than the current observation.
+                    if (
+                        epoch == self._carried_current_epoch
+                        and self._carried_current_first_seq is not None
+                        and self._carried_current_first_seq <= seq_num
+                    ):
+                        epochs[epoch] = (self._carried_current_first_seq, seq_num)
+                    else:
+                        epochs[epoch] = (seq_num, seq_num)
                 else:
-                    self._epochs[epoch] = (seq_num, seq_num)
-            else:
-                first, last = prev
-                self._epochs[epoch] = (min(first, seq_num), max(last, seq_num))
+                    first, last = prev
+                    epochs[epoch] = (min(first, seq_num), max(last, seq_num))
+            if not observed:
+                return
             # Cap memory: an epoch map larger than a few hundred entries
             # means something is very wrong (a year of testnet history).
-            if len(self._epochs) > 500:
-                oldest = min(self._epochs)
-                self._epochs.pop(oldest, None)
+            # Prune only after the full batch, including its flagged tail.
+            for oldest in sorted(epochs)[:-500]:
+                epochs.pop(oldest)
+            incomplete_tails.intersection_update(epochs)
             # Recompute live typical length under the same lock so the
             # carried value never drifts from what _epoch_progress would
             # report given the same map state.
-            epochs_set = set(self._epochs)
+            epochs_set = set(epochs)
             bracketed = [
                 (hi - lo + 1)
-                for ep, (lo, hi) in self._epochs.items()
+                for ep, (lo, hi) in epochs.items()
                 if (ep - 1) in epochs_set and (ep + 1) in epochs_set
+                and ep not in incomplete_tails
             ]
+            self._epochs = epochs
+            self._incomplete_epoch_tails = incomplete_tails
             if bracketed:
                 bracketed.sort()
                 live_typical = bracketed[len(bracketed) // 2]
@@ -281,8 +319,8 @@ class State:
             current_first_seq = self._epochs[current_epoch][0]
         # Persist outside the State lock — Storage has its own lock.
         # Compare against in-memory mirrors so we skip the SQL write
-        # when nothing changed (especially important during backfill,
-        # which fires observe_epoch ~100K times in ~30s).
+        # when nothing changed; history batches persist only their final
+        # estimate, never transient sizes from individual scan records.
         if self._storage is not None:
             try:
                 if (
@@ -430,6 +468,7 @@ class State:
                 (hi - lo + 1)
                 for ep, (lo, hi) in self._epochs.items()
                 if (ep - 1) in epochs_set and (ep + 1) in epochs_set
+                and ep not in self._incomplete_epoch_tails
             ]
             carried = self._carried_typical_length
         typical = None
