@@ -379,6 +379,20 @@ def _build_http_server(
     return server, journal_capture_dir
 
 
+async def _probe_loop(config: Config, state: State, sink: AlertSink) -> None:
+    rule = ProbeAlertRule(open_probe_envelopes(state.recent_alerts(limit=1000)))
+    # Run probes immediately, then every 60s.
+    while True:
+        try:
+            results = await run_all_probes(config.node.services)
+            state.set_probes(results)
+            for ev in rule.evaluate(results):
+                await sink.deliver(ev)
+        except Exception as e:  # noqa: BLE001
+            log.error("probe_loop.error", exc=str(e))
+        await asyncio.sleep(60)
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     storage, state = _build_runtime_state(config)
@@ -390,19 +404,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
 
     log.info("starting", node=config.node.name, rpc=config.node.rpc_url,
              http=f"{args.host}:{args.port}")
-
-    async def probe_loop():
-        rule = ProbeAlertRule(open_probe_envelopes(state.recent_alerts(limit=1000)))
-        # Run probes immediately, then every 60s.
-        while True:
-            try:
-                results = await run_all_probes(config.node.services)
-                state.set_probes(results)
-                for ev in rule.evaluate(results):
-                    await sink.deliver(ev)
-            except Exception as e:  # noqa: BLE001
-                log.error("probe_loop.error", exc=str(e))
-            await asyncio.sleep(60)
 
     async def reference_loop():
         # Periodic probe of an external reference RPC so the dashboard
@@ -961,7 +962,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         journal_capture_dir=journal_capture_dir,
     ))
     http = asyncio.create_task(server.serve())
-    probes = asyncio.create_task(probe_loop())
+    probes = asyncio.create_task(_probe_loop(config, state, sink))
     reference = asyncio.create_task(reference_loop())
     epoch = asyncio.create_task(epoch_loop(), name="epoch_probe")
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
