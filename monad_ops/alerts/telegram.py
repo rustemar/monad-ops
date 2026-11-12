@@ -68,4 +68,4 @@ class TelegramSink:
                 resp.raise_for_status()
             except Exception as e:  # noqa: BLE001 — we never want to crash the loop
                 import sys
-                print(f"[telegram] send failed: {e}", file=sys.stderr, flush=True)
+                print(f"[telegram] send failed: {type(e).__name__}", file=sys.stderr, flush=True)

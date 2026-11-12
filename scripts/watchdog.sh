@@ -198,14 +198,17 @@ send_telegram() {
 <i>external health check · ${now_iso}</i>
 
 ${body}"
-    curl -s --max-time 10 \
-        -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+    # Bot credentials must never appear in process arguments or curl errors.
+    [[ "$TG_BOT_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]] || return 0
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$TG_BOT_TOKEN" |
+        env -u TG_BOT_TOKEN curl --config - -s --max-time 10 \
+        -X POST \
         -d "chat_id=${TG_CHAT_ID}" \
         -d "message_thread_id=${TG_TOPIC_ID}" \
         -d "parse_mode=HTML" \
         -d "disable_web_page_preview=true" \
         --data-urlencode "text=${text}" \
-        >/dev/null || true
+        >/dev/null 2>&1 || true
 }
 
 # Alert policy:

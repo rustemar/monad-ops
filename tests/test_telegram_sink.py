@@ -88,3 +88,38 @@ async def test_telegram_respects_explicit_drop_set(monkeypatch) -> None:
     for sev in Severity:
         await sink.deliver(_ev(sev))
     assert len(sent) == 2  # only WARN + CRITICAL pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["post", "status"])
+async def test_telegram_failures_never_log_request_url(monkeypatch, capsys, stage) -> None:
+    """Both connection and HTTP errors may contain the credential-bearing URL."""
+    import httpx
+
+    fake_token = "12345:synthetic_fake_token"
+    sink = TelegramSink(bot_token=fake_token, chat_id=1)
+    url = f"https://api.telegram.org/bot{fake_token}/sendMessage"
+
+    class _Stub:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, actual_url, **kwargs):
+            assert actual_url == url
+            if stage == "post":
+                raise httpx.ConnectError(f"network failure at {actual_url}")
+
+            class Response:
+                def raise_for_status(self):
+                    request = httpx.Request("POST", actual_url)
+                    raise httpx.HTTPStatusError(
+                        f"HTTP error for {actual_url}", request=request,
+                        response=httpx.Response(500, request=request),
+                    )
+            return Response()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_: _Stub())
+    await sink.deliver(_ev(Severity.WARN))
+    captured = capsys.readouterr()
+    assert fake_token not in captured.out + captured.err
+    assert url not in captured.out + captured.err
+    assert ("ConnectError" if stage == "post" else "HTTPStatusError") in captured.err
