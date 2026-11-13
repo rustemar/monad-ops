@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from monad_ops.api.context import ApiContext
+from monad_ops.api.public_alerts import public_alert
 
 # In-memory snapshot, recomputed every block.
 _STATE_TTL = 1.0
@@ -75,7 +76,7 @@ def build_router(ctx: ApiContext) -> APIRouter:
                 "reference_error": snap.reference_error,
                 "reference_local_at_sample": snap.reference_local_at_sample,
                 "maintenance_until": ctx.state.maintenance_until(),
-                "current_alerts": snap.current_alerts,
+                "current_alerts": [public_alert(a) for a in snap.current_alerts],
                 "epoch": {
                     "number": snap.epoch_number,
                     "blocks_in": snap.epoch_blocks_in,

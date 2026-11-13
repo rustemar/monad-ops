@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from monad_ops.api.context import ApiContext
+from monad_ops.api.public_alerts import public_alert
 from monad_ops.rules.events import CodeColor, code_color_for, severities_for
 
 # In-memory recent-alerts tail.
@@ -46,14 +47,14 @@ def build_router(ctx: ApiContext) -> APIRouter:
         async def _load():
             alerts = ctx.state.recent_alerts_with_ts(limit=limit)
             return [
-                {
+                public_alert({
                     "rule": a.rule,
                     "severity": a.severity.value,
                     "code_color": code_color_for(a.severity).value,
                     "title": a.title,
                     "detail": a.detail,
                     "ts_ms": int(ts * 1000),
-                }
+                })
                 for a, ts in alerts
             ]
         payload = await ctx.cached("alerts", _ALERTS_TTL, (limit,), _load)
@@ -93,7 +94,7 @@ def build_router(ctx: ApiContext) -> APIRouter:
         return JSONResponse({
             "count": len(rows),
             "alerts": [
-                {
+                public_alert({
                     "id": r.id,
                     "ts_ms": int(r.ts * 1000),
                     "rule": r.rule,
@@ -102,7 +103,7 @@ def build_router(ctx: ApiContext) -> APIRouter:
                     "key": r.key,
                     "title": r.title,
                     "detail": r.detail,
-                }
+                })
                 for r in rows
             ],
         })
