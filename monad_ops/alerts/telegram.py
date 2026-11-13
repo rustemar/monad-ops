@@ -6,6 +6,8 @@ groups that have topics enabled (supergroups).
 
 from __future__ import annotations
 
+from html import escape
+
 import httpx
 
 from monad_ops.rules.events import AlertEvent, Severity
@@ -48,10 +50,13 @@ class TelegramSink:
         if event.severity in self._drop and event.rule not in self._bypass:
             return
         emoji = _SEVERITY_EMOJI.get(event.severity, "⚪")
+        # Alert fields are plain text; only the wrapper tags are markup.
+        # Probe summaries and log-derived details can contain <, >, or &.
         text = (
-            f"{emoji} <b>[{self._source_tag}]</b> {event.title}\n"
-            f"<i>{event.rule} · {event.severity.value}</i>\n\n"
-            f"{event.detail}"
+            f"{emoji} <b>[{escape(self._source_tag, quote=False)}]</b> "
+            f"{escape(event.title, quote=False)}\n"
+            f"<i>{escape(event.rule, quote=False)} · {event.severity.value}</i>\n\n"
+            f"{escape(event.detail, quote=False)}"
         )
         payload: dict[str, object] = {
             "chat_id": self._chat_id,
