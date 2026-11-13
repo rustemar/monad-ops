@@ -20,7 +20,7 @@ _PROBES_TTL = 60.0
 _VERSION_TTL = 30.0
 
 
-def _sanitize_probe_summary(name: str, summary: str) -> str:
+def _sanitize_probe_summary(name: str, summary: str, status: str) -> str:
     """Strip exact port numbers, ulimit values and percentages from
     probe summaries. Keeps the status signal without leaking
     host-configuration detail."""
@@ -33,7 +33,16 @@ def _sanitize_probe_summary(name: str, summary: str) -> str:
     if name == "fd_limits":
         return re.sub(r"nofile soft=\d+ hard=\d+", "fd limits within safe margin", summary)
     if name == "disk_usage":
-        return re.sub(r"\(peak [\d.]+%?\)", "(peak <20%)", summary)
+        # Never publish a made-up percentage or pass through paths and
+        # measurements from warning/critical or unexpected summaries.
+        if not isinstance(status, str):
+            return "disk usage status unavailable"
+        return {
+            "ok": "disk usage normal",
+            "warn": "disk usage warning",
+            "critical": "disk usage critical",
+            "unknown": "disk usage status unavailable",
+        }.get(status, "disk usage status unavailable")
     return summary
 
 
@@ -59,7 +68,7 @@ def build_router(ctx: ApiContext) -> APIRouter:
                 {
                     "name": p.name,
                     "status": p.status,
-                    "summary": _sanitize_probe_summary(p.name, p.summary),
+                    "summary": _sanitize_probe_summary(p.name, p.summary, p.status),
                 }
                 for p in probes
             ],

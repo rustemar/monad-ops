@@ -17,6 +17,7 @@ import httpx
 import pytest
 
 from monad_ops.api.app import build_app
+from monad_ops.collector.probes import ProbeResult
 from monad_ops.config import Config, NodeConfig
 from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
@@ -760,6 +761,43 @@ async def test_api_probes_shape(client: httpx.AsyncClient) -> None:
     assert "probes" in body
     assert isinstance(body["probes"], list)
     assert all("details" not in p for p in body["probes"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "summary", "expected"),
+    [
+        ("ok", "all mounts < 85% (peak 41%)", "disk usage normal"),
+        ("warn", "/private/mount 85.0% used", "disk usage warning"),
+        ("critical", "/private/mount 96.0% used (20 GB free)", "disk usage critical"),
+        ("unknown", "cannot read /private/mount: sensitive error", "disk usage status unavailable"),
+        ("future", "unexpected /private/mount 99%", "disk usage status unavailable"),
+        ("ok", None, "disk usage normal"),
+        (["bad"], "malformed /private/mount 99%", "disk usage status unavailable"),
+    ],
+)
+async def test_disk_probe_public_summary_preserves_status_without_host_details(
+    client: httpx.AsyncClient, state_with_storage: State, status, summary, expected,
+) -> None:
+    disk = ProbeResult("disk_usage", status, summary, {"/private/mount": "details"})
+    other = ProbeResult("services", "ok", "3/3 active", {})
+    state_with_storage.set_probes([disk, other])
+
+    for endpoint in ("/api/probes", "/api/probes/public"):
+        response = await client.get(endpoint)
+        assert response.status_code == 200
+        probes = {probe["name"]: probe for probe in response.json()["probes"]}
+        assert probes["disk_usage"] == {
+            "name": "disk_usage", "status": status, "summary": expected,
+        }
+        assert probes["services"]["summary"] == "3/3 active"
+        assert "/private/mount" not in response.text
+        assert "99%" not in response.text and "<20%" not in response.text
+
+    # Public sanitization must not rewrite the private source data.
+    probes, _ = state_with_storage.probes()
+    assert probes[0] is disk and disk.summary == summary
+    assert disk.details == {"/private/mount": "details"}
 
 
 @pytest.mark.asyncio

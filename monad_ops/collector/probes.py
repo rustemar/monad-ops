@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
@@ -390,17 +391,43 @@ async def probe_disk_usage(paths: list[Path] | None = None) -> ProbeResult:
     details: dict = {}
     worst_status = "ok"
     worst_msg = ""
+    measured = 0
+    incomplete = False
 
     for p in paths:
-        if not p.exists():
+        try:
+            exists = p.exists()
+        except OSError as e:
+            details[str(p)] = {"exists": None, "error": str(e)}
+            incomplete = True
+            continue
+        if not exists:
             details[str(p)] = {"exists": False}
             continue
         try:
             usage = shutil.disk_usage(p)
         except OSError as e:
             details[str(p)] = {"exists": True, "error": str(e)}
+            incomplete = True
             continue
-        used_ratio = usage.used / usage.total if usage.total else 0.0
+        # A missing optional path is not an error, but an existing path
+        # that cannot be measured must not silently appear healthy.
+        try:
+            valid = (
+                all(isinstance(v, (int, float)) and not isinstance(v, bool)
+                    and math.isfinite(v) for v in (usage.total, usage.used, usage.free))
+                and usage.total > 0
+                and 0 <= usage.used <= usage.total
+                and 0 <= usage.free <= usage.total
+            )
+        except (AttributeError, OverflowError, TypeError):
+            valid = False
+        if not valid:
+            details[str(p)] = {"exists": True, "error": "invalid disk usage measurement"}
+            incomplete = True
+            continue
+        measured += 1
+        used_ratio = usage.used / usage.total
         entry = {
             "exists": True,
             "total_gb": round(usage.total / 1e9, 1),
@@ -417,6 +444,13 @@ async def probe_disk_usage(paths: list[Path] | None = None) -> ProbeResult:
             worst_status = "warn"
             worst_msg = f"{p} {used_ratio:.1%} used"
 
+    if worst_status == "ok" and (not measured or incomplete):
+        return ProbeResult(
+            name="disk_usage",
+            status="unknown",
+            summary="disk usage measurements unavailable",
+            details=details,
+        )
     if worst_status == "ok":
         highest = max(
             (d.get("used_ratio", 0.0) for d in details.values() if d.get("exists")),
