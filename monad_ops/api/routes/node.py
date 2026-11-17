@@ -7,8 +7,6 @@ their own router, mounted after these node info endpoints.
 
 from __future__ import annotations
 
-import re
-
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
@@ -25,13 +23,23 @@ def _sanitize_probe_summary(name: str, summary: str, status: str) -> str:
     probe summaries. Keeps the status signal without leaking
     host-configuration detail."""
     if name == "udp_config":
-        # We never want the port number or the "config not readable"
-        # caveat — just health.
-        if "authenticated UDP" in summary:
-            return "authenticated UDP listener healthy"
-        return summary
+        if not isinstance(status, str):
+            return "authenticated UDP status unavailable"
+        return {
+            "ok": "authenticated UDP status OK",
+            "warn": "authenticated UDP status warning",
+            "critical": "authenticated UDP status critical",
+            "unknown": "authenticated UDP status unavailable",
+        }.get(status, "authenticated UDP status unavailable")
     if name == "fd_limits":
-        return re.sub(r"nofile soft=\d+ hard=\d+", "fd limits within safe margin", summary)
+        if not isinstance(status, str):
+            return "file descriptor limits status unavailable"
+        return {
+            "ok": "file descriptor limits normal",
+            "warn": "file descriptor limits warning",
+            "critical": "file descriptor limits critical",
+            "unknown": "file descriptor limits status unavailable",
+        }.get(status, "file descriptor limits status unavailable")
     if name == "disk_usage":
         # Never publish a made-up percentage or pass through paths and
         # measurements from warning/critical or unexpected summaries.
