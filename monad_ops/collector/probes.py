@@ -76,27 +76,46 @@ _run = run_capture
 async def probe_services(services: list[str]) -> ProbeResult:
     states: dict[str, str] = {}
     probe_errors: list[str] = []
+    confirmed_down_by_service: dict[str, bool] = {}
     for svc in services:
         rc, out, _ = await _run(["systemctl", "is-active", svc])
         state = out.strip()
         # rc=127 from _run means TimeoutError or FileNotFoundError — we
-        # did not actually observe the service state. Distinguish this
+        # did not actually observe the service state, even if output is
+        # unexpectedly present. Distinguish this
         # from the real "inactive" rc=3 (systemctl returns non-zero for
         # inactive/failed/etc., but stdout still contains the true state).
         # The 2026-04-20 stress test exposed this: when the event loop
         # was frozen under sqlite load, subprocess_exec calls timed out
         # → probe went critical "not active" even though services had
         # months of uptime. Record the error separately; fail quiet.
-        if rc == 127 and not state:
+        if rc == 127:
             probe_errors.append(svc)
             states[svc] = "probe_error"
+            confirmed_down_by_service[svc] = False
         else:
             states[svc] = state or f"rc={rc}"
+            # is-active's exit code 3 and an explicit inactive/failed
+            # state establish that this service was actually observed down.
+            confirmed_down_by_service[svc] = rc == 3 and state in ("inactive", "failed")
 
     bad = [s for s, state in states.items()
            if state not in ("active", "probe_error")]
 
     if probe_errors:
+        # An unreadable check must not conceal another observed outage.
+        # Keep ambiguous, empty and inconsistent outputs out of this path.
+        confirmed_down = [svc for svc, is_down in confirmed_down_by_service.items() if is_down]
+        if confirmed_down:
+            return ProbeResult(
+                name="services",
+                status="critical",
+                summary=(
+                    f"{len(confirmed_down)} service(s) not active: "
+                    f"{', '.join(confirmed_down)}; other service check(s) unavailable"
+                ),
+                details=states,
+            )
         return ProbeResult(
             name="services",
             status="unknown",
