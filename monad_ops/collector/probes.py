@@ -74,68 +74,61 @@ _run = run_capture
 # ─── services ─────────────────────────────────────────────────────────
 
 async def probe_services(services: list[str]) -> ProbeResult:
-    states: dict[str, str] = {}
-    probe_errors: list[str] = []
-    confirmed_down_by_service: dict[str, bool] = {}
+    if not services:
+        return ProbeResult("services", "unknown", "no services configured", {})
+
+    checks: dict[str, tuple[int, str]] = {}
     for svc in services:
-        rc, out, _ = await _run(["systemctl", "is-active", svc])
-        state = out.strip()
-        # rc=127 from _run means TimeoutError or FileNotFoundError — we
-        # did not actually observe the service state, even if output is
-        # unexpectedly present. Distinguish this
-        # from the real "inactive" rc=3 (systemctl returns non-zero for
-        # inactive/failed/etc., but stdout still contains the true state).
-        # The 2026-04-20 stress test exposed this: when the event loop
-        # was frozen under sqlite load, subprocess_exec calls timed out
-        # → probe went critical "not active" even though services had
-        # months of uptime. Record the error separately; fail quiet.
-        if rc == 127:
-            probe_errors.append(svc)
-            states[svc] = "probe_error"
-            confirmed_down_by_service[svc] = False
+        try:
+            rc, out, _ = await _run(["systemctl", "is-active", svc])
+        except OSError:
+            rc, out = 127, ""
+        checks[svc] = rc, out.strip()
+
+    states: dict[str, str] = {}
+    down: list[str] = []
+    missing: list[str] = []
+    unconfirmed = 0
+    for svc, (rc, state) in checks.items():
+        states[svc] = "probe_error" if rc == 127 else state or f"rc={rc}"
+        # For a single unit, is-active can succeed while the unit reloads.
+        # Code 4 with "inactive" means the configured unit was not found.
+        if rc == 0 and state in ("active", "reloading", "refreshing"):
+            continue
+        if rc == 3 and state in ("inactive", "failed"):
+            down.append(svc)
+        elif rc == 4 and state == "inactive":
+            missing.append(svc)
         else:
-            states[svc] = state or f"rc={rc}"
-            # is-active's exit code 3 and an explicit inactive/failed
-            # state establish that this service was actually observed down.
-            confirmed_down_by_service[svc] = rc == 3 and state in ("inactive", "failed")
+            # A command error, transition or inconsistent result cannot
+            # confirm either a failure or a recovery.
+            unconfirmed += 1
 
-    bad = [s for s, state in states.items()
-           if state not in ("active", "probe_error")]
-
-    if probe_errors:
-        # An unreadable check must not conceal another observed outage.
-        # Keep ambiguous, empty and inconsistent outputs out of this path.
-        confirmed_down = [svc for svc, is_down in confirmed_down_by_service.items() if is_down]
-        if confirmed_down:
-            return ProbeResult(
-                name="services",
-                status="critical",
-                summary=(
-                    f"{len(confirmed_down)} service(s) not active: "
-                    f"{', '.join(confirmed_down)}; other service check(s) unavailable"
-                ),
-                details=states,
-            )
+    if down or missing:
+        problems = []
+        if down:
+            problems.append(f"{len(down)} service(s) not active: {', '.join(down)}")
+        if missing:
+            problems.append(f"{len(missing)} configured unit(s) not found: {', '.join(missing)}")
+        if unconfirmed:
+            problems.append("other service check(s) unavailable")
+        return ProbeResult(
+            name="services",
+            status="critical",
+            summary="; ".join(problems),
+            details=states,
+        )
+    if unconfirmed:
         return ProbeResult(
             name="services",
             status="unknown",
-            summary=(
-                f"probe timed out for {len(probe_errors)}/{len(services)} "
-                f"service(s) — cannot evaluate"
-            ),
-            details=states,
-        )
-    if not bad:
-        return ProbeResult(
-            name="services",
-            status="ok",
-            summary=f"{len(services)}/{len(services)} active",
+            summary=f"service state unavailable for {unconfirmed}/{len(checks)} check(s)",
             details=states,
         )
     return ProbeResult(
         name="services",
-        status="critical",
-        summary=f"{len(bad)} service(s) not active: {', '.join(bad)}",
+        status="ok",
+        summary=f"{len(checks)}/{len(checks)} active",
         details=states,
     )
 
