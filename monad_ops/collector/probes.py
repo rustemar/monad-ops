@@ -230,9 +230,36 @@ async def probe_key_backups(
 
 # ─── NVMe DISCARD / SMART ─────────────────────────────────────────────
 
+def _discard_limits(output: str) -> tuple[int, int] | None:
+    """Read byte limits for the one device requested from lsblk."""
+    try:
+        data = json.loads(output)
+    except ValueError:
+        return None
+    devices = data.get("blockdevices") if isinstance(data, dict) else None
+    if not isinstance(devices, list) or len(devices) != 1 or not isinstance(devices[0], dict):
+        return None
+    granularity = devices[0].get("disc-gran")
+    maximum = devices[0].get("disc-max")
+    if type(granularity) is not int or type(maximum) is not int:
+        return None
+    if granularity < 0 or maximum < 0:
+        return None
+    return granularity, maximum
+
+
 async def probe_triedb_device() -> ProbeResult:
     """Check the device backing TrieDB supports DISCARD and is healthy."""
-    if not _TRIEDB_DEVICE.exists():
+    try:
+        device_exists = _TRIEDB_DEVICE.exists()
+    except OSError as error:
+        return ProbeResult(
+            name="triedb_device",
+            status="unknown",
+            summary="TrieDB device path could not be checked",
+            details={"device_path_error": type(error).__name__},
+        )
+    if not device_exists:
         return ProbeResult(
             name="triedb_device",
             status="unknown",
@@ -248,31 +275,31 @@ async def probe_triedb_device() -> ProbeResult:
 
     details: dict = {"triedb_link": str(_TRIEDB_DEVICE), "underlying": real}
 
-    # DISCARD support via lsblk.
-    rc, out, _ = await _run(["lsblk", "--discard", "--json", real])
-    disc_ok = False
-    # Distinguish "lsblk timed out / not installed" from "lsblk said disc=0".
-    # Same reasoning as probe_services: during event-loop freeze the
-    # subprocess call times out (rc=127 via _run) and we must NOT raise
-    # a critical — our tooling not the node is the problem. The running
-    # node is definitive proof DISCARD worked at init, so timeout here
-    # should be silent (unknown).
-    probe_timeout = (rc == 127 and not out)
-    if rc == 0 and out:
-        try:
-            data = json.loads(out)
-            for bd in data.get("blockdevices", []):
-                disc_gran = bd.get("disc-gran") or "0"
-                disc_max = bd.get("disc-max") or "0"
-                details["disc_gran"] = disc_gran
-                details["disc_max"] = disc_max
-                if disc_gran not in ("0", "0B", None) and disc_max not in ("0", "0B", None):
-                    disc_ok = True
-        except Exception as e:  # noqa: BLE001
-            details["lsblk_parse_error"] = str(e)
+    # Byte mode reads the sysfs limits without the human display's
+    # fallback zero for unreadable granularity. Only query the target.
+    limits = None
+    try:
+        rc, out, _ = await _run([
+            "lsblk", "--bytes", "--nodeps", "--json", "--output", "DISC-GRAN,DISC-MAX", "--", real,
+        ])
+    except OSError as error:
+        details["lsblk_error"] = type(error).__name__
+    else:
+        if rc == 0:
+            limits = _discard_limits(out)
+            if limits is None:
+                details["lsblk_parse_error"] = "invalid or absent discard limits"
+            else:
+                details["disc_gran"], details["disc_max"] = limits
+        else:
+            details["lsblk_rc"] = rc
 
     # SMART health — best-effort; /usr/sbin/nvme may not be installed.
-    rc, out, _ = await _run(["nvme", "smart-log", real, "-o", "json"])
+    try:
+        rc, out, _ = await _run(["nvme", "smart-log", real, "-o", "json"])
+    except OSError as error:
+        details["nvme_error"] = type(error).__name__
+        rc, out = 127, ""
     smart_ok: bool | None = None
     if rc == 0 and out:
         try:
@@ -293,18 +320,18 @@ async def probe_triedb_device() -> ProbeResult:
         except Exception as e:  # noqa: BLE001
             details["nvme_parse_error"] = str(e)
 
-    if probe_timeout:
+    if limits is None:
         return ProbeResult(
             name="triedb_device",
             status="unknown",
-            summary="lsblk probe timed out — cannot evaluate (node may still be healthy)",
+            summary="TrieDB discard capability could not be verified",
             details=details,
         )
-    if not disc_ok:
+    if 0 in limits:
         return ProbeResult(
             name="triedb_device",
             status="critical",
-            summary="BLKDISCARD not supported on TrieDB device — TrieDB init would fail",
+            summary="DISCARD unavailable on TrieDB device",
             details=details,
         )
     if smart_ok is False:
