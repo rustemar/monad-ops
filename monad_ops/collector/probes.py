@@ -388,18 +388,38 @@ async def probe_udp_config() -> ProbeResult:
         # Fall through to socket-based fallback.
         pass
 
-    # Socket fallback: 8001 listening UDP suggests authenticated bind is up.
-    rc, out, _ = await _run(["ss", "-ulnp"])
-    has_8001 = ":8001" in out
-    has_8000 = ":8000" in out
-    if has_8001:
+    # Headerless, numeric UDP listeners: State, Recv-Q, Send-Q, Local, Peer.
+    # The fallback observes a bound socket, not the node's configuration.
+    try:
+        rc, out, _ = await _run(["ss", "-H", "-uln"])
+    except OSError:
+        rc, out = 127, ""
+    if rc != 0:
+        return ProbeResult(
+            name="udp_config",
+            status="unknown",
+            summary="node.toml not readable and local UDP socket check failed",
+            details={"source": "socket-fallback", "ss_rc": rc},
+        )
+
+    local_ports = set()
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) != 5 or fields[0] != "UNCONN":
+            continue
+        if not (fields[1].isdigit() and fields[2].isdigit()):
+            continue
+        address, separator, port = fields[3].rpartition(":")
+        if address and separator and port in ("8000", "8001"):
+            local_ports.add(port)
+    if "8001" in local_ports:
         return ProbeResult(
             name="udp_config",
             status="ok",
-            summary="authenticated UDP port :8001 is listening (config not readable)",
+            summary="UDP socket bound to standard auth port :8001 (config not readable)",
             details={
                 "auth_port": 8001,
-                "clear_port": 8000 if has_8000 else None,
+                "clear_port": 8000 if "8000" in local_ports else None,
                 "source": "socket-fallback",
             },
         )
