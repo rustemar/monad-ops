@@ -127,7 +127,7 @@ def build_app(
     # "incomplete, refresh soon" when the tailer hasn't caught up to
     # the post-event window yet.
     _cache_store: dict[str, OrderedDict[tuple, tuple[float, float, object]]] = {}
-    _cache_inflight: dict[str, dict[tuple, asyncio.Future]] = {}
+    _cache_inflight: dict[str, dict[tuple, asyncio.Task]] = {}
     _CACHE_MAX_ENTRIES = 128
     # Test-only seam: lets a caller inspect the per-entry TTL applied to
     # a cached value (e.g. asserting that a truncated reorg trace was
@@ -154,34 +154,37 @@ def build_app(
         """
         store = _cache_store.setdefault(bucket, OrderedDict())
         inflight = _cache_inflight.setdefault(bucket, {})
-        now = time.monotonic()
         entry = store.get(cache_key)
-        if entry and (now - entry[0]) < entry[1]:
-            # Move-to-end marks this key recently used (LRU-ish).
+        if entry and (time.monotonic() - entry[0]) < entry[1]:
             store.move_to_end(cache_key)
             return entry[2]
         pending = inflight.get(cache_key)
-        if pending is not None:
-            return await pending
-        fut: asyncio.Future = asyncio.get_running_loop().create_future()
-        inflight[cache_key] = fut
-        try:
-            value = await loader()
-            eff_ttl = ttl_for_value(value) if ttl_for_value is not None else ttl_sec
-            store[cache_key] = (time.monotonic(), eff_ttl, value)
-            store.move_to_end(cache_key)
-            # Evict oldest entries once over the cap. Bounded to a handful
-            # of pops even in pathological traffic, so the eviction loop
-            # doesn't stall the event loop.
-            while len(store) > _CACHE_MAX_ENTRIES:
-                store.popitem(last=False)
-            fut.set_result(value)
-            return value
-        except Exception as e:
-            fut.set_exception(e)
-            raise
-        finally:
-            inflight.pop(cache_key, None)
+        if pending is None:
+            async def load_and_cache():
+                try:
+                    value = await loader()
+                    eff_ttl = ttl_for_value(value) if ttl_for_value is not None else ttl_sec
+                    store[cache_key] = (time.monotonic(), eff_ttl, value)
+                    store.move_to_end(cache_key)
+                    while len(store) > _CACHE_MAX_ENTRIES:
+                        store.popitem(last=False)
+                    return value
+                finally:
+                    inflight.pop(cache_key, None)
+
+            pending = asyncio.create_task(load_and_cache())
+            inflight[cache_key] = pending
+
+            def observe_failure(task):
+                # All requesters may have left before this task fails.
+                # Observing the exception does not suppress it for awaiters.
+                if not task.cancelled():
+                    task.exception()
+
+            pending.add_done_callback(observe_failure)
+        # Even the first requester may disconnect. Keep the shared load alive:
+        # cancelling an asyncio.to_thread caller cannot stop its SQL thread.
+        return await asyncio.shield(pending)
 
     # One handle shared by every extracted route group (queue item R1).
     # Built here because it carries _cached, which the groups read through.
