@@ -393,6 +393,28 @@ async def _probe_loop(config: Config, state: State, sink: AlertSink) -> None:
         await asyncio.sleep(60)
 
 
+async def _retention_loop(config: Config, storage: Storage) -> None:
+    # Daily prune of historical rows older than keep_days. Fire-and-
+    # forget: failures log and retry next tick, never fatal. Runs in
+    # a worker thread so a large DELETE on a million rows doesn't
+    # stall the event loop.
+    keep_days = int(config.retention.keep_days)
+    interval_sec = max(3600, int(config.retention.interval_hours) * 3600)
+    log.info("retention.ready", keep_days=keep_days, interval_sec=interval_sec)
+    # Sleep a little on startup so bootstrap/first metrics settle
+    # before we start doing DB-heavy background writes.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            deleted = await asyncio.to_thread(
+                storage.prune_older_than, keep_days=keep_days
+            )
+            log.info("retention.prune", **deleted)
+        except Exception as e:  # noqa: BLE001
+            log.error("retention.error", exc=str(e))
+        await asyncio.sleep(interval_sec)
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     storage, state = _build_runtime_state(config)
@@ -465,27 +487,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
                 # sample.error field — anything reaching here is a bug.
                 log.error("reference_loop.error", exc=str(e))
             await asyncio.sleep(interval)
-
-    async def retention_loop():
-        # Daily prune of historical rows older than keep_days. Fire-and-
-        # forget: failures log and retry next tick, never fatal. Runs in
-        # a worker thread so a large DELETE on a million rows doesn't
-        # stall the event loop.
-        keep_days = int(config.retention.keep_days)
-        interval_sec = max(3600, int(config.retention.interval_hours) * 3600)
-        log.info("retention.ready", keep_days=keep_days, interval_sec=interval_sec)
-        # Sleep a little on startup so bootstrap/first metrics settle
-        # before we start doing DB-heavy background writes.
-        await asyncio.sleep(60)
-        while True:
-            try:
-                deleted = await asyncio.to_thread(
-                    storage.prune_older_than, keep_days=keep_days
-                )
-                log.info("retention.prune", **deleted)
-            except Exception as e:  # noqa: BLE001
-                log.error("retention.error", exc=str(e))
-            await asyncio.sleep(interval_sec)
 
     async def planner_stats_loop():
         # Daily bounded ANALYZE so the query planner's row estimates keep
@@ -1053,7 +1054,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     # no-op coroutine returns immediately, and `asyncio.wait(FIRST_COMPLETED)`
     # would treat that as the first finisher and cancel everything else.
     if config.retention.enabled and storage is not None:
-        tasks.add(asyncio.create_task(retention_loop(), name="retention"))
+        tasks.add(asyncio.create_task(_retention_loop(config, storage), name="retention"))
     else:
         log.info("retention.disabled")
     enricher_task: asyncio.Task | None = None
