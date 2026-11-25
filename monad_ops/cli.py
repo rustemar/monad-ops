@@ -415,6 +415,40 @@ async def _retention_loop(config: Config, storage: Storage) -> None:
         await asyncio.sleep(interval_sec)
 
 
+async def _bft_flush_loop(state: State, storage: Storage | None) -> None:
+    """Drain bft pending writes to storage on a 1-second cadence.
+
+    Decouples storage write rate from event rate. Pre-iter-20 we
+    wrote once per consensus event (~5 writes/sec at testnet
+    cadence on top of the existing 2.5/sec block writes). After
+    iter-20 we coalesce into one BEGIN-IMMEDIATE transaction per
+    flush tick — an order of magnitude fewer lock acquires, which
+    leaves space for the contract_hour_loop's 60-second
+    rebuild-from-JOIN to grab the writer without a queue forming
+    behind it. Diagnosed against the 2026-04-23 20:29 UTC stall-
+    rule false positive (one 10s tailer freeze, see memory
+    ``project_stall_fp_pattern.md``).
+    """
+    FLUSH_INTERVAL_SEC = 1.0
+    while True:
+        await asyncio.sleep(FLUSH_INTERVAL_SEC)
+        try:
+            closed, base_fees, in_progress = state.drain_bft_pending()
+            # State also queues samples in memory-only mode. Discard them each tick.
+            if storage is None:
+                continue
+            minutes_to_flush = list(closed)
+            if in_progress is not None:
+                minutes_to_flush.append(in_progress)
+            if minutes_to_flush or base_fees:
+                await asyncio.to_thread(
+                    storage.bulk_write_bft,
+                    minutes_to_flush, base_fees,
+                )
+        except Exception as e:  # noqa: BLE001
+            log.error("bft_flush.error", exc=str(e))
+
+
 async def _cmd_run(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     storage, state = _build_runtime_state(config)
@@ -435,9 +469,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # fail-closed state, by design).
         url = config.node.reference_rpc_url
         interval = max(5, int(config.node.reference_poll_sec))
-        if not url:
-            log.info("reference_rpc.disabled")
-            return
         lag_rule = ReferenceLagRule(
             warn_blocks=config.rules.reference_lag.warn_blocks,
             critical_blocks=config.rules.reference_lag.critical_blocks,
@@ -675,38 +706,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
             if wt_ev is not None:
                 await _deliver_waltrace(wt_ev)
 
-    async def bft_flush_loop():
-        """Drain bft pending writes to storage on a 1-second cadence.
-
-        Decouples storage write rate from event rate. Pre-iter-20 we
-        wrote once per consensus event (~5 writes/sec at testnet
-        cadence on top of the existing 2.5/sec block writes). After
-        iter-20 we coalesce into one BEGIN-IMMEDIATE transaction per
-        flush tick — an order of magnitude fewer lock acquires, which
-        leaves space for the contract_hour_loop's 60-second
-        rebuild-from-JOIN to grab the writer without a queue forming
-        behind it. Diagnosed against the 2026-04-23 20:29 UTC stall-
-        rule false positive (one 10s tailer freeze, see memory
-        ``project_stall_fp_pattern.md``).
-        """
-        if storage is None:
-            return
-        FLUSH_INTERVAL_SEC = 1.0
-        while True:
-            await asyncio.sleep(FLUSH_INTERVAL_SEC)
-            try:
-                closed, base_fees, in_progress = state.drain_bft_pending()
-                minutes_to_flush = list(closed)
-                if in_progress is not None:
-                    minutes_to_flush.append(in_progress)
-                if minutes_to_flush or base_fees:
-                    await asyncio.to_thread(
-                        storage.bulk_write_bft,
-                        minutes_to_flush, base_fees,
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.error("bft_flush.error", exc=str(e))
-
     async def epoch_backfill_task():
         # Fire-and-forget: scan 24h of monad-bft journal and seed the
         # tracker with closed epoch spans. Without this, the dashboard
@@ -829,9 +828,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         installed via apt.
         """
         cfg = config.version_watch
-        if not cfg.enabled:
-            log.info("version_watch.disabled")
-            return
         rule = VersionRule(reminder_interval_sec=cfg.reminder_interval_sec)
         # Restore state across process restarts so we don't re-fire a
         # first-time INFO for a release we've already announced. State
@@ -889,9 +885,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         compete with bootstrap reads.
         """
         cfg = config.validator_set
-        if not cfg.enabled:
-            log.info("validator_set.disabled")
-            return
         await asyncio.sleep(30)
         while True:
             try:
@@ -964,12 +957,9 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     ))
     http = asyncio.create_task(server.serve())
     probes = asyncio.create_task(_probe_loop(config, state, sink))
-    reference = asyncio.create_task(reference_loop())
     epoch = asyncio.create_task(epoch_loop(), name="epoch_probe")
     consensus = asyncio.create_task(consensus_loop(), name="consensus_tailer")
-    bft_flush = asyncio.create_task(bft_flush_loop(), name="bft_flush")
-    version_task = asyncio.create_task(version_loop(), name="version_watch")
-    validator_set_task = asyncio.create_task(validator_set_loop(), name="validator_set")
+    bft_flush = asyncio.create_task(_bft_flush_loop(state, storage), name="bft_flush")
     network_signal_tick = asyncio.create_task(
         network_signal_tick_loop(), name="network_signal_tick",
     )
@@ -1038,10 +1028,22 @@ async def _cmd_run(args: argparse.Namespace) -> int:
     )
 
     tasks: set[asyncio.Task] = {
-        collector, http, probes, reference, epoch, consensus, bft_flush,
-        version_task, validator_set_task, network_signal_tick,
+        collector, http, probes, epoch, consensus, bft_flush, network_signal_tick,
         process_restart_task, reorg_backfill, maintenance_flush,
     }
+    # A worker that returns immediately would shut down the other tasks in FIRST_COMPLETED.
+    if config.node.reference_rpc_url:
+        tasks.add(asyncio.create_task(reference_loop(), name="reference"))
+    else:
+        log.info("reference_rpc.disabled")
+    if config.version_watch.enabled:
+        tasks.add(asyncio.create_task(version_loop(), name="version_watch"))
+    else:
+        log.info("version_watch.disabled")
+    if config.validator_set.enabled:
+        tasks.add(asyncio.create_task(validator_set_loop(), name="validator_set"))
+    else:
+        log.info("validator_set.disabled")
     if storage is not None:
         tasks.add(asyncio.create_task(warm_sampled_windows(), name="prewarm"))
         tasks.add(
@@ -1050,9 +1052,6 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         tasks.add(
             asyncio.create_task(planner_stats_loop(), name="planner_stats")
         )
-    # Only spawn the retention task when actually enabled — otherwise a
-    # no-op coroutine returns immediately, and `asyncio.wait(FIRST_COMPLETED)`
-    # would treat that as the first finisher and cancel everything else.
     if config.retention.enabled and storage is not None:
         tasks.add(asyncio.create_task(_retention_loop(config, storage), name="retention"))
     else:
