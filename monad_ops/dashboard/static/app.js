@@ -2740,9 +2740,7 @@ function renderEnrichment(d) {
     extrasEl.textContent = "";
 }
 
-// Active validator-set snapshot (staking precompile). Updates once per
-// epoch (~5.5h on testnet); tile shows current consensus/eligible counts
-// + cutoff stake at a glance, popup carries the full snapshot.
+// The tile shows the current epoch's active set, cutoff and bench.
 let _validatorSetLatest = null;
 
 async function fetchValidatorSet() {
@@ -3943,15 +3941,15 @@ function _renderValidatorSetPopup(d) {
                 <div class="pk-cell"><div class="pk-label">consensus / cap</div>
                     <div class="pk-val">${cons} / ${cap}</div>
                     <div class="pk-sub">validators selected this epoch</div></div>
-                <div class="pk-cell"><div class="pk-label">eligible total</div>
+                <div class="pk-cell"><div class="pk-label">execution set</div>
                     <div class="pk-val">${execn}</div>
-                    <div class="pk-sub">≥ active-stake threshold</div></div>
+                    <div class="pk-sub">validators listed by the staking contract</div></div>
                 <div class="pk-cell"><div class="pk-label">on bench</div>
                     <div class="pk-val">${bench}</div>
-                    <div class="pk-sub">eligible but not in consensus set</div></div>
+                    <div class="pk-sub">execution-set validators outside this epoch’s active set</div></div>
                 <div class="pk-cell"><div class="pk-label">cutoff stake</div>
                     <div class="pk-val">${escapeHTML(floorTxt)}</div>
-                    <div class="pk-sub">lowest active consensusStake</div></div>
+                    <div class="pk-sub">lowest stake in this epoch’s active set</div></div>
             </div>`;
     } else {
         summaryBody = `<div class="pk-sub">${escapeHTML(d.error || "snapshot probe has not produced a result yet")}</div>`;

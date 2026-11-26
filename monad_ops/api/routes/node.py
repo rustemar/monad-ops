@@ -149,8 +149,9 @@ def build_router(ctx: ApiContext) -> APIRouter:
         """Active validator-set snapshot from the staking precompile.
 
         Powers the "active validator set" tile on the dashboard. The
-        snapshot itself changes on epoch boundaries (~5.5h on testnet);
-        polled every 5 min by ``validator_set_loop`` in cli.py.
+        consensus count and cutoff refer to the active set for the reported
+        epoch, including during the handover. The bench counts execution-set
+        members outside that active set. All readings come from one height.
 
         Public-safe: returns only protocol constants + on-chain counts
         + the cutoff stake (already public via the precompile). No host
