@@ -115,8 +115,6 @@ async def _pick_latest_stable(
 ) -> str | None:
     candidates = [v for v in versions if not any(s in v for s in skip_substrings)]
     if not candidates:
-        candidates = list(versions)
-    if not candidates:
         return None
     best = candidates[0]
     for v in candidates[1:]:
@@ -174,7 +172,7 @@ async def fetch_version_status(
         return VersionStatus(
             package=package, installed=installed, latest=None,
             extras_newer=(), status="unknown",
-            error="no stable versions in repo",
+            error="no versions match the configured upgrade filter",
         )
 
     # Newer-than-installed list (deduped, descending). Used for the

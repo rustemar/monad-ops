@@ -398,8 +398,11 @@ the first tick that saw it (the clock survives a monad-ops restart).
 
 It polls the repo's `Packages.gz` directly and compares against
 `dpkg-query`, so it needs neither `apt-get update` nor sudo.
-`skip_substrings` filters out `-debug`, `-preview`, `~rc` and friends so
-only stable releases count.
+`skip_substrings` excludes builds such as `-debug`, `-preview` and `~rc`
+when selecting an upgrade. If the filter excludes every version in the
+index, the check reports `unknown` and preserves any pending release.
+When an eligible upgrade exists, the dashboard and alert also list
+newer builds in apt, which can include prereleases.
 
 It's a rule rather than a probe because of the cadence. The standard
 probe loop fires WARN/CRITICAL on every tick while a probe is non-ok,

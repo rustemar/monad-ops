@@ -2598,7 +2598,7 @@ function renderVersion(d) {
         // been sitting there, so "wait for the announce" has a number.
         const parts = [];
         if (d.pending_since) parts.push(`in apt for ${fmtAge(Date.now() - d.pending_since * 1000)}`);
-        parts.push(extrasCount > 1 ? `${extrasCount} versions ahead` : "click for details");
+        parts.push(extrasCount > 1 ? `${extrasCount} newer builds in apt` : "click for details");
         extrasEl.textContent = parts.join(" · ");
         return;
     }
@@ -3893,7 +3893,7 @@ function _renderVersionPopup(d) {
     const extras = (d.extras_newer || []).slice(0, 12);
     const extrasBlock = extras.length
         ? `
-            <div class="pk-section">all newer versions in repo</div>
+            <div class="pk-section">newer builds in apt (may include prereleases)</div>
             <ul class="pk-version-list">
                 ${extras.map(v => `<li><code>${escapeHTML(v)}</code></li>`).join("")}
             </ul>`

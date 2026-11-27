@@ -17,6 +17,8 @@ from monad_ops.collector import version as version_mod
 from monad_ops.collector.version import (
     fetch_version_status,
 )
+from monad_ops.config import load_config
+from monad_ops.rules import VersionRule
 
 
 def _packages_blob(entries: Iterable[tuple[str, str]]) -> bytes:
@@ -120,6 +122,63 @@ async def test_skips_debug_and_preview(patch_dpkg, patch_installed, patch_blob):
     s = await fetch_version_status(package="monad", packages_url="x://test")
     assert s.status == "up_to_date"
     assert s.latest == "0.14.2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build", ["0.14.4~rc.1", "0.14.0-debug"])
+async def test_excluded_only_index_preserves_pending_release(
+    patch_dpkg, patch_installed, patch_blob, build,
+):
+    patch_installed["value"] = "0.14.2"
+    patch_blob["value"] = _packages_blob([("monad", "0.14.3")])
+    rule = VersionRule()
+    pending = await fetch_version_status(package="monad", packages_url="x://test")
+    assert rule.on_status(pending, now_sec=1000) is not None
+    previous_state = rule.to_state()
+
+    patch_blob["value"] = _packages_blob([("monad", build)])
+    result = await fetch_version_status(package="monad", packages_url="x://test")
+    assert result.status == "unknown"
+    assert result.installed == "0.14.2"
+    assert result.latest is None and result.extras_newer == ()
+    assert "filter" in (result.error or "")
+    assert rule.on_status(result, now_sec=1000 + 86400) is None
+    assert rule.to_state() == previous_state
+
+
+@pytest.mark.asyncio
+async def test_mixed_index_keeps_inventory_separate_from_upgrade_target(
+    patch_dpkg, patch_installed, patch_blob,
+):
+    patch_installed["value"] = "0.16.7"
+    patch_blob["value"] = _packages_blob([
+        ("monad", "0.16.8"), ("monad", "0.17.0-preview"), ("monad", "0.16.8"),
+    ])
+    result = await fetch_version_status(package="monad", packages_url="x://test")
+    assert result.status == "update_available"
+    assert result.latest == "0.16.8"
+    assert result.extras_newer == ("0.17.0-preview", "0.16.8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("skip", "expected_latest"), [
+    ('["-canary"]', None),
+    ("[]", "0.16.8-canary"),
+])
+async def test_configured_filter_controls_single_available_build(
+    tmp_path, patch_dpkg, patch_installed, patch_blob, skip, expected_latest,
+):
+    path = tmp_path / "config.toml"
+    path.write_text(f'[node]\nname = "test"\n[version_watch]\nskip_substrings = {skip}\n')
+    cfg = load_config(path).version_watch
+    patch_installed["value"] = "0.16.7"
+    patch_blob["value"] = _packages_blob([("monad", "0.16.8-canary")])
+    result = await fetch_version_status(
+        package=cfg.package, packages_url=cfg.packages_url,
+        skip_substrings=tuple(cfg.skip_substrings),
+    )
+    assert result.latest == expected_latest
+    assert result.status == ("unknown" if expected_latest is None else "update_available")
 
 
 @pytest.mark.asyncio
