@@ -23,6 +23,16 @@ import httpx
 _DEFAULT_TIMEOUT_SEC = 4.0
 
 
+def reference_poll_interval_sec(configured_sec: int) -> int:
+    return max(5, int(configured_sec))
+
+
+def reference_stale_after_sec(configured_sec: int) -> float:
+    # The loop sleeps after both RPCs finish. Estimate three cycles of
+    # grace using the HTTP timeout per cycle, allowing for a missed pair.
+    return 3 * (reference_poll_interval_sec(configured_sec) + _DEFAULT_TIMEOUT_SEC)
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceSample:
     """One observation of the external reference chain tip."""

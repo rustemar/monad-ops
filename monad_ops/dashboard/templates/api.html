@@ -73,7 +73,10 @@
                 <tbody>
                     <tr>
                         <td><code>GET /api/state</code></td>
-                        <td>Live snapshot: uptime, blocks seen, rolling averages (1min/5min retry, TPS, gas), current epoch, reference-chain lag.</td>
+                        <td>Live snapshot: uptime, blocks seen, rolling averages (1min/5min retry, TPS, gas), current epoch, reference-chain lag.
+                            The last paired RPC reading is stale when its server-measured age
+                            (<code>reference_age_sec</code>) exceeds <code>reference_stale_after_sec</code>.
+                            A null age means freshness is unknown.</td>
                     </tr>
                     <tr>
                         <td><code>GET /api/blocks/sampled?from_ts_ms=&amp;to_ts_ms=&amp;points=300</code></td>

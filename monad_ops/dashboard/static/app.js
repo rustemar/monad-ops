@@ -1863,15 +1863,25 @@ function updateLag(d) {
         sub.textContent = "local tip not yet observed";
         return;
     }
+    const ageSec = d.reference_age_sec;
+    const staleAfterSec = d.reference_stale_after_sec;
+    if (!Number.isFinite(ageSec) || ageSec < 0 ||
+        !Number.isFinite(staleAfterSec) || staleAfterSec <= 0) {
+        setLagVal("lag-delta", "—", "val-unknown");
+        sub.textContent = "Sample freshness unavailable";
+        return;
+    }
+    if (ageSec > staleAfterSec) {
+        setLagVal("lag-delta", "—", "val-unknown");
+        sub.textContent = `Comparison stale · last paired sample ${Math.floor(ageSec)}s ago`;
+        return;
+    }
     const delta = ref - local;
     const sign = delta > 0 ? "+" : delta < 0 ? "−" : "±";
     const sev = classifyLag(delta);
     setLagVal("lag-delta", `${sign}${Math.abs(delta)}`, sev);
 
-    const ageSec = d.reference_checked_ms
-        ? Math.round((Date.now() - d.reference_checked_ms) / 1000)
-        : null;
-    const ageNote = ageSec != null ? `snapshot ${ageSec}s old` : "";
+    const ageNote = `snapshot ${Math.floor(ageSec)}s old`;
     if (delta > 2) {
         sub.textContent = `we were ${delta} blocks behind the public reference at sample time · ${ageNote}`;
     } else if (delta < -2) {

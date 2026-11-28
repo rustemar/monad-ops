@@ -31,7 +31,7 @@ from monad_ops.collector.epoch_probe import (
 from monad_ops.collector.journal import TailError, tail_execution_blocks
 from monad_ops.collector.probes import run_all_probes
 from monad_ops.collector.process_restart import poll_invocations
-from monad_ops.collector.reference_rpc import fetch_reference_block
+from monad_ops.collector.reference_rpc import fetch_reference_block, reference_poll_interval_sec
 from monad_ops.collector.validator_set import fetch_validator_set
 from monad_ops.collector.version import fetch_version_status
 from monad_ops.config import Config, load_config
@@ -468,7 +468,7 @@ async def _cmd_run(args: argparse.Namespace) -> int:
         # fields and the UI shows "— unreachable" — same as the
         # fail-closed state, by design).
         url = config.node.reference_rpc_url
-        interval = max(5, int(config.node.reference_poll_sec))
+        interval = reference_poll_interval_sec(config.node.reference_poll_sec)
         lag_rule = ReferenceLagRule(
             warn_blocks=config.rules.reference_lag.warn_blocks,
             critical_blocks=config.rules.reference_lag.critical_blocks,

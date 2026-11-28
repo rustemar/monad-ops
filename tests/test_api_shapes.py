@@ -17,7 +17,9 @@ import httpx
 import pytest
 
 from monad_ops.api.app import build_app
+from monad_ops.api.routes import blocks as blocks_api
 from monad_ops.collector.probes import ProbeResult
+from monad_ops.collector.reference_rpc import ReferenceSample
 from monad_ops.config import Config, NodeConfig
 from monad_ops.rules.events import AlertEvent, Severity
 from monad_ops.state import State
@@ -110,6 +112,8 @@ async def test_api_state_shape(client: httpx.AsyncClient) -> None:
     }
     assert expected_keys <= set(body.keys())
     assert body["maintenance_until"] is None
+    assert body["reference_age_sec"] is None
+    assert body["reference_stale_after_sec"] == 57
     assert body["node_name"] == "test-node"
     # Epoch is a nested dict.
     assert isinstance(body["epoch"], dict)
@@ -123,6 +127,35 @@ async def test_api_state_shape(client: httpx.AsyncClient) -> None:
         "rounds_observed_5m",
         "local_timeouts_5m",
     } <= set(body["consensus"].keys())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("poll_sec", "checked_ms", "local", "age", "stale_after"), [
+    (1, 200_000, 99, 0, 27),           # Collector clamps polling to five seconds.
+    (15, 142_999, 99, 57.001, 57),     # Preserve precision through the boundary.
+    (60, 140_000, 99, 60, 192),        # A longer polling interval allows older samples.
+    (15, 200_001, 99, None, 57),       # Future timestamp.
+    (15, 0, 99, None, 57),             # No timestamp.
+    (15, 140_000, None, None, 57),     # An incomplete pair has no comparison age.
+])
+async def test_reference_comparison_age(monkeypatch, poll_sec, checked_ms, local, age, stale_after):
+    cfg = _minimal_config()
+    cfg.node.reference_poll_sec = poll_sec
+    state = State(storage=None)
+    state.set_reference(ReferenceSample(100, checked_ms, None, local_at_sample=local))
+    monkeypatch.setattr(blocks_api, "time_ns", lambda: 200_000 * 1_000_000)
+    app = build_app(state, cfg, enricher=None, labels=None)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/state")
+    response.raise_for_status()
+    payload = response.json()
+    assert payload["reference_age_sec"] == age
+    assert payload["reference_stale_after_sec"] == stale_after
+    assert payload["reference_block"] == 100
+    assert payload["reference_local_at_sample"] == local
+    assert payload["reference_checked_ms"] == checked_ms
 
 
 @pytest.mark.asyncio

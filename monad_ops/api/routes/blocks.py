@@ -7,12 +7,14 @@ Moved out of ``build_app`` unchanged (queue item R1, slice 7).
 from __future__ import annotations
 
 import asyncio
+from time import time_ns
 
 from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from monad_ops.api.context import ApiContext
 from monad_ops.api.public_alerts import public_alert
+from monad_ops.collector.reference_rpc import reference_stale_after_sec
 
 # In-memory snapshot, recomputed every block.
 _STATE_TTL = 1.0
@@ -23,6 +25,7 @@ _BLOCKS_TTL = 2.0
 def build_router(ctx: ApiContext) -> APIRouter:
     """Block and state routes bound to ``ctx``."""
     router = APIRouter()
+    stale_after_sec = reference_stale_after_sec(ctx.config.node.reference_poll_sec)
 
     # Cached first-block timestamp — only changes when new blocks arrive
     # earlier than what we've seen (extremely rare). Lazily populated.
@@ -45,6 +48,16 @@ def build_router(ctx: ApiContext) -> APIRouter:
     async def api_state() -> JSONResponse:
         async def _load():
             snap = ctx.state.snapshot()
+            # Use the sampler's host clock, independent of the viewer's clock.
+            now_ms = time_ns() // 1_000_000
+            checked_ms = snap.reference_checked_ms
+            reference_age_sec = None
+            if (
+                checked_ms is not None and 0 < checked_ms <= now_ms
+                and snap.reference_block is not None and snap.reference_local_at_sample is not None
+                and snap.reference_error is None
+            ):
+                reference_age_sec = (now_ms - checked_ms) / 1000
             return {
                 "node_name": ctx.config.node.name,
                 "data_start_ms": _get_data_start_ms(),
@@ -73,6 +86,8 @@ def build_router(ctx: ApiContext) -> APIRouter:
                 "last_reorg_ts_ms": snap.last_reorg_ts_ms,
                 "reference_block": snap.reference_block,
                 "reference_checked_ms": snap.reference_checked_ms,
+                "reference_age_sec": reference_age_sec,
+                "reference_stale_after_sec": stale_after_sec,
                 "reference_error": snap.reference_error,
                 "reference_local_at_sample": snap.reference_local_at_sample,
                 "maintenance_until": ctx.state.maintenance_until(),
